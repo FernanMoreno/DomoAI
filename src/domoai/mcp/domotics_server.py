@@ -14,6 +14,7 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.state_service import StateService
 from domoai.domain.models import Command, DeviceType, Plan, Policy
+from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
 from domoai.mcp.resources import (
     as_json,
@@ -42,6 +43,7 @@ class DomoticsMcpContext:
 
 
 def create_domotics_server(context: DomoticsMcpContext) -> FastMCP:
+    ensure_fastmcp_settings_ready()
     server = FastMCP(
         "DomoAI Domotics",
         instructions=(

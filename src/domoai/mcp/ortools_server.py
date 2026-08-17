@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ErrorDetail, StrictModel
+from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
 from domoai.optimizer.ports import OptimizationResult, OptimizationStatus
 from domoai.optimizer.scenario import OptimizationScenario
@@ -75,6 +76,7 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
 
 
 def create_ortools_server(context: OrtoolsMcpContext) -> FastMCP:
+    ensure_fastmcp_settings_ready()
     server = FastMCP(
         "DomoAI OR-Tools Optimization",
         instructions=(

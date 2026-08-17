@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "adapter_id": {
+      "minLength": 1,
+      "title": "Adapter Id",
+      "type": "string"
+    },
+    "external_id": {
+      "minLength": 1,
+      "title": "External Id",
+      "type": "string"
+    },
+    "external_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "External Type"
+    },
+    "metadata_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Metadata Digest"
+    }
+  },
+  "required": [
+    "adapter_id",
+    "external_id"
+  ],
+  "title": "SourceRef",
+  "type": "object"
+}

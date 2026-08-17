@@ -1,0 +1,42 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "living_room.main_light",
+      "name": "Main Light",
+      "area_id": "living_room",
+      "semantic_type": "light",
+      "manufacturer": "KNX Virtual",
+      "model": "ETS lab project",
+      "capabilities": [
+        {
+          "name": "power",
+          "dpt": "1.001",
+          "state_group_address": "1/0/1",
+          "command_group_address": "1/0/0"
+        },
+        {
+          "name": "brightness",
+          "dpt": "5.001",
+          "state_group_address": "1/0/3",
+          "command_group_address": "1/0/2"
+        }
+      ]
+    },
+    {
+      "entity_id": "living_room.temperature",
+      "name": "Temperature",
+      "area_id": "living_room",
+      "semantic_type": "sensor",
+      "manufacturer": "KNX Virtual",
+      "model": "ETS lab project",
+      "capabilities": [
+        {
+          "name": "temperature",
+          "dpt": "9.001",
+          "state_group_address": "1/1/0"
+        }
+      ]
+    }
+  ]
+}

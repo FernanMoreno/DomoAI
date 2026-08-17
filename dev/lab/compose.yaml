@@ -1,0 +1,82 @@
+name: domoai-lab
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/version' -C 1 -W 2 >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  zigbee2mqtt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "/app/mqtt/fake_zigbee2mqtt.py"]
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      Z2M_BASE_TOPIC: zigbee2mqtt
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('mqtt', 1883), 2).close()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  modbus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - pymodbus.simulator
+      - --json_file
+      - /app/modbus/simulator.json
+      - --modbus_server
+      - server
+      - --modbus_device
+      - virtual_home
+      - --http_host
+      - 0.0.0.0
+      - --http_port
+      - "8081"
+      - --log
+      - info
+    ports:
+      - "1502:1502"
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 1502), 2).close()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  homeassistant:
+    profiles: ["homeassistant"]
+    image: ghcr.io/home-assistant/home-assistant:stable
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: Europe/Madrid
+    volumes:
+      - ./homeassistant:/config
+
+  matter-server:
+    profiles: ["matter"]
+    image: ghcr.io/matter-js/matterjs-server:stable
+    command: ["--storage-path", "/data"]
+    ports:
+      - "5580:5580"
+    volumes:
+      - matter-data:/data
+
+volumes:
+  matter-data:

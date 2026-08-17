@@ -1,0 +1,109 @@
+{
+  "additionalProperties": false,
+  "description": "Versioned, credential-free metadata for one photovoltaic installation.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "profile_id": {
+      "default": "home",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "latitude": {
+      "maximum": 90,
+      "minimum": -90,
+      "title": "Latitude",
+      "type": "number"
+    },
+    "longitude": {
+      "maximum": 180,
+      "minimum": -180,
+      "title": "Longitude",
+      "type": "number"
+    },
+    "installed_kwp": {
+      "exclusiveMinimum": 0,
+      "title": "Installed Kwp",
+      "type": "number"
+    },
+    "tilt": {
+      "maximum": 90,
+      "minimum": 0,
+      "title": "Tilt",
+      "type": "number"
+    },
+    "azimuth": {
+      "maximum": 180,
+      "minimum": -180,
+      "title": "Azimuth",
+      "type": "number"
+    },
+    "performance_ratio": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Performance Ratio",
+      "type": "number"
+    },
+    "inverter_ac_max_kw": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Inverter Ac Max Kw"
+    },
+    "timezone": {
+      "default": "Europe/Madrid",
+      "minLength": 1,
+      "title": "Timezone",
+      "type": "string"
+    },
+    "source_id": {
+      "default": "operator_config",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "default": "v1",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "captured_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Captured At"
+    }
+  },
+  "required": [
+    "latitude",
+    "longitude",
+    "installed_kwp",
+    "tilt",
+    "azimuth",
+    "performance_ratio"
+  ],
+  "title": "SolarInstallationProfile",
+  "type": "object"
+}

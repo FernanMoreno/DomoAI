@@ -1,0 +1,229 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "readable": {
+          "title": "Readable",
+          "type": "boolean"
+        },
+        "writable": {
+          "title": "Writable",
+          "type": "boolean"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "enum_values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "constraints": {
+          "additionalProperties": true,
+          "title": "Constraints",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "readable",
+        "writable"
+      ],
+      "title": "Capability",
+      "type": "object"
+    },
+    "CapabilityKind": {
+      "enum": [
+        "boolean",
+        "integer",
+        "number",
+        "enum",
+        "text",
+        "timestamp"
+      ],
+      "title": "CapabilityKind",
+      "type": "string"
+    },
+    "DeviceType": {
+      "enum": [
+        "light",
+        "switch",
+        "cover",
+        "climate",
+        "sensor",
+        "energy",
+        "ev_charger",
+        "unsupported"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "ProviderRole": {
+      "enum": [
+        "telemetry",
+        "commands"
+      ],
+      "title": "ProviderRole",
+      "type": "string"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "Stable, non-secret declaration of a provider package.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "protocol": {
+      "minLength": 1,
+      "title": "Protocol",
+      "type": "string"
+    },
+    "package_name": {
+      "minLength": 1,
+      "title": "Package Name",
+      "type": "string"
+    },
+    "package_version": {
+      "minLength": 1,
+      "title": "Package Version",
+      "type": "string"
+    },
+    "roles": {
+      "items": {
+        "$ref": "#/$defs/ProviderRole"
+      },
+      "minItems": 1,
+      "title": "Roles",
+      "type": "array"
+    },
+    "device_types": {
+      "items": {
+        "$ref": "#/$defs/DeviceType"
+      },
+      "minItems": 1,
+      "title": "Device Types",
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "minItems": 1,
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "provider_id",
+    "name",
+    "protocol",
+    "package_name",
+    "package_version",
+    "roles",
+    "device_types",
+    "capabilities"
+  ],
+  "title": "ProviderManifest",
+  "type": "object"
+}

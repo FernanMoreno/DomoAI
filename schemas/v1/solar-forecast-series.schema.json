@@ -1,0 +1,110 @@
+{
+  "$defs": {
+    "Horizon": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "format": "date-time",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "format": "date-time",
+          "title": "End",
+          "type": "string"
+        },
+        "resolution_minutes": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution Minutes",
+          "type": "integer"
+        },
+        "timezone": {
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "resolution_minutes",
+        "timezone"
+      ],
+      "title": "Horizon",
+      "type": "object"
+    },
+    "SolarForecastPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "power": {
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "power"
+      ],
+      "title": "SolarForecastPoint",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One canonical solar power forecast point per slot.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "horizon": {
+      "$ref": "#/$defs/Horizon"
+    },
+    "source_id": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "points": {
+      "items": {
+        "$ref": "#/$defs/SolarForecastPoint"
+      },
+      "title": "Points",
+      "type": "array"
+    }
+  },
+  "required": [
+    "horizon",
+    "source_id",
+    "source_revision",
+    "observed_at",
+    "points"
+  ],
+  "title": "SolarForecastSeries",
+  "type": "object"
+}

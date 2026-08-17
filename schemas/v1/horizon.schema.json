@@ -1,0 +1,33 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "start": {
+      "format": "date-time",
+      "title": "Start",
+      "type": "string"
+    },
+    "end": {
+      "format": "date-time",
+      "title": "End",
+      "type": "string"
+    },
+    "resolution_minutes": {
+      "exclusiveMinimum": 0,
+      "title": "Resolution Minutes",
+      "type": "integer"
+    },
+    "timezone": {
+      "minLength": 1,
+      "title": "Timezone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "start",
+    "end",
+    "resolution_minutes",
+    "timezone"
+  ],
+  "title": "Horizon",
+  "type": "object"
+}

@@ -1,0 +1,131 @@
+{
+  "$defs": {
+    "ExecutionStatus": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unavailable",
+        "failed",
+        "cancelled",
+        "confirmed_success",
+        "unknown"
+      ],
+      "title": "ExecutionStatus",
+      "type": "string"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Safe outcome returned by a command-capable provider.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "external_device_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "External Device Id",
+      "type": "string"
+    },
+    "command": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Command",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ExecutionStatus"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "source_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "provider_id",
+    "external_device_id",
+    "command",
+    "status",
+    "completed_at"
+  ],
+  "title": "ProviderExecutionResult",
+  "type": "object"
+}

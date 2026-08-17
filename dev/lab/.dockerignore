@@ -1,0 +1,12 @@
+.env
+.env.*
+*.secret
+*.token
+__pycache__/
+*.pyc
+data/
+volumes/
+.git/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

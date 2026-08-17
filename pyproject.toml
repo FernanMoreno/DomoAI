@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "domoai"
+version = "0.1.0"
+description = "Universal agentic domotics runtime and MCP integrations"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiomqtt>=2.5,<3",
+    "httpx>=0.28,<1",
+    "jsonschema>=4.23,<5",
+    "mcp>=1.27,<2",
+    "ortools>=9.12,<10",
+    "pydantic>=2.11,<3",
+    "pymodbus>=3.9,<4",
+    "xknx>=3.16,<4",
+    "websockets>=15,<16",
+]
+
+[project.scripts]
+domoai-mcp = "domoai.mcp.stdio:main"
+domoai-ortools-mcp = "domoai.mcp.ortools_stdio:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "pytest-cov>=6,<7",
+    "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/domoai"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["domoai"]
+mypy_path = "src"

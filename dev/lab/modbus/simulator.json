@@ -1,0 +1,54 @@
+{
+  "server_list": {
+    "server": {
+      "comm": "tcp",
+      "host": "0.0.0.0",
+      "port": 1502,
+      "ignore_missing_devices": false,
+      "framer": "socket",
+      "device_id": 1
+    }
+  },
+  "device_list": {
+    "virtual_home": {
+      "setup": {
+        "co size": 128,
+        "di size": 128,
+        "hr size": 256,
+        "ir size": 256,
+        "shared blocks": true,
+        "type exception": true,
+        "defaults": {
+          "value": {
+            "bits": 0,
+            "uint16": 0,
+            "uint32": 0,
+            "float32": 0.0,
+            "string": " "
+          },
+          "action": {
+            "bits": null,
+            "uint16": null,
+            "uint32": null,
+            "float32": null,
+            "string": null
+          }
+        }
+      },
+      "invalid": [],
+      "write": [0, 10],
+      "bits": [
+        {"addr": 0, "value": 1}
+      ],
+      "uint16": [
+        {"addr": 10, "value": 60, "action": null},
+        {"addr": 20, "value": 215, "action": null},
+        {"addr": 21, "value": 480, "action": null}
+      ],
+      "uint32": [],
+      "float32": [],
+      "string": [],
+      "repeat": []
+    }
+  }
+}

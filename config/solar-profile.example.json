@@ -1,0 +1,14 @@
+{
+  "schema_version": "v1",
+  "profile_id": "home",
+  "latitude": 40.4168,
+  "longitude": -3.7038,
+  "installed_kwp": 6.0,
+  "tilt": 30.0,
+  "azimuth": 0.0,
+  "performance_ratio": 0.82,
+  "inverter_ac_max_kw": 5.0,
+  "timezone": "Europe/Madrid",
+  "source_id": "operator_config",
+  "source_revision": "replace-me"
+}

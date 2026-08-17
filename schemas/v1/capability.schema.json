@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "CapabilityKind": {
+      "enum": [
+        "boolean",
+        "integer",
+        "number",
+        "enum",
+        "text",
+        "timestamp"
+      ],
+      "title": "CapabilityKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/CapabilityKind"
+    },
+    "unit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unit"
+    },
+    "readable": {
+      "title": "Readable",
+      "type": "boolean"
+    },
+    "writable": {
+      "title": "Writable",
+      "type": "boolean"
+    },
+    "minimum": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Minimum"
+    },
+    "maximum": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Maximum"
+    },
+    "enum_values": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Enum Values",
+      "type": "array"
+    },
+    "commands": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Commands",
+      "type": "array"
+    },
+    "constraints": {
+      "additionalProperties": true,
+      "title": "Constraints",
+      "type": "object"
+    }
+  },
+  "required": [
+    "name",
+    "kind",
+    "readable",
+    "writable"
+  ],
+  "title": "Capability",
+  "type": "object"
+}

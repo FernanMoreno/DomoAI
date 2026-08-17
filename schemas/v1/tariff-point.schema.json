@@ -1,0 +1,26 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "slot": {
+      "minimum": 0,
+      "title": "Slot",
+      "type": "integer"
+    },
+    "price_per_kwh": {
+      "title": "Price Per Kwh",
+      "type": "number"
+    },
+    "currency": {
+      "pattern": "^[A-Z]{3}$",
+      "title": "Currency",
+      "type": "string"
+    }
+  },
+  "required": [
+    "slot",
+    "price_per_kwh",
+    "currency"
+  ],
+  "title": "TariffPoint",
+  "type": "object"
+}

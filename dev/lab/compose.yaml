@@ -72,11 +72,24 @@ services:
   matter-server:
     profiles: ["matter"]
     image: ghcr.io/matter-js/matterjs-server:stable
-    command: ["--storage-path", "/data"]
+    command: ["--storage-path", "/data", "--enable-test-net-dcl"]
+    depends_on:
+      matter-device:
+        condition: service_started
     ports:
       - "5580:5580"
     volumes:
       - matter-data:/data
 
+  matter-device:
+    profiles: ["matter"]
+    build:
+      context: .
+      dockerfile: matter-device/Dockerfile
+    command: ["matter-device", "--store", "/data"]
+    volumes:
+      - matter-device-data:/data
+
 volumes:
   matter-data:
+  matter-device-data:

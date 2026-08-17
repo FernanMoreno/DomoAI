@@ -78,6 +78,25 @@ def test_mapper_projects_light_sensor_and_unsupported_endpoints() -> None:
     assert unsupported["reason"] == "unsupported Matter device type"
 
 
+def test_mapper_accepts_matter_js_numeric_descriptor_fields() -> None:
+    node = node_snapshot(5, profile="onoff_light")
+    node["attributes"]["1/29/0"] = [{"0": 0x0100, "1": 3}]
+
+    snapshot = MatterMapper().to_snapshot([node])
+    light = next(
+        entity
+        for entity in snapshot.source_entities
+        if entity["entity_id"] == "node:5/endpoint:1"
+    )
+    power = next(
+        capability for capability in light["capabilities"] if capability["name"] == "power"
+    )
+
+    assert light["semantic_type"] == "light"
+    assert power["writable"] is True
+    assert power["commands"] == ["turn_on", "turn_off", "toggle"]
+
+
 def test_mapper_converts_attribute_units_and_rejects_invalid_levels() -> None:
     mapper = MatterMapper()
     node = sensor_node(2)

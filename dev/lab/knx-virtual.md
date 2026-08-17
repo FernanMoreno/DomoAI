@@ -28,3 +28,16 @@ uv run pytest -q tests/integration/test_knx_smoke.py
 
 The addresses in the JSON are a reference only until they are confirmed in
 ETS/KNX Virtual. The smoke must remain skipped when the VM is unavailable.
+
+## Current validation boundary (2026-08-17)
+
+The local KNX contract and fixture checks pass (`23 passed, 1 skipped` when
+including the live smoke). The live smoke is honestly skipped in this checkout:
+`DOMOAI_KNX_*` is unset, no KNX/ETS process is present, and no local UDP/TCP
+listener is bound to port `3671`. The `xknx` package being installed does not
+constitute a gateway.
+
+This closes the fixture-first/local acceptance described by Specs 006 and 019;
+live `connect()`/`discover()` remains externally blocked until a KNX Virtual/ETS
+gateway and its confirmed group-address mapping are supplied. Never infer the
+gateway address or replace the reference mapping from fixture data.

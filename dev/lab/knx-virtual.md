@@ -3,6 +3,18 @@
 This profile is intentionally outside the Docker stack. KNX Virtual and ETS
 run on Windows or a Windows VM, while DomoAI may run in Linux/WSL.
 
+## External prerequisites
+
+KNX Virtual is free, but its official download requires a MyKNX account. The
+official installation guidance requires Windows with the latest ETS installed
+on the same machine. Use only the [KNX Virtual download page](https://www.knx.org/professionals/knx-virtual)
+and the [official installation guide](https://support.knx.org/hc/en-us/articles/4502160238354-Download-installation);
+never add MyKNX credentials or downloaded binaries to this repository.
+
+The 2026-08-17 audit found no KNX Virtual/ETS installer or process in the
+Windows/WSL environment. Until those prerequisites are installed and the ETS
+group addresses are confirmed, the live smoke remains intentionally skipped.
+
 ## Network checklist
 
 1. Create the virtual project in ETS and use the group addresses in

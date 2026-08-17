@@ -16,6 +16,9 @@ build/
 .env.*
 !.env.example
 
+# Local installation metadata; keep real or lab profile out of Git.
+config/solar-profile.json
+
 # Home Assistant lab runtime state (auth, database, logs and generated metadata)
 dev/lab/homeassistant/.cache/
 dev/lab/homeassistant/.storage/

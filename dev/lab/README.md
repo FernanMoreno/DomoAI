@@ -163,15 +163,35 @@ laboratorio ya está arrancado, puedes iniciar solo este perfil con
 
 ## Otros perfiles manuales
 
-Matter Server:
+Matter Server + Matter.js virtual light:
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile matter up -d matter-server
+docker compose -f dev/lab/compose.yaml --profile matter up -d --build matter-server
 export DOMOAI_MATTER_SERVER_URL="ws://127.0.0.1:5580/ws"
 ```
 
-El servidor permite validar WebSocket. Para afirmar discovery hace falta
-commissionar un nodo Matter virtual; el compose no inventa nodos.
+El perfil arranca Matter Server y un nodo On/Off Matter.js sintético en la
+misma red Docker. `--enable-test-net-dcl` es obligatorio para este nodo de
+desarrollo y queda limitado al perfil virtual; no debe copiarse a producción.
+
+La primera vez, abre `http://127.0.0.1:5580/` y commissiona el dispositivo con
+el pairing code que muestran los logs de `matter-device`:
+
+```bash
+docker compose -f dev/lab/compose.yaml --profile matter logs matter-device \
+  | grep "manual pairing code"
+```
+
+Después valida la ruta real DomoAI → Matter Server → nodo comisionado:
+
+```bash
+DOMOAI_MATTER_SERVER_URL="ws://127.0.0.1:5580/ws" \
+  uv run pytest -q tests/integration/test_matter_server_smoke.py
+```
+
+El smoke es opt-in y requiere que el nodo esté comisionado. El compose crea
+el nodo virtual, pero no lo commissiona automáticamente para evitar cambios
+de estado ocultos.
 
 KNX Virtual/ETS está documentado en [`knx-virtual.md`](knx-virtual.md). Requiere
 Windows o una VM, una interfaz KNXnet/IP accesible y confirmación de las

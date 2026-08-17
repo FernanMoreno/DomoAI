@@ -296,7 +296,12 @@ class MatterMapper:
         for item in value:
             if not isinstance(item, dict):
                 continue
-            raw_type = item.get("deviceType", item.get("device_type"))
+            # Python Matter Server uses named fields; matter.js serializes the
+            # same struct with numeric fields (0=device type, 1=revision).
+            raw_type = item.get(
+                "deviceType",
+                item.get("device_type", item.get("0")),
+            )
             if isinstance(raw_type, int) and not isinstance(raw_type, bool):
                 result.add(raw_type)
         return result

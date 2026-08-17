@@ -1,0 +1,62 @@
+{
+  "additionalProperties": false,
+  "description": "Sanitized, stable error information exposed across the provider boundary.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "code": {
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "provider_id": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "message": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "retryable": {
+      "title": "Retryable",
+      "type": "boolean"
+    },
+    "details": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          }
+        ]
+      },
+      "title": "Details",
+      "type": "object"
+    }
+  },
+  "required": [
+    "code",
+    "provider_id",
+    "message",
+    "retryable"
+  ],
+  "title": "EnergyProviderDiagnostic",
+  "type": "object"
+}

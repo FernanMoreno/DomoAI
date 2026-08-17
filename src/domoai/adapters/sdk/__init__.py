@@ -1,0 +1,77 @@
+"""Public third-party adapter SDK surface."""
+
+from domoai.domain.provider import (
+    PROVIDER_CONTRACT_VERSION,
+    PROVIDER_SCHEMA_VERSION,
+    DeviceDescriptor,
+    Measurement,
+    MeasurementQuality,
+    ProviderCollectionResult,
+    ProviderCommand,
+    ProviderDiagnostic,
+    ProviderDiscoveryResult,
+    ProviderExecutionResult,
+    ProviderManifest,
+    ProviderRole,
+)
+from domoai.runtime.provider_sdk import (
+    CommandProviderPort,
+    DuplicateProviderError,
+    ProviderRegistry,
+    ProviderRegistryError,
+    TelemetryProviderPort,
+)
+
+from .conformance import ConformanceCheck, ConformanceHarness, ConformanceResult
+from .manifest import (
+    ADAPTER_CONTRACT_VERSION,
+    ADAPTER_ENTRY_POINT_GROUP,
+    ADAPTER_SDK_SCHEMA_VERSION,
+    AdapterManifest,
+    CapabilityCompatibility,
+    CapabilityCompatibilityStatus,
+    CapabilityDeclaration,
+    CompatibilityDiagnostic,
+    CompatibilityReport,
+    CompatibilityStatus,
+    DiagnosticSeverity,
+)
+from .registry import AdapterFactory, AdapterRegistration, AdapterRegistry, DuplicateAdapterError
+
+__all__ = [
+    "ADAPTER_CONTRACT_VERSION",
+    "ADAPTER_ENTRY_POINT_GROUP",
+    "ADAPTER_SDK_SCHEMA_VERSION",
+    "AdapterFactory",
+    "AdapterManifest",
+    "AdapterRegistration",
+    "AdapterRegistry",
+    "CapabilityCompatibility",
+    "CapabilityCompatibilityStatus",
+    "CapabilityDeclaration",
+    "CompatibilityDiagnostic",
+    "CompatibilityReport",
+    "CompatibilityStatus",
+    "ConformanceCheck",
+    "ConformanceHarness",
+    "ConformanceResult",
+    "DiagnosticSeverity",
+    "DuplicateAdapterError",
+    "CommandProviderPort",
+    "DeviceDescriptor",
+    "DuplicateProviderError",
+    "Measurement",
+    "MeasurementQuality",
+    "ProviderCollectionResult",
+    "ProviderCommand",
+    "PROVIDER_CONTRACT_VERSION",
+    "ProviderDiagnostic",
+    "ProviderDiscoveryResult",
+    "ProviderExecutionResult",
+    "ProviderManifest",
+    "ProviderRegistry",
+    "ProviderRegistryError",
+    "ProviderRole",
+    "PROVIDER_SCHEMA_VERSION",
+    "TelemetryProviderPort",
+]

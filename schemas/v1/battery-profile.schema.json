@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "capacity_kwh": {
+      "exclusiveMinimum": 0,
+      "title": "Capacity Kwh",
+      "type": "number"
+    },
+    "initial_soc_kwh": {
+      "minimum": 0,
+      "title": "Initial Soc Kwh",
+      "type": "number"
+    },
+    "min_soc_kwh": {
+      "minimum": 0,
+      "title": "Min Soc Kwh",
+      "type": "number"
+    },
+    "max_soc_kwh": {
+      "exclusiveMinimum": 0,
+      "title": "Max Soc Kwh",
+      "type": "number"
+    },
+    "max_charge_kw": {
+      "minimum": 0,
+      "title": "Max Charge Kw",
+      "type": "number"
+    },
+    "max_discharge_kw": {
+      "minimum": 0,
+      "title": "Max Discharge Kw",
+      "type": "number"
+    },
+    "charge_efficiency": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Charge Efficiency",
+      "type": "number"
+    },
+    "discharge_efficiency": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Discharge Efficiency",
+      "type": "number"
+    }
+  },
+  "required": [
+    "capacity_kwh",
+    "initial_soc_kwh",
+    "min_soc_kwh",
+    "max_soc_kwh",
+    "max_charge_kw",
+    "max_discharge_kw",
+    "charge_efficiency",
+    "discharge_efficiency"
+  ],
+  "title": "BatteryProfile",
+  "type": "object"
+}

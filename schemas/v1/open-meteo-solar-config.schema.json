@@ -1,0 +1,70 @@
+{
+  "additionalProperties": false,
+  "description": "Explicit assumptions needed to turn irradiance into AC power.",
+  "properties": {
+    "latitude": {
+      "maximum": 90,
+      "minimum": -90,
+      "title": "Latitude",
+      "type": "number"
+    },
+    "longitude": {
+      "maximum": 180,
+      "minimum": -180,
+      "title": "Longitude",
+      "type": "number"
+    },
+    "installed_kwp": {
+      "exclusiveMinimum": 0,
+      "title": "Installed Kwp",
+      "type": "number"
+    },
+    "tilt": {
+      "maximum": 90,
+      "minimum": 0,
+      "title": "Tilt",
+      "type": "number"
+    },
+    "azimuth": {
+      "maximum": 180,
+      "minimum": -180,
+      "title": "Azimuth",
+      "type": "number"
+    },
+    "performance_ratio": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Performance Ratio",
+      "type": "number"
+    },
+    "inverter_ac_max_kw": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Inverter Ac Max Kw"
+    },
+    "timezone": {
+      "minLength": 1,
+      "title": "Timezone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "latitude",
+    "longitude",
+    "installed_kwp",
+    "tilt",
+    "azimuth",
+    "performance_ratio",
+    "timezone"
+  ],
+  "title": "OpenMeteoSolarConfig",
+  "type": "object"
+}

@@ -1,0 +1,397 @@
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import ANY
+
+import pytest
+
+from domoai.domain.models import StateStatus
+from domoai.skills.workflow import (
+    ApprovalDecision,
+    EnergySkillRequest,
+    EnergySkillWorkflow,
+    WorkflowStage,
+    WorkflowStatus,
+)
+from tests.fixtures.skill_workflow import (
+    build_workflow_fixture,
+    light_device_id,
+    scenario_for,
+)
+
+
+def request_for(fixture: Any, **scenario_options: Any) -> EnergySkillRequest:
+    device_id = light_device_id(fixture)
+    return EnergySkillRequest(
+        scenario=scenario_for(device_id, **scenario_options),
+        devices=[device_id],
+        capabilities=["brightness"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_routes_semantic_operations_across_both_mcp_servers() -> None:
+    fixture = await build_workflow_fixture(confirmation_required=True)
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    result = await workflow.run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.AWAITING_APPROVAL
+    assert result.stage is WorkflowStage.AWAITING_APPROVAL
+    assert result.completed_operations == [
+        "discover_devices",
+        "get_state",
+        "get_energy_context",
+        "optimize_scenario",
+        "validate_plan",
+        "explain_solution",
+        "operator_approval",
+    ]
+    assert fixture.router.calls == [
+        ("domotics", "discover_devices", {"refresh": False}),
+        (
+            "domotics",
+            "get_state",
+            {
+                "devices": [light_device_id(fixture)],
+                "capabilities": ["brightness"],
+                "allow_stale": True,
+            },
+        ),
+        ("domotics", "get_energy_context", ANY),
+        ("ortools", "optimize_scenario", ANY),
+        ("domotics", "validate_plan", ANY),
+        ("ortools", "explain_solution", ANY),
+    ]
+    optimize_arguments = fixture.router.calls[3][2]
+    assert optimize_arguments["scenario"]["energy_context"]["schema_version"] == "v1"
+    assert fixture.domotics_adapter.calls == []
+    assert result.plan_id
+    assert result.validation_digest
+    assert fixture.approval.requests
+
+
+@pytest.mark.asyncio
+async def test_workflow_pauses_then_resumes_through_domotics_execute_once() -> None:
+    fixture = await build_workflow_fixture(confirmation_required=True)
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    pending = await workflow.run(request_for(fixture))
+
+    approval = ApprovalDecision(
+        approved=True,
+        approved_by="fixture-operator",
+        validation_digest=pending.validation_digest or "",
+    )
+    completed = await workflow.resume(pending, approval)
+    repeated = await workflow.resume(pending, approval)
+
+    assert completed.status is WorkflowStatus.COMPLETED
+    assert completed.stage is WorkflowStage.COMPLETED
+    assert [call[0:2] for call in fixture.router.calls] == [
+        ("domotics", "discover_devices"),
+        ("domotics", "get_state"),
+        ("domotics", "get_energy_context"),
+        ("ortools", "optimize_scenario"),
+        ("domotics", "validate_plan"),
+        ("ortools", "explain_solution"),
+        ("domotics", "execute_plan"),
+    ]
+    assert len(fixture.domotics_adapter.calls) == 1
+    assert repeated == completed
+    assert completed.stage_history == [
+        WorkflowStage.STARTED,
+        WorkflowStage.CONTEXT_READY,
+        WorkflowStage.PROPOSAL_READY,
+        WorkflowStage.VALIDATED,
+        WorkflowStage.AWAITING_APPROVAL,
+        WorkflowStage.EXECUTING,
+        WorkflowStage.COMPLETED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_safe_plan_executes_without_synthetic_operator_approval() -> None:
+    fixture = await build_workflow_fixture()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    result = await workflow.run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert result.completed_operations[-1] == "execute_plan"
+    assert fixture.approval.requests == []
+    assert len(fixture.domotics_adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_rejects_unknown_input_before_any_mcp_call() -> None:
+    fixture = await build_workflow_fixture()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    device_id = light_device_id(fixture)
+    scenario = scenario_for(device_id)
+
+    result = await workflow.run(
+        {
+            "scenario": scenario.model_dump(mode="json"),
+            "devices": [device_id],
+            "unexpected": True,
+        }
+    )
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.stage is WorkflowStage.STARTED
+    assert result.diagnostics[0].code == "invalid_workflow_input"
+    assert fixture.router.calls == []
+
+
+@pytest.mark.asyncio
+async def test_workflow_stops_on_stale_state_before_optimization() -> None:
+    fixture = await build_workflow_fixture()
+    await fixture.domotics_context.discovery.state_store.mark_all_stale()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    result = await workflow.run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.stage is WorkflowStage.CONTEXT_READY
+    assert result.diagnostics[0].code == "stale_state"
+    assert [call[1] for call in fixture.router.calls] == ["discover_devices", "get_state"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_stale_assumption_allows_stale_state() -> None:
+    fixture = await build_workflow_fixture()
+    await fixture.domotics_context.discovery.state_store.mark_all_stale()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    request = request_for(fixture).model_copy(update={"accept_stale_assumption": True})
+
+    result = await workflow.run(request)
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert fixture.router.calls[-1][1] == "execute_plan"
+
+
+@pytest.mark.asyncio
+async def test_stale_energy_context_stops_before_optimization() -> None:
+    fixture = await build_workflow_fixture()
+    original = fixture.router.call
+
+    async def stale_context(provider: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        response = await original(provider, tool, arguments)
+        if tool == "get_energy_context":
+            response["runtime_revision"] = "stale-runtime-revision"
+        return response
+
+    fixture.router.call = stale_context  # type: ignore[method-assign]
+    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "stale_energy_context"
+    assert [call[1] for call in fixture.router.calls] == [
+        "discover_devices",
+        "get_state",
+        "get_energy_context",
+    ]
+    assert fixture.domotics_adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_energy_context_stops_before_optimization() -> None:
+    fixture = await build_workflow_fixture()
+    original = fixture.router.call
+
+    async def invalid_context(
+        provider: str, tool: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        response = await original(provider, tool, arguments)
+        if tool == "get_energy_context":
+            response["context"] = {"schema_version": "v1"}
+        return response
+
+    fixture.router.call = invalid_context  # type: ignore[method-assign]
+    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "invalid_energy_context"
+    assert all(call[1] != "optimize_scenario" for call in fixture.router.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario_options", "expected_code"),
+    [
+        ({"max_power": 50}, "infeasible_proposal"),
+        ({"solver_time_limit_seconds": 0}, "timeout_proposal"),
+    ],
+)
+async def test_failed_optimizer_statuses_stop_before_validation(
+    scenario_options: dict[str, Any], expected_code: str
+) -> None:
+    fixture = await build_workflow_fixture()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    result = await workflow.run(request_for(fixture, **scenario_options))
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == expected_code
+    assert [call[1] for call in fixture.router.calls] == [
+        "discover_devices",
+        "get_state",
+        "get_energy_context",
+        "optimize_scenario",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_proposal_status_stops_before_validation() -> None:
+    fixture = await build_workflow_fixture()
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    request = request_for(fixture).model_copy(
+        update={
+            "scenario": scenario_for("unknown.device"),
+        }
+    )
+
+    result = await workflow.run(request)
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "invalid_proposal"
+    assert [call[1] for call in fixture.router.calls] == [
+        "discover_devices",
+        "get_state",
+        "get_energy_context",
+        "optimize_scenario",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_revision_change_blocks_before_execution() -> None:
+    fixture = await build_workflow_fixture(confirmation_required=True)
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    pending = await workflow.run(request_for(fixture))
+    fixture.domotics_context.discovery.state_store.begin_revision()
+
+    result = await workflow.resume(
+        pending,
+        ApprovalDecision(
+            approved=True,
+            approved_by="fixture-operator",
+            validation_digest=pending.validation_digest or "",
+        ),
+    )
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "runtime_revision_changed"
+    assert fixture.domotics_adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_approval_and_mismatched_digest_never_execute() -> None:
+    fixture = await build_workflow_fixture(confirmation_required=True)
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    pending = await workflow.run(request_for(fixture))
+
+    missing = await workflow.resume(pending, None)
+    mismatched = await workflow.resume(
+        pending,
+        ApprovalDecision(
+            approved=True,
+            approved_by="fixture-operator",
+            validation_digest="wrong-digest",
+        ),
+    )
+
+    assert missing.status is WorkflowStatus.AWAITING_APPROVAL
+    assert mismatched.status is WorkflowStatus.BLOCKED
+    assert fixture.domotics_adapter.calls == []
+    assert all(call[1] != "execute_plan" for call in fixture.router.calls)
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_response_is_sanitized_and_stops() -> None:
+    fixture = await build_workflow_fixture()
+    original = fixture.router.call
+
+    async def malformed(provider: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool == "get_state":
+            fixture.router.calls.append((provider, tool, arguments))
+            return {"unexpected": object()}
+        return await original(provider, tool, arguments)
+
+    fixture.router.call = malformed  # type: ignore[method-assign]
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    result = await workflow.run(request_for(fixture))
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.diagnostics[0].code == "malformed_response"
+    assert fixture.domotics_adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_state_status_invalid_is_not_overridden_by_stale_assumption() -> None:
+    fixture = await build_workflow_fixture()
+    device_id = light_device_id(fixture)
+    states = await fixture.domotics_context.discovery.state_store.all()
+    target = next(
+        state
+        for state in states
+        if state.device_id == device_id and state.capability == "brightness"
+    )
+    await fixture.domotics_context.discovery.state_store.save(
+        target.model_copy(update={"status": StateStatus.INVALID})
+    )
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    request = request_for(fixture).model_copy(update={"accept_stale_assumption": True})
+
+    result = await workflow.run(request)
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "invalid_state"
+
+
+@pytest.mark.asyncio
+async def test_two_host_role_mappings_produce_equivalent_traces() -> None:
+    first = await build_workflow_fixture()
+    second = await build_workflow_fixture(
+        tool_aliases={
+            ("domotics", "discover_devices"): "discover_devices",
+            ("domotics", "get_state"): "get_state",
+            ("domotics", "get_energy_context"): "get_energy_context",
+            ("ortools", "optimize_scenario"): "optimize_scenario",
+            ("domotics", "validate_plan"): "validate_plan",
+            ("ortools", "explain_solution"): "explain_solution",
+            ("domotics", "execute_plan"): "execute_plan",
+        }
+    )
+    first_result = await EnergySkillWorkflow(first.router, first.approval).run(request_for(first))
+    second_result = await EnergySkillWorkflow(second.router, second.approval).run(
+        request_for(second)
+    )
+
+    assert first_result.status is second_result.status is WorkflowStatus.COMPLETED
+    assert [(provider, tool) for provider, tool, _ in first.router.calls] == [
+        (provider, tool) for provider, tool, _ in second.router.calls
+    ]
+    assert first_result.plan_id == second_result.plan_id
+    assert first_result.validation_digest == second_result.validation_digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_binding",
+    [
+        ("hue", "turn_on"),
+        ("domotics", "vendor_cluster"),
+        ("ortools", "execute_python"),
+    ],
+)
+async def test_router_rejects_nonportable_routes(
+    invalid_binding: tuple[str, str],
+) -> None:
+    fixture = await build_workflow_fixture()
+    with pytest.raises(ValueError, match="portable v1 or v2 routes"):
+        EnergySkillWorkflow(
+            fixture.router,
+            fixture.approval,
+            operation_bindings={"discover_devices": (*invalid_binding, "read")},
+        )

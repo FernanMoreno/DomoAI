@@ -1,0 +1,91 @@
+from datetime import UTC, datetime
+
+import pytest
+
+from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+from domoai.application.discovery_service import DiscoveryService
+from domoai.application.plan_service import PlanService
+from domoai.domain.errors import DomainError
+from domoai.domain.models import Command, Policy, PolicyAction
+from domoai.runtime.events import AuditLog
+from domoai.runtime.policy_engine import PolicyEngine
+from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.state_store import StateStore
+
+
+async def build_service(policies: list[Policy] | None = None) -> PlanService:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    return PlanService(registry, state_store, PolicyEngine(policies or []), AuditLog())
+
+
+@pytest.mark.asyncio
+async def test_create_plan_normalizes_declared_capability_unit() -> None:
+    service = await build_service()
+    device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    command = Command(
+        id="command-normalized-1",
+        device_id=device_id,
+        command="set_brightness",
+        value=60,
+        idempotency_key="intent-normalized-1",
+    )
+
+    plan = service.create_plan("plan-normalized-1", [command])
+
+    assert plan.commands[0].unit == "%"
+    assert plan.expires_at is not None
+    assert plan.expires_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_incompatible_unit() -> None:
+    service = await build_service()
+    device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    command = Command(
+        id="command-unit-1",
+        device_id=device_id,
+        command="set_brightness",
+        value=60,
+        unit="W",
+        idempotency_key="intent-unit-1",
+    )
+
+    with pytest.raises(DomainError, match="unit"):
+        service.create_plan("plan-unit-1", [command])
+
+
+@pytest.mark.asyncio
+async def test_policy_revision_change_invalidates_previous_validation() -> None:
+    service = await build_service()
+    device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "switch"
+    )
+    plan = service.create_plan(
+        "plan-policy-revision-1",
+        [
+            Command(
+                id="command-policy-revision-1",
+                device_id=device_id,
+                command="turn_on",
+                idempotency_key="intent-policy-revision-1",
+            )
+        ],
+    )
+    validated = service.validate(plan)
+    service.policy_engine.policies.append(
+        Policy(
+            id="deny-policy-revision-1",
+            target={"device_id": device_id},
+            action=PolicyAction.DENY,
+        )
+    )
+
+    with pytest.raises(DomainError, match="revision"):
+        service.assert_executable(validated)

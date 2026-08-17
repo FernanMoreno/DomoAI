@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "Provider-local command after runtime policy and plan validation.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "external_device_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "External Device Id",
+      "type": "string"
+    },
+    "command": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Command",
+      "type": "string"
+    },
+    "params": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "title": "Params",
+      "type": "object"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "intent": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Intent"
+    }
+  },
+  "required": [
+    "provider_id",
+    "external_device_id",
+    "command",
+    "idempotency_key"
+  ],
+  "title": "ProviderCommand",
+  "type": "object"
+}

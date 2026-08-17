@@ -1,0 +1,52 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "living_room.main_light",
+      "name": "Main Light",
+      "area_id": "living_room",
+      "semantic_type": "light",
+      "manufacturer": "DomoAI Virtual PLC",
+      "model": "Virtual Home 1",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "power",
+          "state": {"area": "coil", "address": 0, "data_type": "bool"},
+          "command": {"area": "coil", "address": 0, "data_type": "bool"}
+        },
+        {
+          "name": "brightness",
+          "state": {"area": "holding_register", "address": 10, "data_type": "uint16"},
+          "command": {"area": "holding_register", "address": 10, "data_type": "uint16"}
+        }
+      ]
+    },
+    {
+      "entity_id": "living_room.temperature",
+      "name": "Temperature",
+      "area_id": "living_room",
+      "semantic_type": "sensor",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "temperature",
+          "state": {"area": "input_register", "address": 20, "data_type": "int16", "scale": 0.1}
+        }
+      ]
+    },
+    {
+      "entity_id": "living_room.humidity",
+      "name": "Humidity",
+      "area_id": "living_room",
+      "semantic_type": "sensor",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "humidity",
+          "state": {"area": "input_register", "address": 21, "data_type": "int16", "scale": 0.1}
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,206 @@
+{
+  "$defs": {
+    "BatteryProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "initial_soc_kwh": {
+          "minimum": 0,
+          "title": "Initial Soc Kwh",
+          "type": "number"
+        },
+        "min_soc_kwh": {
+          "minimum": 0,
+          "title": "Min Soc Kwh",
+          "type": "number"
+        },
+        "max_soc_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Max Soc Kwh",
+          "type": "number"
+        },
+        "max_charge_kw": {
+          "minimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "max_discharge_kw": {
+          "minimum": 0,
+          "title": "Max Discharge Kw",
+          "type": "number"
+        },
+        "charge_efficiency": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Charge Efficiency",
+          "type": "number"
+        },
+        "discharge_efficiency": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Discharge Efficiency",
+          "type": "number"
+        }
+      },
+      "required": [
+        "capacity_kwh",
+        "initial_soc_kwh",
+        "min_soc_kwh",
+        "max_soc_kwh",
+        "max_charge_kw",
+        "max_discharge_kw",
+        "charge_efficiency",
+        "discharge_efficiency"
+      ],
+      "title": "BatteryProfile",
+      "type": "object"
+    },
+    "Horizon": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "format": "date-time",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "format": "date-time",
+          "title": "End",
+          "type": "string"
+        },
+        "resolution_minutes": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution Minutes",
+          "type": "integer"
+        },
+        "timezone": {
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "resolution_minutes",
+        "timezone"
+      ],
+      "title": "Horizon",
+      "type": "object"
+    },
+    "SolarForecastPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "power": {
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "power"
+      ],
+      "title": "SolarForecastPoint",
+      "type": "object"
+    },
+    "TariffPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "price_per_kwh": {
+          "title": "Price Per Kwh",
+          "type": "number"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "price_per_kwh",
+        "currency"
+      ],
+      "title": "TariffPoint",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete external energy context for exactly one optimization horizon.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "horizon": {
+      "$ref": "#/$defs/Horizon"
+    },
+    "tariffs": {
+      "items": {
+        "$ref": "#/$defs/TariffPoint"
+      },
+      "title": "Tariffs",
+      "type": "array"
+    },
+    "solar_forecast": {
+      "items": {
+        "$ref": "#/$defs/SolarForecastPoint"
+      },
+      "title": "Solar Forecast",
+      "type": "array"
+    },
+    "battery": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BatteryProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "source_revision": {
+      "minLength": 1,
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "horizon",
+    "tariffs",
+    "solar_forecast",
+    "source_revision",
+    "observed_at"
+  ],
+  "title": "EnergyContext",
+  "type": "object"
+}

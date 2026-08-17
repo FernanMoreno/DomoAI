@@ -1,0 +1,337 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "readable": {
+          "title": "Readable",
+          "type": "boolean"
+        },
+        "writable": {
+          "title": "Writable",
+          "type": "boolean"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "enum_values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "constraints": {
+          "additionalProperties": true,
+          "title": "Constraints",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "readable",
+        "writable"
+      ],
+      "title": "Capability",
+      "type": "object"
+    },
+    "CapabilityKind": {
+      "enum": [
+        "boolean",
+        "integer",
+        "number",
+        "enum",
+        "text",
+        "timestamp"
+      ],
+      "title": "CapabilityKind",
+      "type": "string"
+    },
+    "DeviceDescriptor": {
+      "additionalProperties": false,
+      "description": "Provider-local identity before canonical cross-provider merging.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "provider_id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "external_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "device_type": {
+          "$ref": "#/$defs/DeviceType"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "manufacturer": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manufacturer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "serial_number": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Serial Number"
+        },
+        "area_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Id"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "identity_keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Identity Keys",
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Connections",
+          "type": "array"
+        },
+        "parent_external_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent External Id"
+        }
+      },
+      "required": [
+        "provider_id",
+        "external_id",
+        "device_type",
+        "name"
+      ],
+      "title": "DeviceDescriptor",
+      "type": "object"
+    },
+    "DeviceType": {
+      "enum": [
+        "light",
+        "switch",
+        "cover",
+        "climate",
+        "sensor",
+        "energy",
+        "ev_charger",
+        "unsupported"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "ProviderDiagnostic": {
+      "additionalProperties": false,
+      "description": "Stable diagnostic that cannot leak provider exception payloads.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "code": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "provider_id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ScalarValue"
+          },
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "provider_id",
+        "message"
+      ],
+      "title": "ProviderDiagnostic",
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "devices": {
+      "items": {
+        "$ref": "#/$defs/DeviceDescriptor"
+      },
+      "title": "Devices",
+      "type": "array"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "#/$defs/ProviderDiagnostic"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    }
+  },
+  "title": "ProviderDiscoveryResult",
+  "type": "object"
+}

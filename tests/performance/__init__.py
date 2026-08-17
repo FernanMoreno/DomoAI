@@ -1,0 +1,1 @@
+"""Acceptance-oriented performance fixtures."""

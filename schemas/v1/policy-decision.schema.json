@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "PolicyAction": {
+      "enum": [
+        "allow",
+        "deny",
+        "confirm"
+      ],
+      "title": "PolicyAction",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "policy_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Policy Id"
+    },
+    "action": {
+      "$ref": "#/$defs/PolicyAction"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "reason"
+  ],
+  "title": "PolicyDecision",
+  "type": "object"
+}

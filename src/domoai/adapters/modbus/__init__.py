@@ -1,0 +1,1 @@
+"""Native Modbus adapter boundary."""

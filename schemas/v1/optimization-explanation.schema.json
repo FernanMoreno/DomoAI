@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "ErrorDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "capability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ErrorDetail",
+      "type": "object"
+    },
+    "OptimizationStatus": {
+      "enum": [
+        "optimal",
+        "feasible",
+        "infeasible",
+        "invalid",
+        "timeout",
+        "unknown"
+      ],
+      "title": "OptimizationStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario_id": {
+      "title": "Scenario Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/OptimizationStatus"
+    },
+    "solver": {
+      "title": "Solver",
+      "type": "string"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "objective_values": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Objective Values",
+      "type": "object"
+    },
+    "constraint_summary": {
+      "additionalProperties": true,
+      "title": "Constraint Summary",
+      "type": "object"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "#/$defs/ErrorDetail"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "proposal": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Proposal"
+    }
+  },
+  "required": [
+    "scenario_id",
+    "status",
+    "solver",
+    "summary",
+    "objective_values",
+    "constraint_summary",
+    "diagnostics"
+  ],
+  "title": "OptimizationExplanation",
+  "type": "object"
+}

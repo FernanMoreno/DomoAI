@@ -145,6 +145,28 @@ Los schemas publicados son `provider-manifest`, `device-descriptor`,
 completo y el alcance diferido están reflejados en los schemas publicados y
 en los tests de contrato del repositorio.
 
+## Operabilidad del laboratorio y compatibilidad MCP
+
+`domoai-lab` es una herramienta de desarrollo, no otro runtime domótico ni un
+bus MCP. Su `LabRunner` solo acepta las operaciones `up`, `status`, `down` y
+`smoke`, valida una allowlist de servicios y construye argv para Docker
+Compose sin evaluar shell. El archivo local `dev/lab/.env` solo se inyecta al
+subproceso Compose; el smoke determinista lo excluye expresamente junto con
+todas las variables `DOMOAI_*`.
+
+El perfil `smoke` selecciona pruebas fixture de las cinco fronteras locales:
+Home Assistant, MQTT/Zigbee2MQTT, Modbus, Matter y KNX. No es evidencia de
+commissioning ni sustituye los smoke tests live. La configuración real de
+OMIE/Open-Meteo, un nodo Matter comisionado y un gateway KNX permanecen fuera
+del camino determinista.
+
+`domoai.mcp.compat.ensure_fastmcp_settings_ready()` es una corrección estrecha
+de compatibilidad para el `Settings.lifespan` genérico de FastMCP cuando la
+versión instalada de Pydantic lo deja incompleto. Se invoca antes de construir
+los dos servidores semánticos, no modifica modelos de dominio, no crea una
+ruta MCP alternativa y no instala filtros globales de warnings. Si el SDK ya
+está completo, la función no hace nada.
+
 ## Optimización
 
 `OptimizationScenario` es una DSL intermedia, no código Python ejecutable. Sus

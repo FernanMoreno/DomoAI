@@ -164,6 +164,19 @@ en [`dev/lab/README.md`](dev/lab/README.md) y su arranque mínimo cubre
 Mosquitto/fake Zigbee2MQTT y PyModbus. Home Assistant, Matter Server y KNX
 Virtual/ETS permanecen como perfiles manuales opt-in.
 
+La ruta recomendada para operar ese laboratorio es el runner explícito:
+
+```bash
+uv run domoai-lab up
+uv run domoai-lab status
+uv run domoai-lab smoke
+```
+
+El smoke usa únicamente fixtures locales de Home Assistant, MQTT/Zigbee2MQTT,
+Modbus, Matter y KNX; no inventa gateways, tokens ni commissioning. Los
+smoke tests live siguen separados y requieren sus servicios y variables
+`DOMOAI_*` reales.
+
 The composition root selects the deterministic fixture when no live source is
 configured, a direct adapter for one source, or a composite runtime for two or
 more complete source configurations. Configure Home Assistant with:
@@ -361,13 +374,15 @@ uv run mypy src
 uv lock --check
 ```
 
-The latest full-suite result without live credentials is `307 passed, 8 skipped, 1 warning`. The skips
+The latest full-suite result without live credentials is `318 passed, 8
+skipped`, with no warnings. The skips
 are opt-in Matter Server, KNX/IP and other live cases without their external
 node, gateway or service configuration; deterministic fixture coverage remains
 enabled. The separate live results are: Zigbee2MQTT/Modbus `2 passed`, OMIE/
 Open-Meteo `2 passed`, Home Assistant classic adapter `1 passed` and the
-Home Assistant Provider runtime bridge `1 passed`. The warning is the existing
-`pydantic_settings` incomplete-field warning.
+Home Assistant Provider runtime bridge `1 passed`. The FastMCP compatibility
+seam keeps the known `pydantic_settings` incomplete-field warning out of the
+MCP contracts without globally suppressing warnings.
 
 Adapter and public contract guidance lives in [`docs/adapter-sdk.md`](docs/adapter-sdk.md)
 and [`docs/contracts.md`](docs/contracts.md).

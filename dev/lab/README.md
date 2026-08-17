@@ -4,6 +4,42 @@ Este laboratorio simula las fronteras de protocolo que consume DomoAI. No
 simula radios Zigbee ni sustituye el commissioning Matter, ETS/KNX o la
 validación con hardware.
 
+## Runner local reproducible
+
+El runner `domoai-lab` centraliza las operaciones seguras del laboratorio y no
+requiere una instalación domótica real:
+
+```bash
+uv run domoai-lab up
+uv run domoai-lab status
+uv run domoai-lab smoke
+uv run domoai-lab down
+```
+
+El arranque por defecto cubre MQTT/Zigbee2MQTT y Modbus. Los perfiles
+opcionales se activan explícitamente:
+
+```bash
+uv run domoai-lab up --services mqtt zigbee2mqtt modbus homeassistant
+uv run domoai-lab up --services matter-server
+```
+
+`dev/lab/.env` es opcional, está ignorado por Git y solo se carga en el
+subproceso de Docker para `up`, `status` y `down`. `domoai-lab smoke` no carga
+ese archivo, elimina las variables `DOMOAI_*` del proceso hijo y ejecuta solo
+fixtures locales; por tanto no activa OMIE, Open-Meteo, Home Assistant live,
+Matter commissioning ni KNX/IP.
+
+Para detener y borrar volúmenes de forma explícita:
+
+```bash
+uv run domoai-lab down --volumes
+```
+
+Si `docker` no está en `PATH`, usa `--docker-bin` o `DOMOAI_DOCKER_BIN`. El
+runner valida los servicios antes de lanzar Compose y nunca imprime valores
+del archivo de entorno.
+
 ## MVP local: MQTT/Zigbee2MQTT + Modbus TCP
 
 Requisitos: Docker Compose y `uv`.

@@ -23,6 +23,7 @@ dependencies = [
 [project.scripts]
 domoai-mcp = "domoai.mcp.stdio:main"
 domoai-ortools-mcp = "domoai.mcp.ortools_stdio:main"
+domoai-lab = "domoai.lab.cli:main"
 
 [dependency-groups]
 dev = [

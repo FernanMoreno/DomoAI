@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.state_service import StateService
-from domoai.domain.models import Command, DeviceType, Plan, Policy
+from domoai.domain.models import Command, DeviceType, Plan, PlanStatus, Policy
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
 from domoai.mcp.resources import (
@@ -27,7 +27,9 @@ from domoai.mcp.resources import (
 from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.horizon import Horizon
 from domoai.optimizer.ports import EnergyContextProvider
+from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.scheduler import Scheduler
 
 
 @dataclass
@@ -37,9 +39,11 @@ class DomoticsMcpContext:
     facade: DomoticsFacade
     registry: DeviceRegistry
     policies: list[Policy]
+    approval_store: ApprovalStore = field(default_factory=ApprovalStore)
     energy_context_provider: EnergyContextProvider | None = None
     plans: dict[str, Plan] = field(default_factory=dict)
     last_refreshed_at: datetime | None = None
+    scheduler: Scheduler | None = None
 
 
 def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> FastMCP:
@@ -176,6 +180,38 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             return error_envelope(error)
 
     @server.tool(
+        name="request_approval",
+        description=(
+            "Issue a server-authoritative approval grant for a plan requiring "
+            "confirmation. The returned approval_id is single-use and bound to "
+            "the plan's current validation digest."
+        ),
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def request_approval(
+        plan_id: str,
+        validation_digest: str,
+        approved_by: str,
+    ) -> dict[str, Any]:
+        try:
+            plan = context.plans.get(plan_id)
+            if plan is None:
+                raise ValueError(f"Unknown plan: {plan_id}")
+            if plan.validation is None or plan.validation.digest != validation_digest:
+                raise ValueError("Validation digest does not match the stored plan")
+            grant = context.approval_store.issue(plan, approved_by=approved_by)
+            return {
+                "schema_version": "v1",
+                "approval_id": grant.approval_id,
+                "plan_id": grant.plan_id,
+                "validation_digest": grant.validation_digest,
+                "issued_at": grant.issued_at.isoformat(),
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
         name="execute_plan",
         description="Execute a previously validated plan after runtime safety checks.",
         annotations=mutation_annotations,
@@ -184,7 +220,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
     async def execute_plan(
         plan_id: str,
         validation_digest: str,
-        approval: dict[str, Any] | None = None,
+        approval_id: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         try:
@@ -193,9 +229,11 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 raise ValueError(f"Unknown plan: {plan_id}")
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
-            if approval is not None:
-                approved_by = str(approval.get("approved_by", ""))
-                plan = context.facade.approve_plan(plan, approved_by=approved_by)
+            if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
+                if approval_id is None:
+                    raise ValueError("Plan requires an approval_id issued via request_approval")
+                grant = context.approval_store.consume(approval_id, plan)
+                plan = context.facade.approve_plan(plan, grant=grant)
                 context.plans[plan.id] = plan
             if dry_run:
                 return {
@@ -208,6 +246,106 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 "schema_version": "v1",
                 "plan_id": plan.id,
                 "outcomes": [outcome.model_dump(mode="json") for outcome in execution.outcomes],
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="schedule_plan",
+        description=(
+            "Schedule a previously validated/approved plan to execute at a "
+            "future time, instead of immediately. The plan still goes "
+            "through every existing safety check when its time arrives."
+        ),
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def schedule_plan(
+        plan_id: str,
+        validation_digest: str,
+        execute_at: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            plan = context.plans.get(plan_id)
+            if plan is None:
+                raise ValueError(f"Unknown plan: {plan_id}")
+            if plan.validation is None or plan.validation.digest != validation_digest:
+                raise ValueError("Validation digest does not match the stored plan")
+            if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
+                if approval_id is None:
+                    raise ValueError("Plan requires an approval_id issued via request_approval")
+                grant = context.approval_store.consume(approval_id, plan)
+                plan = context.facade.approve_plan(plan, grant=grant)
+            scheduled_plan = plan.model_copy(
+                update={"execute_at": datetime.fromisoformat(execute_at)}
+            )
+            context.plans[plan_id] = scheduled_plan
+            await context.scheduler.schedule(scheduled_plan)
+            return {
+                "schema_version": "v1",
+                "plan_id": scheduled_plan.id,
+                "execute_at": scheduled_plan.execute_at.isoformat()
+                if scheduled_plan.execute_at
+                else None,
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="cancel_scheduled_plan",
+        description="Cancel a pending scheduled plan before it executes.",
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def cancel_scheduled_plan(plan_id: str) -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            cancelled = await context.scheduler.cancel(plan_id)
+            return {"schema_version": "v1", "plan_id": plan_id, "cancelled": cancelled}
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="reschedule_plan",
+        description="Move a pending scheduled plan to a different future time.",
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def reschedule_plan(plan_id: str, execute_at: str) -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            rescheduled = await context.scheduler.reschedule(
+                plan_id, datetime.fromisoformat(execute_at)
+            )
+            return {"schema_version": "v1", "plan_id": plan_id, "rescheduled": rescheduled}
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="list_scheduled_plans",
+        description="List plans currently pending their scheduled execution time.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    async def list_scheduled_plans() -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            pending = await context.scheduler.list_pending()
+            return {
+                "schema_version": "v1",
+                "plans": [
+                    {
+                        "plan_id": plan.id,
+                        "execute_at": plan.execute_at.isoformat() if plan.execute_at else None,
+                    }
+                    for plan in pending
+                ],
             }
         except (ValueError, ValidationError) as error:
             return error_envelope(error)

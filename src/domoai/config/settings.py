@@ -12,6 +12,8 @@ from domoai.domain.models import StrictModel
 
 class Settings(StrictModel):
     database_path: Path = Path("data/domoai.sqlite3")
+    policy_config_path: Path | None = None
+    risk_overrides_path: Path | None = None
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
     home_assistant_provider: bool = False
@@ -32,6 +34,8 @@ class Settings(StrictModel):
     mqtt_timeout_seconds: float = Field(default=5.0, gt=0)
     matter_timeout_seconds: float = Field(default=5.0, gt=0)
     state_stale_after_seconds: int = 300
+    scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
+    scheduler_grace_window_seconds: int = Field(default=900, gt=0)
     energy_live: bool = False
     tariff_provider: str | None = None
     solar_provider: str | None = None
@@ -133,6 +137,16 @@ class Settings(StrictModel):
 
         return cls(
             database_path=Path(os.getenv("DOMOAI_DATABASE_PATH", "data/domoai.sqlite3")),
+            policy_config_path=(
+                Path(policy_path)
+                if (policy_path := os.getenv("DOMOAI_POLICY_CONFIG_PATH"))
+                else None
+            ),
+            risk_overrides_path=(
+                Path(risk_path)
+                if (risk_path := os.getenv("DOMOAI_RISK_OVERRIDES_PATH"))
+                else None
+            ),
             home_assistant_url=os.getenv("DOMOAI_HOME_ASSISTANT_URL"),
             home_assistant_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_HOME_ASSISTANT_TOKEN")) else None

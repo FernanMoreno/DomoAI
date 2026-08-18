@@ -16,6 +16,7 @@ from domoai.domain.models import (
     Device,
     ErrorDetail,
     Plan,
+    PlanDependencies,
     PlanStatus,
     PolicyAction,
     PolicyDecision,
@@ -23,6 +24,7 @@ from domoai.domain.models import (
     ValidationStatus,
 )
 from domoai.domain.transitions import assert_plan_transition
+from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.events import AuditLog
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
@@ -93,6 +95,7 @@ class PlanService:
         errors = []
         decisions: list[PolicyDecision] = []
         seen_idempotency_keys: set[str] = set()
+        state_versions: dict[str, int] = {}
         for command in plan.commands:
             if command.idempotency_key in seen_idempotency_keys:
                 errors.append(
@@ -119,6 +122,9 @@ class PlanService:
                     )
                 )
                 continue
+            state_versions[f"{device.id}::{capability.name}"] = self.state_store.state_version(
+                device.id, capability.name
+            )
             errors.extend(self._validate_value(command, capability))
             route = self.registry.resolve_command_route(device.id, command.command)
             if route.reason is not None:
@@ -143,7 +149,12 @@ class PlanService:
                 )
 
         revision = self.current_revision
-        digest = self._digest(plan, revision, decisions)
+        dependencies = PlanDependencies(
+            inventory_revision=self.state_store.runtime_revision,
+            policy_revision=self.policy_engine.revision,
+            state_versions=state_versions,
+        )
+        digest = self._digest(plan, revision, decisions, dependencies)
         requires_confirmation = any(
             decision.action is PolicyAction.CONFIRM for decision in decisions
         )
@@ -161,6 +172,7 @@ class PlanService:
             runtime_revision=revision,
             errors=errors,
             digest=digest,
+            dependencies=dependencies,
         )
         updated = plan.model_copy(
             update={
@@ -181,25 +193,33 @@ class PlanService:
         )
         return updated
 
-    def approve(self, plan: Plan, *, approved_by: str) -> Plan:
+    def approve(self, plan: Plan, *, grant: ApprovalGrant) -> Plan:
         if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
                 "Only a validated plan requiring confirmation can be approved",
             )
+        if grant.plan_id != plan.id or grant.validation_digest != plan.validation.digest:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval grant does not match the validated plan",
+            )
         assert_plan_transition(plan.status, PlanStatus.APPROVED)
         approval = Approval(
             status="approved",
-            approved_by=approved_by,
-            approved_at=datetime.now(UTC),
+            approved_by=grant.approved_by,
+            approved_at=grant.issued_at,
             validation_digest=plan.validation.digest,
         )
         approved = plan.model_copy(update={"status": PlanStatus.APPROVED, "approval": approval})
         self.audit.append(
             event_type="plan_approved",
-            actor=approved_by,
+            actor=grant.approved_by,
             subject_id=plan.id,
-            payload={"validation_digest": approval.validation_digest},
+            payload={
+                "validation_digest": approval.validation_digest,
+                "approval_id": grant.approval_id,
+            },
         )
         return approved
 
@@ -224,7 +244,7 @@ class PlanService:
             )
         if plan.validation is None:
             raise DomainError(ErrorCode.VALIDATION_ERROR, "Plan has not been validated")
-        if plan.validation.runtime_revision != self.current_revision:
+        if not self._dependencies_still_current(plan.validation):
             raise DomainError(
                 ErrorCode.STALE_PLAN,
                 "Plan runtime revision is stale; revalidate before execution",
@@ -242,6 +262,20 @@ class PlanService:
                     ErrorCode.APPROVAL_REQUIRED,
                     "Approval does not match the validated plan",
                 )
+
+    def _dependencies_still_current(self, validation: ValidationResult) -> bool:
+        dependencies = validation.dependencies
+        if dependencies is None:
+            return validation.runtime_revision == self.current_revision
+        if dependencies.inventory_revision != self.state_store.runtime_revision:
+            return False
+        if dependencies.policy_revision != self.policy_engine.revision:
+            return False
+        for key, version in dependencies.state_versions.items():
+            device_id, _, capability = key.partition("::")
+            if self.state_store.state_version(device_id, capability) != version:
+                return False
+        return True
 
     @staticmethod
     def _find_capability(device: Device, command_name: str) -> Capability | None:
@@ -295,12 +329,18 @@ class PlanService:
         )
 
     @staticmethod
-    def _digest(plan: Plan, revision: str, decisions: list[PolicyDecision]) -> str:
+    def _digest(
+        plan: Plan,
+        revision: str,
+        decisions: list[PolicyDecision],
+        dependencies: PlanDependencies,
+    ) -> str:
         payload: dict[str, Any] = {
             "plan_id": plan.id,
             "expires_at": plan.expires_at.isoformat() if plan.expires_at else None,
             "commands": [command.model_dump(mode="json") for command in plan.commands],
             "runtime_revision": revision,
+            "dependencies": dependencies.model_dump(mode="json"),
             "policy_decisions": [decision.model_dump(mode="json") for decision in decisions],
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))

@@ -1,4 +1,11 @@
 import pytest
+
+from domoai.domain.provider import ProviderCommand
+from domoai.runtime.provider_sdk import (
+    DuplicateProviderError,
+    ProviderRegistry,
+    ProviderRegistryError,
+)
 from tests.fixtures.provider_sdk import (
     CommandFixture,
     FailingDiscoveryTelemetryFixture,
@@ -6,13 +13,6 @@ from tests.fixtures.provider_sdk import (
     TelemetryFixture,
     command_manifest,
     telemetry_manifest,
-)
-
-from domoai.domain.provider import ProviderCommand
-from domoai.runtime.provider_sdk import (
-    DuplicateProviderError,
-    ProviderRegistry,
-    ProviderRegistryError,
 )
 
 

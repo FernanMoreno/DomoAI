@@ -5,14 +5,20 @@ import pytest
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, Plan
+from domoai.domain.models import AdapterSnapshot, Command, Plan
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
-from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
+from tests.fixtures.multi_adapter import (
+    RecordingAdapter,
+    brightness_capability,
+    entity,
+    power_capability,
+    source_snapshot,
+)
 
 
 @pytest.mark.asyncio
@@ -161,3 +167,116 @@ async def test_unavailable_source_route_is_rejected_without_writes() -> None:
     assert plan.validation is not None
     assert any(error.code == "source_unavailable" for error in plan.validation.errors)
     assert adapter.writes == []
+
+
+@pytest.mark.asyncio
+async def test_cross_adapter_type_conflict_is_audited_not_silently_dropped() -> None:
+    first = RecordingAdapter(
+        "home_assistant",
+        AdapterSnapshot(
+            source_entities=[
+                entity(
+                    entity_id="light.conflict",
+                    source_device_id="conflict-device",
+                    canonical_id="shared.conflict_device",
+                    name="Conflict Light",
+                    capabilities=[power_capability()],
+                )
+            ]
+        ),
+    )
+    conflicting_entity = entity(
+        entity_id="modbus.conflict",
+        source_device_id="modbus-conflict-device",
+        canonical_id="shared.conflict_device",
+        name="Conflict Sensor",
+        capabilities=[power_capability()],
+    )
+    conflicting_entity["semantic_type"] = "sensor"
+    second = RecordingAdapter(
+        "modbus", AdapterSnapshot(source_entities=[conflicting_entity])
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+
+    conflict_events = [
+        event for event in audit.events if event.event_type == "registry_identity_conflict"
+    ]
+    assert len(conflict_events) == 1
+    assert conflict_events[0].payload["kind"] == "canonical_type_conflict"
+    assert conflict_events[0].subject_id == "shared.conflict_device"
+    device = registry.get("shared.conflict_device")
+    assert device is not None
+    assert device.type.value == "light"
+
+
+@pytest.mark.asyncio
+async def test_cross_adapter_capability_metadata_conflict_is_audited() -> None:
+    first = RecordingAdapter(
+        "home_assistant",
+        AdapterSnapshot(
+            source_entities=[
+                entity(
+                    entity_id="light.brightness_a",
+                    source_device_id="brightness-conflict-device",
+                    canonical_id="shared.brightness_conflict",
+                    name="Brightness A",
+                    capabilities=[brightness_capability()],
+                )
+            ]
+        ),
+    )
+    conflicting_capability = brightness_capability()
+    conflicting_capability["unit"] = "lux"
+    conflicting_entity = entity(
+        entity_id="modbus.brightness_b",
+        source_device_id="modbus-brightness-conflict-device",
+        canonical_id="shared.brightness_conflict",
+        name="Brightness B",
+        capabilities=[conflicting_capability],
+    )
+    second = RecordingAdapter(
+        "modbus", AdapterSnapshot(source_entities=[conflicting_entity])
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+
+    conflict_events = [
+        event for event in audit.events if event.event_type == "registry_identity_conflict"
+    ]
+    assert len(conflict_events) == 1
+    assert conflict_events[0].payload["kind"] == "capability_metadata_conflict"
+    assert conflict_events[0].payload["capability"] == "brightness"
+
+
+@pytest.mark.asyncio
+async def test_no_conflict_cycle_records_zero_identity_conflict_events() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant",
+        source_snapshot(adapter_id="home_assistant", include_shared_device=False),
+    )
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+
+    assert not any(event.event_type == "registry_identity_conflict" for event in audit.events)

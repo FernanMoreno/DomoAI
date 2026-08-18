@@ -206,12 +206,19 @@ class ErrorDetail(StrictModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class PlanDependencies(StrictModel):
+    inventory_revision: str = Field(min_length=1)
+    policy_revision: str = Field(min_length=1)
+    state_versions: dict[str, int] = Field(default_factory=dict)
+
+
 class ValidationResult(StrictModel):
     status: ValidationStatus
     validated_at: datetime
     runtime_revision: str = Field(min_length=1)
     errors: list[ErrorDetail] = Field(default_factory=list)
     digest: str = Field(min_length=1)
+    dependencies: PlanDependencies | None = None
 
 
 class Policy(StrictModel):
@@ -257,6 +264,7 @@ class Plan(StrictModel):
     schema_version: str = SCHEMA_VERSION
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     expires_at: datetime | None = None
+    execute_at: datetime | None = None
     commands: list[Command] = Field(min_length=1, max_length=50)
     status: PlanStatus = PlanStatus.DRAFT
     validation: ValidationResult | None = None

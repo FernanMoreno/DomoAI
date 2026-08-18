@@ -12,6 +12,8 @@ class StateStore:
         self.stale_after = stale_after
         self._snapshots: dict[tuple[str, str], StateSnapshot] = {}
         self._revision = 0
+        self._state_versions: dict[tuple[str, str], int] = {}
+        self._version_counter = 0
 
     def begin_revision(self) -> None:
         self._revision += 1
@@ -20,8 +22,29 @@ class StateStore:
     def runtime_revision(self) -> str:
         return f"rev-{self._revision}"
 
+    def state_version(self, device_id: str, capability: str) -> int:
+        return self._state_versions.get((device_id, capability), 0)
+
+    def load_persisted(self, snapshots: list[StateSnapshot]) -> None:
+        """Restore last-known state from persistence, forced to stale."""
+
+        for snapshot in snapshots:
+            stale = snapshot.model_copy(update={"status": StateStatus.STALE})
+            key = (stale.device_id, stale.capability)
+            self._version_counter += 1
+            self._state_versions[key] = self._version_counter
+            self._snapshots[key] = stale
+
     async def save(self, snapshot: StateSnapshot) -> None:
-        self._snapshots[(snapshot.device_id, snapshot.capability)] = snapshot
+        key = (snapshot.device_id, snapshot.capability)
+        previous = self._snapshots.get(key)
+        if previous is None or (previous.value, previous.status) != (
+            snapshot.value,
+            snapshot.status,
+        ):
+            self._version_counter += 1
+            self._state_versions[key] = self._version_counter
+        self._snapshots[key] = snapshot
 
     async def get(self, device_id: str, capability: str) -> StateSnapshot | None:
         return self._snapshots.get((device_id, capability))

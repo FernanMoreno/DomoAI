@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 
 from domoai.domain.models import (
@@ -32,6 +33,22 @@ class DeviceRegistry:
         self._parent_source_devices: dict[tuple[str, str], str] = {}
         self._diagnostics: list[dict[str, Any]] = []
 
+    def load_persisted(self, devices: list[Device]) -> None:
+        """Restore a readable-but-not-yet-executable inventory from persistence.
+
+        Only ``_devices`` and ``_source_entity_ids`` are populated; routes,
+        identity mappings and source-device mappings are rebuilt only by a
+        live ``apply_snapshot`` this session, so a restored device cannot be
+        resolved for execution until the runtime has reconfirmed it.
+        """
+
+        for device in devices:
+            self._devices[device.id] = device
+            for source_ref in device.source_refs:
+                self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = (
+                    device.id
+                )
+
     def apply_snapshot(
         self, snapshot: AdapterSnapshot, adapter_id: str
     ) -> tuple[list[Device], list[Area]]:
@@ -42,6 +59,7 @@ class DeviceRegistry:
                 name=str(raw_area.get("name") or area_id.replace("_", " ").title()),
             )
 
+        seen: dict[str, set[str]] = defaultdict(set)
         for entity in snapshot.source_entities:
             effective_adapter_id = str(
                 entity.get("source_adapter_id")
@@ -49,8 +67,9 @@ class DeviceRegistry:
                 or entity.get("adapter_id")
                 or adapter_id
             )
+            seen.setdefault(effective_adapter_id, set())
             try:
-                self._upsert_entity(entity, effective_adapter_id)
+                source_entity_id = self._upsert_entity(entity, effective_adapter_id)
             except (TypeError, ValueError) as error:
                 self._diagnostics.append(
                     {
@@ -60,6 +79,10 @@ class DeviceRegistry:
                         "reason": str(error)[:200],
                     }
                 )
+            else:
+                seen[effective_adapter_id].add(source_entity_id)
+
+        self._reconcile(seen, snapshot.unsupported_sources, adapter_id)
 
         return self.devices, self.areas
 
@@ -74,6 +97,13 @@ class DeviceRegistry:
     @property
     def diagnostics(self) -> list[dict[str, Any]]:
         return list(self._diagnostics)
+
+    def drain_diagnostics(self) -> list[dict[str, Any]]:
+        """Return and clear diagnostics accumulated since the last drain."""
+
+        diagnostics = self._diagnostics
+        self._diagnostics = []
+        return diagnostics
 
     def canonical_id_for_source(self, adapter_id: str, external_entity_id: str) -> str | None:
         return self._source_entity_ids.get((adapter_id, external_entity_id))
@@ -99,6 +129,70 @@ class DeviceRegistry:
             ]
             self._routes[key] = updated
             self._refresh_device_availability(key[0])
+
+    def _reconcile(
+        self,
+        seen: dict[str, set[str]],
+        unsupported_sources: list[dict[str, Any]],
+        default_adapter_id: str,
+    ) -> None:
+        failed_adapter_ids = {
+            str(diagnostic.get("adapter_id", default_adapter_id))
+            for diagnostic in unsupported_sources
+            if diagnostic.get("failure")
+        }
+        authoritative = set(seen) - failed_adapter_ids
+        if not authoritative:
+            return
+        for canonical_id in list(self._devices):
+            device = self._devices.get(canonical_id)
+            if device is None:
+                continue
+            stale_refs = [
+                ref
+                for ref in device.source_refs
+                if ref.adapter_id in authoritative
+                and ref.external_id not in seen[ref.adapter_id]
+            ]
+            if stale_refs:
+                self._remove_source_refs(canonical_id, stale_refs)
+
+    def _remove_source_refs(self, canonical_id: str, stale_refs: list[SourceRef]) -> None:
+        stale_keys = {(ref.adapter_id, ref.external_id) for ref in stale_refs}
+        for (device_id, capability), routes in list(self._routes.items()):
+            if device_id != canonical_id:
+                continue
+            remaining = [
+                route
+                for route in routes
+                if (route.source_ref.adapter_id, route.source_ref.external_id) not in stale_keys
+            ]
+            if remaining:
+                self._routes[(device_id, capability)] = remaining
+            else:
+                del self._routes[(device_id, capability)]
+        for adapter_id, external_id in stale_keys:
+            self._source_entity_ids.pop((adapter_id, external_id), None)
+
+        device = self._devices.get(canonical_id)
+        if device is None:
+            return
+        remaining_refs = [
+            ref
+            for ref in device.source_refs
+            if (ref.adapter_id, ref.external_id) not in stale_keys
+        ]
+        if remaining_refs:
+            self._devices[canonical_id] = device.model_copy(
+                update={"source_refs": remaining_refs}
+            )
+            self._refresh_device_availability(canonical_id)
+            return
+
+        del self._devices[canonical_id]
+        for key, value in list(self._source_device_ids.items()):
+            if value == canonical_id:
+                del self._source_device_ids[key]
 
     def get(self, device_id: str) -> Device | None:
         return self._devices.get(device_id)
@@ -136,7 +230,7 @@ class DeviceRegistry:
             )
         return RouteResolution(route=route, candidates=candidates)
 
-    def _upsert_entity(self, entity: dict[str, Any], adapter_id: str) -> None:
+    def _upsert_entity(self, entity: dict[str, Any], adapter_id: str) -> str:
         identity = SourceIdentity.from_entity(entity, adapter_id)
         canonical_id = self._canonical_id_for(identity)
         capabilities = capabilities_from_entity(entity)
@@ -227,6 +321,7 @@ class DeviceRegistry:
             else:
                 routes[existing_route] = route
         self._refresh_device_availability(canonical_id)
+        return identity.source_entity_id
 
     def _refresh_device_availability(self, canonical_id: str) -> None:
         device = self._devices.get(canonical_id)

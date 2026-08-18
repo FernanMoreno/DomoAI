@@ -328,6 +328,19 @@
           "default": null,
           "title": "Expires At"
         },
+        "execute_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execute At"
+        },
         "commands": {
           "items": {
             "$ref": "#/$defs/Command"
@@ -387,6 +400,34 @@
         "commands"
       ],
       "title": "Plan",
+      "type": "object"
+    },
+    "PlanDependencies": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_revision": {
+          "minLength": 1,
+          "title": "Inventory Revision",
+          "type": "string"
+        },
+        "policy_revision": {
+          "minLength": 1,
+          "title": "Policy Revision",
+          "type": "string"
+        },
+        "state_versions": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "State Versions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "inventory_revision",
+        "policy_revision"
+      ],
+      "title": "PlanDependencies",
       "type": "object"
     },
     "PlanStatus": {
@@ -502,6 +543,89 @@
           "type": "string"
         }
       ]
+    },
+    "SolvedTier": {
+      "additionalProperties": false,
+      "description": "One priority tier actually solved for a result.\n\n`priority` is `None` for the implicit soft-constraint-violation tier,\nwhich has no user-declared priority and always precedes every declared\ntier when it is present.",
+      "properties": {
+        "priority": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Priority"
+        },
+        "terms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Terms",
+          "type": "array"
+        },
+        "achieved_value": {
+          "title": "Achieved Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "priority",
+        "terms",
+        "achieved_value"
+      ],
+      "title": "SolvedTier",
+      "type": "object"
+    },
+    "SolverEvidence": {
+      "additionalProperties": false,
+      "description": "Audit trail for one completed solve; see spec 028.",
+      "properties": {
+        "solver_name": {
+          "title": "Solver Name",
+          "type": "string"
+        },
+        "solver_version": {
+          "title": "Solver Version",
+          "type": "string"
+        },
+        "num_search_workers": {
+          "title": "Num Search Workers",
+          "type": "integer"
+        },
+        "random_seed": {
+          "title": "Random Seed",
+          "type": "integer"
+        },
+        "wall_time_seconds": {
+          "title": "Wall Time Seconds",
+          "type": "number"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/SolvedTier"
+          },
+          "title": "Tiers",
+          "type": "array"
+        },
+        "scenario_fingerprint": {
+          "title": "Scenario Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "solver_name",
+        "solver_version",
+        "num_search_workers",
+        "random_seed",
+        "wall_time_seconds",
+        "tiers",
+        "scenario_fingerprint"
+      ],
+      "title": "SolverEvidence",
+      "type": "object"
     },
     "SourceRef": {
       "additionalProperties": false,
@@ -649,6 +773,17 @@
           "minLength": 1,
           "title": "Digest",
           "type": "string"
+        },
+        "dependencies": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanDependencies"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -700,6 +835,13 @@
       ],
       "default": null
     },
+    "plans": {
+      "items": {
+        "$ref": "#/$defs/Plan"
+      },
+      "title": "Plans",
+      "type": "array"
+    },
     "objective_values": {
       "additionalProperties": {
         "type": "number"
@@ -718,6 +860,17 @@
       },
       "title": "Diagnostics",
       "type": "array"
+    },
+    "solver_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SolverEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

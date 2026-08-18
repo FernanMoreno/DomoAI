@@ -64,7 +64,12 @@ async def test_provider_runtime_feeds_registry_state_store_and_semantic_mcp(
             "get_energy_context",
             "validate_command",
             "validate_plan",
+            "request_approval",
             "execute_plan",
+            "schedule_plan",
+            "cancel_scheduled_plan",
+            "reschedule_plan",
+            "list_scheduled_plans",
         ]
         inventory = structured(await server.call_tool("discover_devices", {"refresh": False}))
         light_id = next(

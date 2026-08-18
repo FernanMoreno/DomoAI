@@ -285,6 +285,34 @@
       "title": "ExecutionSummary",
       "type": "object"
     },
+    "PlanDependencies": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_revision": {
+          "minLength": 1,
+          "title": "Inventory Revision",
+          "type": "string"
+        },
+        "policy_revision": {
+          "minLength": 1,
+          "title": "Policy Revision",
+          "type": "string"
+        },
+        "state_versions": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "State Versions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "inventory_revision",
+        "policy_revision"
+      ],
+      "title": "PlanDependencies",
+      "type": "object"
+    },
     "PlanStatus": {
       "enum": [
         "draft",
@@ -545,6 +573,17 @@
           "minLength": 1,
           "title": "Digest",
           "type": "string"
+        },
+        "dependencies": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanDependencies"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -596,6 +635,19 @@
       ],
       "default": null,
       "title": "Expires At"
+    },
+    "execute_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Execute At"
     },
     "commands": {
       "items": {

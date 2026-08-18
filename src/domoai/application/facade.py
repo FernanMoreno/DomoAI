@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ExecutionSummary, Plan
+from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.executor import PlanExecutor
 
 
@@ -15,8 +16,8 @@ class DomoticsFacade:
     def validate_plan(self, plan: Plan) -> Plan:
         return self.plan_service.validate(plan)
 
-    def approve_plan(self, plan: Plan, *, approved_by: str) -> Plan:
-        return self.plan_service.approve(plan, approved_by=approved_by)
+    def approve_plan(self, plan: Plan, *, grant: ApprovalGrant) -> Plan:
+        return self.plan_service.approve(plan, grant=grant)
 
     async def execute_plan(self, plan: Plan) -> ExecutionSummary:
         return await self.executor.execute(plan)

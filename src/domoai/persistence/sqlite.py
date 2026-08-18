@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_PATH = Path(__file__).parent / "migrations" / "001_initial.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 class SQLiteDatabase:
@@ -16,7 +16,8 @@ class SQLiteDatabase:
     async def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
-        self._connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            self._connection.executescript(migration.read_text(encoding="utf-8"))
         self._connection.commit()
 
     @property

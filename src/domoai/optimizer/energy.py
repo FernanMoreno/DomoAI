@@ -26,6 +26,12 @@ class SolarForecastPoint(StrictModel):
     unit: Literal["kW"] = "kW"
 
 
+class BaseLoadPoint(StrictModel):
+    slot: int = Field(ge=0)
+    power: float = Field(ge=0)
+    unit: Literal["kW"] = "kW"
+
+
 class BatteryProfile(StrictModel):
     capacity_kwh: float = Field(gt=0)
     initial_soc_kwh: float = Field(ge=0)
@@ -56,6 +62,7 @@ class EnergyContext(StrictModel):
     horizon: Horizon
     tariffs: list[TariffPoint]
     solar_forecast: list[SolarForecastPoint]
+    base_load_forecast: list[BaseLoadPoint] | None = None
     battery: BatteryProfile | None = None
     source_revision: str = Field(min_length=1)
     observed_at: datetime
@@ -65,10 +72,16 @@ class EnergyContext(StrictModel):
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
         expected = list(range(self.horizon.slots))
-        for name, points in (
+        SeriesEntry = tuple[
+            str, list[TariffPoint] | list[SolarForecastPoint] | list[BaseLoadPoint]
+        ]
+        series: list[SeriesEntry] = [
             ("tariffs", self.tariffs),
             ("solar_forecast", self.solar_forecast),
-        ):
+        ]
+        if self.base_load_forecast is not None:
+            series.append(("base_load_forecast", self.base_load_forecast))
+        for name, points in series:
             slots = [point.slot for point in points]
             if len(points) != self.horizon.slots:
                 raise ValueError(

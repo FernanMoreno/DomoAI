@@ -23,6 +23,8 @@ class ErrorCode(StrEnum):
     SOURCE_UNAVAILABLE = "source_unavailable"
     EXECUTION_FAILED = "execution_failed"
     VALIDATION_ERROR = "validation_error"
+    PRECONDITION_FAILED = "precondition_failed"
+    NOT_YET_DUE = "not_yet_due"
 
 
 class DomainError(ValueError):

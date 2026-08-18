@@ -8,11 +8,13 @@ from datetime import UTC, datetime
 from domoai.domain.models import (
     AdapterSnapshot,
     Area,
+    AvailabilityStatus,
     Device,
     SourceRef,
     StateSnapshot,
     StateStatus,
 )
+from domoai.persistence.repositories import DeviceRepository, StateSnapshotRepository
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
@@ -34,21 +36,39 @@ class DiscoveryService:
         registry: DeviceRegistry,
         state_store: StateStore,
         audit: AuditLog,
+        *,
+        device_repository: DeviceRepository | None = None,
+        state_snapshot_repository: StateSnapshotRepository | None = None,
     ) -> None:
         self.adapter = adapter
         self.registry = registry
         self.state_store = state_store
         self.audit = audit
+        self.device_repository = device_repository
+        self.state_snapshot_repository = state_snapshot_repository
 
     async def refresh(self) -> DiscoveryResult:
         snapshot = await self.adapter.discover()
-        self.state_store.begin_revision()
+        fingerprint_before = self._inventory_fingerprint()
         for diagnostic in snapshot.unsupported_sources:
             if diagnostic.get("failure"):
                 self.registry.mark_source_unavailable(
                     str(diagnostic.get("adapter_id", self.adapter.adapter_id))
                 )
         devices, areas = self.registry.apply_snapshot(snapshot, self.adapter.adapter_id)
+        for diagnostic in self.registry.drain_diagnostics():
+            self.audit.append(
+                event_type="registry_identity_conflict",
+                actor="runtime",
+                subject_id=str(
+                    diagnostic.get("device_id")
+                    or diagnostic.get("adapter_id")
+                    or self.adapter.adapter_id
+                ),
+                payload=diagnostic,
+            )
+        if self._inventory_fingerprint() != fingerprint_before:
+            self.state_store.begin_revision()
         states = await self._record_states(snapshot)
         for diagnostic in snapshot.unsupported_sources:
             self.audit.append(
@@ -69,11 +89,32 @@ class DiscoveryService:
                 "revision": revision,
             },
         )
+        if self.device_repository is not None and self.state_snapshot_repository is not None:
+            current_ids = {device.id for device in self.registry.devices}
+            persisted_ids = {device.id for device in await self.device_repository.list_all()}
+            for device_id in persisted_ids - current_ids:
+                await self.device_repository.delete(device_id)
+            for device in self.registry.devices:
+                await self.device_repository.save(device)
+            for state in await self.state_store.all():
+                await self.state_snapshot_repository.save(state)
+
         return DiscoveryResult(tuple(devices), tuple(areas), tuple(states), revision)
+
+    def _inventory_fingerprint(self) -> frozenset[tuple[str, AvailabilityStatus, tuple[str, ...]]]:
+        return frozenset(
+            (
+                device.id,
+                device.availability,
+                tuple(sorted(capability.name for capability in device.capabilities)),
+            )
+            for device in self.registry.devices
+        )
 
     async def _record_states(self, snapshot: AdapterSnapshot) -> list[StateSnapshot]:
         received_at = datetime.now(UTC)
         states: list[StateSnapshot] = []
+        seen_this_cycle: dict[tuple[str, str], StateSnapshot] = {}
         for raw_state in snapshot.source_states:
             external_id = str(raw_state["entity_id"])
             source_adapter_id = str(raw_state.get("source_adapter_id", self.adapter.adapter_id))
@@ -96,6 +137,37 @@ class DiscoveryService:
                     external_id=external_id,
                 ),
             )
+            key = (device_id, state.capability)
+            previous = seen_this_cycle.get(key)
+            if (
+                previous is not None
+                and previous.source_ref != state.source_ref
+                and (previous.value, previous.status) != (state.value, state.status)
+            ):
+                self.audit.append(
+                    event_type="state_source_conflict",
+                    actor="runtime",
+                    subject_id=device_id,
+                    payload={
+                        "capability": state.capability,
+                        "sources": [
+                            {
+                                "adapter_id": previous.source_ref.adapter_id,
+                                "external_id": previous.source_ref.external_id,
+                                "value": previous.value,
+                                "status": previous.status.value,
+                            },
+                            {
+                                "adapter_id": state.source_ref.adapter_id,
+                                "external_id": state.source_ref.external_id,
+                                "value": state.value,
+                                "status": state.status.value,
+                            },
+                        ],
+                        "retained_value": state.value,
+                    },
+                )
+            seen_this_cycle[key] = state
             await self.state_store.save(state)
             states.append(state)
         return states

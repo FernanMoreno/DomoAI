@@ -67,6 +67,34 @@
       "title": "ErrorDetail",
       "type": "object"
     },
+    "PlanDependencies": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_revision": {
+          "minLength": 1,
+          "title": "Inventory Revision",
+          "type": "string"
+        },
+        "policy_revision": {
+          "minLength": 1,
+          "title": "Policy Revision",
+          "type": "string"
+        },
+        "state_versions": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "State Versions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "inventory_revision",
+        "policy_revision"
+      ],
+      "title": "PlanDependencies",
+      "type": "object"
+    },
     "ValidationStatus": {
       "enum": [
         "valid",
@@ -104,6 +132,17 @@
       "minLength": 1,
       "title": "Digest",
       "type": "string"
+    },
+    "dependencies": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlanDependencies"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

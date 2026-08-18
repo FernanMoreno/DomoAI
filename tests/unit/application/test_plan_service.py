@@ -6,19 +6,34 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError
-from domoai.domain.models import Command, Policy, PolicyAction
+from domoai.domain.models import (
+    Command,
+    Policy,
+    PolicyAction,
+    SourceRef,
+    StateSnapshot,
+    StateStatus,
+)
 from domoai.runtime.events import AuditLog
+from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
 
 async def build_service(policies: list[Policy] | None = None) -> PlanService:
+    adapter, service = await build_service_with_adapter(policies)
+    return service
+
+
+async def build_service_with_adapter(
+    policies: list[Policy] | None = None,
+) -> tuple[SimulatedHomeAdapter, PlanService]:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
     await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
-    return PlanService(registry, state_store, PolicyEngine(policies or []), AuditLog())
+    return adapter, PlanService(registry, state_store, PolicyEngine(policies or []), AuditLog())
 
 
 @pytest.mark.asyncio
@@ -89,3 +104,104 @@ async def test_policy_revision_change_invalidates_previous_validation() -> None:
 
     with pytest.raises(DomainError, match="revision"):
         service.assert_executable(validated)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_state_change_does_not_invalidate_plan() -> None:
+    adapter, service = await build_service_with_adapter()
+    light_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    plan = service.create_plan(
+        "plan-unrelated-1",
+        [
+            Command(
+                id="command-unrelated-1",
+                device_id=light_id,
+                command="turn_on",
+                idempotency_key="intent-unrelated-1",
+            )
+        ],
+    )
+    validated = service.validate(plan)
+
+    unrelated_device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "switch"
+    )
+    await service.state_store.save(
+        StateSnapshot(
+            device_id=unrelated_device_id,
+            capability="power",
+            value=True,
+            observed_at=datetime.now(UTC),
+            received_at=datetime.now(UTC),
+            status=StateStatus.CURRENT,
+            source_ref=SourceRef(adapter_id="fixture", external_id=unrelated_device_id),
+        )
+    )
+
+    executor = PlanExecutor(adapter, service, AuditLog())
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "confirmed_success"
+
+
+@pytest.mark.asyncio
+async def test_own_state_change_invalidates_plan() -> None:
+    adapter, service = await build_service_with_adapter()
+    light_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    plan = service.create_plan(
+        "plan-own-state-1",
+        [
+            Command(
+                id="command-own-state-1",
+                device_id=light_id,
+                command="turn_on",
+                idempotency_key="intent-own-state-1",
+            )
+        ],
+    )
+    validated = service.validate(plan)
+
+    await service.state_store.save(
+        StateSnapshot(
+            device_id=light_id,
+            capability="power",
+            value=True,
+            observed_at=datetime.now(UTC),
+            received_at=datetime.now(UTC),
+            status=StateStatus.CURRENT,
+            source_ref=SourceRef(adapter_id="fixture", external_id=light_id),
+        )
+    )
+
+    with pytest.raises(DomainError, match="revision"):
+        service.assert_executable(validated)
+
+
+@pytest.mark.asyncio
+async def test_validating_unchanged_plan_twice_yields_identical_digest() -> None:
+    service = await build_service()
+    light_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    plan = service.create_plan(
+        "plan-digest-1",
+        [
+            Command(
+                id="command-digest-1",
+                device_id=light_id,
+                command="turn_on",
+                idempotency_key="intent-digest-1",
+            )
+        ],
+    )
+
+    first = service.validate(plan)
+    second = service.validate(plan)
+
+    assert first.validation is not None
+    assert second.validation is not None
+    assert first.validation.digest == second.validation.digest

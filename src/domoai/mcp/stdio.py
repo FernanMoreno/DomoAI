@@ -68,6 +68,7 @@ async def build_configured_server(
         registry=runtime.registry,
         policies=[],
         energy_context_provider=runtime.energy_context_provider,
+        scheduler=runtime.scheduler,
     )
     optimizer_context = OrtoolsMcpContext(
         registry=runtime.registry,
@@ -87,12 +88,16 @@ async def build_configured_server(
 async def run_stdio() -> None:
     runtime, server = await build_configured_server()
     event_task = asyncio.create_task(runtime.event_consumer.run())
+    scheduler_task = asyncio.create_task(runtime.scheduler.run())
     try:
         await server.run_stdio_async()
     finally:
         event_task.cancel()
+        scheduler_task.cancel()
         with suppress(asyncio.CancelledError):
             await event_task
+        with suppress(asyncio.CancelledError):
+            await scheduler_task
         await runtime.close()
 
 

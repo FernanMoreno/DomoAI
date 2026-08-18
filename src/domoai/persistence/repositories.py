@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from domoai.domain.models import AuditEvent, ExecutionOutcome, Plan
+from domoai.domain.models import AuditEvent, Device, ExecutionOutcome, Plan, StateSnapshot
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import redact_payload
 
@@ -38,6 +38,12 @@ class SQLiteJsonRepository:
         row = cursor.fetchone()
         cursor.close()
         return json.loads(row[0]) if row else None
+
+    async def list_all(self) -> list[dict[str, Any]]:
+        cursor = self.database.connection.execute(f"SELECT payload FROM {self.table}")
+        rows = cursor.fetchall()
+        cursor.close()
+        return [json.loads(row[0]) for row in rows]
 
 
 class AuditEventRepository:
@@ -113,23 +119,73 @@ class PlanRepository:
         return Plan.model_validate(payload) if payload is not None else None
 
 
+class DeviceRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self._repository = SQLiteJsonRepository(database, "devices")
+
+    async def save(self, device: Device) -> None:
+        await self._repository.save(device.id, device.model_dump(mode="json"))
+
+    async def get(self, device_id: str) -> Device | None:
+        payload = await self._repository.get(device_id)
+        return Device.model_validate(payload) if payload is not None else None
+
+    async def list_all(self) -> list[Device]:
+        return [Device.model_validate(payload) for payload in await self._repository.list_all()]
+
+    async def delete(self, device_id: str) -> None:
+        self._repository.database.connection.execute(
+            "DELETE FROM devices WHERE id = ?", (device_id,)
+        )
+        self._repository.database.connection.commit()
+
+
+class StateSnapshotRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
+
+    async def save(self, snapshot: StateSnapshot) -> None:
+        self.database.connection.execute(
+            """INSERT INTO state_snapshots
+               (device_id, capability, payload, observed_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, capability) DO UPDATE SET
+               payload=excluded.payload, observed_at=excluded.observed_at""",
+            (
+                snapshot.device_id,
+                snapshot.capability,
+                json.dumps(snapshot.model_dump(mode="json"), sort_keys=True),
+                snapshot.observed_at.isoformat(),
+            ),
+        )
+        self.database.connection.commit()
+
+    async def list_all(self) -> list[StateSnapshot]:
+        cursor = self.database.connection.execute("SELECT payload FROM state_snapshots")
+        rows = cursor.fetchall()
+        cursor.close()
+        return [StateSnapshot.model_validate(json.loads(row[0])) for row in rows]
+
+
 class ExecutionOutcomeRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
 
     async def save(self, outcome: ExecutionOutcome) -> None:
+        payload = json.dumps(outcome.model_dump(mode="json"), sort_keys=True)
         self.database.connection.execute(
             """INSERT INTO execution_outcomes
                (plan_id, command_id, payload, completed_at)
                VALUES (?, ?, ?, ?)
                ON CONFLICT(plan_id, command_id) DO UPDATE SET
                payload=excluded.payload, completed_at=excluded.completed_at""",
-            (
-                outcome.plan_id,
-                outcome.command_id,
-                json.dumps(outcome.model_dump(mode="json"), sort_keys=True),
-                outcome.completed_at.isoformat(),
-            ),
+            (outcome.plan_id, outcome.command_id, payload, outcome.completed_at.isoformat()),
+        )
+        self.database.connection.execute(
+            """INSERT INTO execution_attempts
+               (plan_id, command_id, payload, completed_at)
+               VALUES (?, ?, ?, ?)""",
+            (outcome.plan_id, outcome.command_id, payload, outcome.completed_at.isoformat()),
         )
         self.database.connection.commit()
 
@@ -142,3 +198,92 @@ class ExecutionOutcomeRepository:
         rows = cursor.fetchall()
         cursor.close()
         return [ExecutionOutcome.model_validate(json.loads(row[0])) for row in rows]
+
+    async def list_attempts_for_plan(self, plan_id: str) -> list[ExecutionOutcome]:
+        cursor = self.database.connection.execute(
+            """SELECT payload FROM execution_attempts
+               WHERE plan_id = ? ORDER BY attempt_id""",
+            (plan_id,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [ExecutionOutcome.model_validate(json.loads(row[0])) for row in rows]
+
+
+class ScheduledPlanRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
+
+    async def schedule(self, plan: Plan) -> None:
+        if plan.execute_at is None:
+            raise ValueError("plan.execute_at is required to schedule a plan")
+        now = datetime.now(UTC).isoformat()
+        self.database.connection.execute(
+            """INSERT INTO scheduled_plans
+               (plan_id, execute_at, status, payload, updated_at)
+               VALUES (?, ?, 'pending', ?, ?)""",
+            (
+                plan.id,
+                plan.execute_at.isoformat(),
+                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                now,
+            ),
+        )
+        self.database.connection.commit()
+
+    async def get(self, plan_id: str) -> tuple[Plan, str] | None:
+        cursor = self.database.connection.execute(
+            "SELECT payload, status FROM scheduled_plans WHERE plan_id = ?",
+            (plan_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        return Plan.model_validate(json.loads(row[0])), row[1]
+
+    async def list_pending(self) -> list[Plan]:
+        cursor = self.database.connection.execute(
+            """SELECT payload FROM scheduled_plans
+               WHERE status = 'pending' ORDER BY execute_at""",
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [Plan.model_validate(json.loads(row[0])) for row in rows]
+
+    async def mark_executed(self, plan_id: str) -> None:
+        await self._transition(plan_id, "executed")
+
+    async def mark_missed(self, plan_id: str) -> None:
+        await self._transition(plan_id, "missed")
+
+    async def cancel(self, plan_id: str) -> bool:
+        return await self._transition(plan_id, "cancelled")
+
+    async def reschedule(self, plan_id: str, execute_at: datetime) -> bool:
+        existing = await self.get(plan_id)
+        if existing is None or existing[1] != "pending":
+            return False
+        plan, _status = existing
+        updated_plan = plan.model_copy(update={"execute_at": execute_at})
+        cursor = self.database.connection.execute(
+            """UPDATE scheduled_plans SET execute_at = ?, payload = ?, updated_at = ?
+               WHERE plan_id = ? AND status = 'pending'""",
+            (
+                execute_at.isoformat(),
+                json.dumps(updated_plan.model_dump(mode="json"), sort_keys=True),
+                datetime.now(UTC).isoformat(),
+                plan_id,
+            ),
+        )
+        self.database.connection.commit()
+        return cursor.rowcount > 0
+
+    async def _transition(self, plan_id: str, status: str) -> bool:
+        cursor = self.database.connection.execute(
+            """UPDATE scheduled_plans SET status = ?, updated_at = ?
+               WHERE plan_id = ? AND status = 'pending'""",
+            (status, datetime.now(UTC).isoformat(), plan_id),
+        )
+        self.database.connection.commit()
+        return cursor.rowcount > 0

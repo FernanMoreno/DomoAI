@@ -56,3 +56,29 @@ async def test_unavailable_source_is_explicit_in_semantic_state() -> None:
 
     assert position is not None
     assert position.status.value == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_repeat_refresh_with_no_inventory_change_does_not_advance_revision() -> None:
+    adapter = SimulatedHomeAdapter()
+    state_store = StateStore()
+    service = DiscoveryService(adapter, DeviceRegistry(), state_store, AuditLog())
+
+    first = await service.refresh()
+    second = await service.refresh()
+
+    assert first.runtime_revision == "rev-1"
+    assert second.runtime_revision == "rev-1"
+
+
+@pytest.mark.asyncio
+async def test_availability_change_still_advances_revision() -> None:
+    adapter = SimulatedHomeAdapter()
+    state_store = StateStore()
+    service = DiscoveryService(adapter, DeviceRegistry(), state_store, AuditLog())
+
+    await service.refresh()
+    adapter.set_available("cover.bedroom_blind", False)
+    second = await service.refresh()
+
+    assert second.runtime_revision == "rev-2"

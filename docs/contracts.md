@@ -24,7 +24,8 @@ El único servidor stdio local registra estas tools semánticas:
 | `get_energy_context` | Lee un horizonte completo de tarifas, solar y batería opcional mediante un provider tipado. |
 | `validate_command` | Valida un comando sin invocar el adapter. |
 | `validate_plan` | Aplica capacidades, políticas, revisión y digest a un plan. |
-| `execute_plan` | Ejecuta un plan validado, con digest y aprobación cuando corresponda. |
+| `request_approval` | Emite un `ApprovalGrant` de un solo uso, ligado al digest del plan. Único origen válido de una aprobación. |
+| `execute_plan` | Ejecuta un plan validado. Si requiere confirmación, exige un `approval_id` emitido por `request_approval`; ya no acepta un objeto de aprobación construido por el caller. |
 | `validate_scenario` | Valida un escenario de optimización contra dispositivos y capacidades canónicas. |
 | `optimize_scenario` | Produce una propuesta determinista sin ejecutar comandos físicos. |
 | `explain_solution` | Explica una propuesta tipada sin cambiar el estado del runtime. |
@@ -38,6 +39,478 @@ domotics://devices
 domotics://energy
 domotics://policies
 ```
+
+## Runtime safety hardening (2026-08-18)
+
+Cierra el trust boundary MCP-agente descrito en
+`specs/021-runtime-safety-hardening/`:
+
+- `PolicyEngine.evaluate` ya no confía en `Command.risk_class` del caller.
+  Un `RiskClassifier` server-side clasifica `(device, capability, command)`
+  de forma independiente; el riesgo efectivo es el máximo entre lo que
+  clasifica el runtime y lo que envía el caller, así una política solo puede
+  escalar el riesgo, nunca rebajarlo.
+- `build_runtime()` carga `Settings.policy_config_path` (TOML,
+  `load_policy_file`) en producción en vez de construir un `PolicyEngine([])`
+  vacío; si no hay archivo configurado, se registra un evento de auditoría
+  `policy_default_applied` en vez de arrancar en silencio sin políticas.
+- `execute_plan` ya no acepta un objeto `approval` construido por el
+  caller. `PlanService.approve()`/`DomoticsFacade.approve_plan()` requieren
+  un `ApprovalGrant`, que solo puede emitir `ApprovalStore.issue()` a través
+  de la nueva tool `request_approval`. El grant es de un solo uso y está
+  ligado al `plan_id`/`validation_digest`.
+
+Ver `specs/021-runtime-safety-hardening/contracts/mcp-tools.md` para el
+contrato detallado de `request_approval`/`execute_plan`.
+
+## Dependencias granulares de plan (2026-08-18)
+
+Cierra `specs/022-granular-plan-dependencies/`: `PlanService` ya no invalida
+un plan validado por un `runtime_revision` global único.
+
+- `StateStore.runtime_revision` (inventory revision) ahora solo avanza
+  cuando `DiscoveryService.refresh()` detecta un cambio real en el
+  conjunto de dispositivos/capacidades/disponibilidad — no en cada pasada
+  de discovery.
+- `StateStore` trackea una versión por `(device_id, capability)`, que solo
+  avanza cuando ese valor/status concreto cambia.
+- `ValidationResult` gana un campo aditivo `dependencies: PlanDependencies
+  | None`, con `inventory_revision`, `policy_revision` y los
+  `state_versions` exactos que el plan usó (uno por comando resuelto).
+- `PlanService.assert_executable()` compara solo esas dependencias
+  concretas, no una cadena global. Un sensor no relacionado ya no invalida
+  planes; un cambio real en lo que el plan depende sí sigue marcándolo
+  `STALE_PLAN`.
+- `ValidationResult.runtime_revision` mantiene su forma/significado
+  anterior (compatibilidad con `EnergySkillWorkflow`); `dependencies` es
+  aditivo, no lo reemplaza.
+
+## Event pipeline incremental (2026-08-18)
+
+Cierra `specs/023-incremental-event-pipeline/`: `RuntimeEventConsumer` ya no
+hace `DiscoveryService.refresh()` completo por cada evento.
+
+- Eventos `kind="state_changed"` (todos los adapters ya emiten este kind
+  solo para entidades ya conocidas) toman un camino barato: leen valores
+  actuales vía `AdapterPort.read_state()` sobre los `SourceRef` ya conocidos
+  de ese adapter en el registry, sin re-descubrir identidad/capacidades.
+- Cualquier otro kind (`availability_changed`, `device_membership_changed`,
+  `metadata_changed`, `adapter_diagnostic`, o uno no reconocido) sigue
+  disparando `discovery.refresh()` completo exactamente como antes — la
+  ruta rápida es un allowlist, nunca un denylist, para no crear un punto
+  ciego de detección de inventario.
+- `read_state()` devuelve `device_id` como el external_id crudo del
+  adapter, no el canonical id del registry; `_apply_state_only` lo remapea
+  vía `registry.canonical_id_for_source(...)` antes de guardar, igual que
+  ya hacía `PlanExecutor._readback`.
+- No hay cambios en adapters, `SourceEvent` ni contrato MCP.
+
+## Registry reconciliation (2026-08-18)
+
+Cierra `specs/024-registry-reconciliation/`: `DeviceRegistry.apply_snapshot`
+ya no es puramente aditivo.
+
+- Tras aplicar un snapshot, se reconcilia: para cada adapter_id
+  "autoritativo" esta ronda (no reportado como `failure` en
+  `snapshot.unsupported_sources` — misma señal que ya usa
+  `DiscoveryService.refresh()` para `mark_source_unavailable`), cualquier
+  `SourceRef` conocido de ese adapter que no apareció en esta ronda se
+  elimina (su ruta también); si un dispositivo se queda sin `source_refs`,
+  se elimina del registry entero.
+- Un adapter reportado como fallido/desconectado nunca pierde sus
+  dispositivos por reconciliación — solo la marca de no disponible ya
+  existente. Un dispositivo respaldado por dos adapters distintos sobrevive
+  perdiendo solo uno.
+- `self._identity_to_canonical` nunca se toca en la reconciliación, así que
+  la misma identidad reaparecida más tarde recupera el mismo canonical ID.
+- Sin nuevo estado de lifecycle en `Device`/`AvailabilityStatus`: un
+  dispositivo reconciliado simplemente desaparece del registry.
+- Se añadió `tests/unit/runtime/__init__.py` (faltaba) para que los tests de
+  ese directorio puedan importar `tests.fixtures.*` de forma independiente.
+
+## Persistencia de state/inventory (2026-08-18)
+
+Cierra `specs/025-state-inventory-persistence/`: `devices` y
+`state_snapshots` ya se leen/escriben en SQLite.
+
+- Nuevo `DeviceRepository` (reutiliza la tabla `devices` ya en el allowlist
+  de `SQLiteJsonRepository`) y `StateSnapshotRepository` (dedicado, PK
+  compuesta `(device_id, capability)`), en `persistence/repositories.py`.
+- `DiscoveryService.refresh()` persiste el inventario y estado actuales tras
+  cada rediscovery exitosa (ya acotada a eventos de tipo inventario por
+  P1.2/P1.3, no por cada `state_changed`), y **borra** de `devices`
+  cualquier id que ya no esté en el registry — necesario para que un
+  dispositivo reconciliado (Spec 024) no reaparezca tras un reinicio (bug
+  real capturado por el propio test de esta feature: un simple upsert no
+  bastaba).
+- `build_runtime()` carga lo persistido ANTES de conectar cualquier
+  adapter: `DeviceRegistry.load_persisted()` puebla solo `_devices` y
+  `_source_entity_ids` (legible, pero sin rutas — `resolve_command_route`
+  devuelve `route_not_found` hasta que una discovery real reconfirme el
+  dispositivo esta sesión); `StateStore.load_persisted()` fuerza
+  `status=STALE` en todo lo restaurado, sin importar qué se persistió.
+- No se persiste telemetría histórica completa, solo el último valor por
+  `(device_id, capability)` (mismo shape que la tabla existente). No hay
+  migración nueva.
+
+## Arranque degradado y reconexión (2026-08-18)
+
+Cierra `specs/026-degraded-startup-reconnect/`: `build_runtime()` ya no
+aborta el proceso si el adapter no conecta o la primera discovery falla.
+
+- `build_runtime()` envuelve `connect()` + primer `discovery.refresh()` en
+  un único `try/except (ConnectionError, OSError)`; si falla, audita
+  `runtime_started_degraded` y sigue construyendo el resto de la
+  composición — lo ya cargado desde persistencia (Spec 025) sigue legible.
+- `RuntimeEventConsumer.run()` (el loop de reconexión real, lanzado por
+  `run_stdio()`) ahora consulta `adapter.health()` en cada iteración; si no
+  está conectado, llama `connect()` y luego `discovery.refresh()` antes de
+  volver a `subscribe_events()` — nunca llama `connect()` de más mientras
+  el adapter ya está sano (varios adapters no son seguros de reconectar dos
+  veces sin motivo).
+- El delay fijo de 1s pasa a backoff exponencial acotado (por defecto hasta
+  60s), que se resetea a su valor inicial tras cada reconexión exitosa.
+- `CompositeAdapter` no se modifica: su tolerancia a fallo parcial en
+  `connect()`/`discover()` ya era correcta y se reutiliza tal cual.
+- Sin cambios en cómo se rechaza un comando contra una fuente no conectada
+  (`ConnectionError` → `ExecutionStatus.UNAVAILABLE` en `PlanExecutor`, ya
+  existente).
+
+## Corrección del optimizador energético (2026-08-18)
+
+Cierra `specs/027-energy-optimizer-correctness/`: cuatro defectos
+verificados en el solve path CP-SAT (`optimizer/cp_sat.py`).
+
+- **Signo invertido en `maximize_solar_self_consumption`**: el coeficiente
+  se aplicaba a `grid_export` con la polaridad equivocada — con la
+  declaración esperada (`direction="maximize"`) el solver en realidad
+  MAXIMIZABA la exportación en vez de minimizarla. Corregido con una
+  negación adicional específica de este objetivo (comentario en el código
+  explica por qué `grid_export` tiene polaridad inversa al nombre del
+  objetivo). Probado con un escenario dorado (solar solo en un slot de
+  dos) con única respuesta óptima posible.
+- **Prioridad lexicográfica real**: `_optimize_energy` ya no combina todos
+  los objetivos en una única suma ponderada. Ahora agrupa por `priority`,
+  resuelve cada nivel en orden, y fija el valor alcanzado como cota antes
+  de optimizar el siguiente nivel — un objetivo de mayor prioridad nunca
+  se sacrifica por uno de menor prioridad. Objetivos con la misma
+  `priority` se siguen combinando en un único nivel ponderado.
+- **Soft constraints reales**: un constraint `hard=False` de un tipo
+  soportado gana una variable de violación no-negativa, minimizada como el
+  nivel de MÁS alta prioridad (antes que cualquier objetivo declarado por
+  el usuario) — nunca bloquea la factibilidad. `constraint_summary["soft_violations"]`
+  ya no es un `[]` hardcodeado: reporta `type`/`slot`/`amount` de cada
+  violación real.
+- **`EnergyContext.base_load_forecast`** (nuevo, aditivo, `None` por
+  defecto = cero en todo el horizonte): consumo base de la casa,
+  incorporado a la ecuación de balance y por tanto a todo constraint/coste
+  que dependa de ella.
+- **Diferido explícitamente, no implementado aquí**: constraint de SOC
+  terminal de batería (evita que el optimizador vacíe la batería al final
+  del horizonte por un ahorro marginal) — mismo audit original, epic
+  separado del backlog.
+
+Evidencia: `380 → 387 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Evidencia y reproducibilidad del solver (2026-08-18)
+
+Cierra `specs/028-solver-evidence-reproducibility/`: `OptimizationResult`
+ganó un campo aditivo `solver_evidence: SolverEvidence | None`
+(`optimizer/ports.py`) — antes nada reportaba cómo se llegó a un resultado,
+solo el resultado mismo.
+
+- **`SolverEvidence`**: `solver_name` (`"cp-sat"`), `solver_version`
+  (`ortools.__version__` real cargado en el proceso), `num_search_workers`/
+  `random_seed` (leídos de `solver.parameters` tras configurarlo — hoy
+  siempre `1`/`0`, sin cambios de comportamiento), `wall_time_seconds`
+  (suma de `solver.WallTime()` de cada tier resuelto), `tiers: list[SolvedTier]`
+  y `scenario_fingerprint`.
+- **`SolvedTier`**: `priority` (la prioridad declarada del tier, o `None`
+  para el tier implícito de violación de soft constraints, que no tiene
+  prioridad de usuario), `terms` (nombres de objetivos, o tipos de
+  constraint soft, contenidos en ese tier) y `achieved_value` (el valor
+  entero crudo de CP-SAT que `_solve_tiers` ya usa para fijar la cota del
+  tier — no reescalado a unidad física, ver `research.md` de la spec para
+  el porqué).
+- **`scenario_fingerprint`**: `sha256(scenario.model_dump_json())` del
+  `OptimizationScenario` exacto resuelto — permite verificar
+  criptográficamente que dos resultados vienen de la misma entrada antes de
+  compararlos por reproducibilidad.
+- `solver_evidence` es `None` para cualquier resultado que nunca completó un
+  solve (escenario inválido, infactible o timeout) — nunca se fabrica
+  evidencia de un cómputo que no ocurrió.
+- Cambio puramente aditivo: `build_result(...)` recibe `solver_evidence`
+  como keyword opcional (`None` por defecto), así que todo call site
+  existente sigue funcionando sin cambios. El campo viaja automáticamente a
+  través de MCP porque `OptimizationResult` ya se serializa entero.
+- Probado con un test de reproducibilidad real: la misma escenario resuelta
+  dos veces desde instancias de optimizador independientes produce `plan`,
+  `objective_values`, `tiers` (con cada `achieved_value`) y
+  `scenario_fingerprint` idénticos — `wall_time_seconds` queda
+  explícitamente excluido de la comparación por ser reloj de pared legítimo.
+- Dos tests de paridad MCP preexistentes (`test_ortools_mcp_parity.py`,
+  `test_unified_mcp_compatibility.py`) comparaban resultados byte a byte
+  entre dos clientes independientes y ya excluían `created_at`/
+  `validated_at` por ser reloj de pared; se les añadió excluir también
+  `solver_evidence.wall_time_seconds` por la misma razón — actualización
+  legítima de un test que ya normalizaba campos de reloj de pared, no un
+  fallo de diseño.
+- **Diferido explícitamente, no implementado aquí** (mismo audit original,
+  epic separado del backlog): persistir esta evidencia en un audit log
+  durable (`AuditEventRepository`).
+
+Evidencia: `387 → 394 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Conflictos de identidad cross-adapter auditados (2026-08-18)
+
+Cierra `specs/029-cross-adapter-identity-conflicts/`. El enlace explícito
+`canonical_id` entre adapters ya era correcto e intencional (documentado
+arriba, en "Runtime multi-adapter": las claves estables `identifiers`/
+`connections` solo mantienen identidad DENTRO de una fuente; `canonical_id`
+explícito es el único mecanismo de enlace entre adapters — sin cambios en
+esta spec). El hueco estaba en lo que pasaba DESPUÉS de un merge
+cross-adapter exitoso:
+
+- **`DeviceRegistry.diagnostics`** (`canonical_type_conflict`,
+  `capability_metadata_conflict`, `source_entity_rejected`) se calculaba
+  correctamente pero nadie lo leía nunca — invisible en la práctica y sin
+  límite de crecimiento. Nuevo `DeviceRegistry.drain_diagnostics()`
+  (pop-all) llamado por `DiscoveryService.refresh()` justo después de
+  `apply_snapshot(...)`, auditando cada diagnóstico como
+  `registry_identity_conflict` exactamente una vez por ciclo.
+- **Conflicto de estado mismo-ciclo entre adapters**: `CompositeAdapter.discover()`
+  concatena los `source_states` de todos los sub-adapters conectados;
+  `DiscoveryService._record_states` los guardaba vía `StateStore.save()`
+  solo por `(device_id, capability)` — si dos adapters fusionados por
+  `canonical_id` reportaban la MISMA capability con valores distintos en el
+  mismo ciclo, el segundo `save()` sobrescribía el primero en silencio, sin
+  diagnóstico ni evento de auditoría, sin regla de desempate documentada —
+  asimétrico con `resolve_command_route`, que ya detecta y bloquea esta
+  misma situación (`ambiguous_route`) en el lado de escritura. Corregido:
+  `_record_states` detecta, dentro de su propio bucle por ciclo, cuando más
+  de una fuente distinta reporta un valor para el mismo
+  `(device_id, capability)` y discrepan (misma igualdad `(value, status)`
+  que `StateStore.save()` ya usa para decidir si versionar); audita
+  `state_source_conflict` con ambas fuentes, ambos valores y cuál se
+  retuvo, antes de dejar que el orden last-write-wins existente proceda sin
+  cambios.
+- Cambio puramente observacional: qué valor queda cacheado y qué ruta se
+  ejecuta no cambian en absoluto — solo la visibilidad de los conflictos.
+- **Hallazgo real durante la verificación**: el fixture compartido
+  `tests/fixtures/multi_adapter.py` (reutilizado por specs 008+ desde hace
+  tiempo) ya tenía un `canonical_type_conflict` latente e invisible dentro
+  de un solo adapter — la entidad `light.main_brightness` deriva
+  `semantic_type="sensor"` (no tiene capability "power") mientras
+  `light.main_power` del mismo dispositivo compartido deriva `"light"` —
+  quedó expuesto por primera vez al activar esta observabilidad; el test
+  de "cero conflictos" de esta spec usa una combinación de fixture distinta
+  para evitarlo, sin tocar el fixture compartido (fuera de alcance).
+- Faltaba `tests/unit/application/__init__.py` (mismo gap de colección
+  standalone que Spec 024 encontró en `tests/unit/runtime/`); añadido.
+
+Evidencia: `394 → 401 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Preconditions aplicadas en ejecución (2026-08-18)
+
+Cierra `specs/030-precondition-enforcement/`. `Precondition(device_id,
+capability, expected)` y `Command.preconditions` ya estaban completamente
+modelados desde antes, pero se leían en cero sitios de
+`plan_service.py`/`executor.py` — TOCTOU real: un caller podía declarar
+"solo ejecuta esto si battery.soc == 60" y no cambiaba absolutamente nada
+sobre si/cuándo el comando se ejecutaba.
+
+- `PlanExecutor.execute()` ahora evalúa, justo antes de llamar al adapter
+  por cada comando (no al validar el plan, no una sola vez al principio —
+  freshest read point posible, verificado leyendo la posición donde ya se
+  capturaba `before_state`), cada `Precondition` contra el valor actual en
+  `StateStore`. Satisfecha solo si existe un snapshot y su `value` iguala
+  exactamente a `expected`; ausencia de estado se trata igual que
+  desacuerdo (nunca se asume satisfecho).
+- Si alguna precondition falla, el adapter NUNCA se llama para ese
+  comando: se registra un `ExecutionOutcome` `REJECTED` con
+  `error.code=precondition_failed`, `retryable=True` (el mundo puede
+  cambiar y volver a satisfacerla) y todas las preconditions fallidas
+  listadas — por el mismo camino (`outcome_repository`, audit) que
+  cualquier otro outcome.
+- Comandos dentro del mismo plan ven los efectos confirmados de comandos
+  anteriores del mismo plan: verificado con un test de dos comandos donde
+  el segundo depende del capability que el primero acaba de confirmar vía
+  `_readback` (que ya guardaba en `StateStore` antes de esta spec).
+- Un plan donde todos los comandos fallan sus preconditions completa sin
+  excepción y sin ninguna llamada a adapter.
+- Cambio puramente aditivo: comandos sin preconditions declaradas se
+  comportan exactamente igual que antes (verificado, cero regresión en
+  los tests preexistentes de `test_plan_lifecycle.py`).
+- **Diferido explícitamente, no implementado aquí**: operadores de
+  comparación/rango en preconditions (`battery.soc >= 50`) — solo
+  igualdad exacta por ahora, epic separado.
+
+Evidencia: `401 → 407 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Lifecycle de ejecución atómico y evidencia preservada (2026-08-18)
+
+Cierra `specs/031-execution-lifecycle-atomicity/`. Dos huecos reales de
+corrección de ejecución detectados por el segundo audit del usuario:
+
+- **Claim no atómico**: `PlanExecutor.execute()` escribía `EXECUTING`
+  sin comprobar antes el estado persistido del plan — una segunda
+  llamada `execute()` (retry tras timeout, dos callers en carrera) podía
+  reclamar y re-ejecutar un plan ya `EXECUTING` o ya terminal, reenviando
+  todos los comandos a los adapters. Corregido: cuando hay
+  `plan_repository` configurado, `execute()` lee el estado persistido
+  ANTES de `assert_executable()`; si ya está `EXECUTING` o en cualquier
+  estado terminal, se rechaza con `ErrorCode.INVALID_TRANSITION` sin
+  llamar a ningún adapter. Verificado que un read-then-write sin `await`
+  de I/O real entre medias ya es atómico para el modelo de concurrencia
+  real de este runtime hoy (un proceso, una conexión SQLite compartida,
+  `sqlite3` síncrono envuelto en `async def`) — locking multi-proceso
+  real queda diferido a SQLite hardening (P2.6, aparte).
+- **`execution_outcomes` destruía evidencia previa en un retry**:
+  `ExecutionOutcomeRepository.save()` hacía `ON CONFLICT DO UPDATE` —
+  un segundo save del mismo `(plan_id, command_id)` sobrescribía en
+  silencio la evidencia del primer intento. Corregido de forma
+  puramente aditiva: nueva tabla `execution_attempts` (INSERT-only,
+  `attempt_id` autoincrement) que `save()` también escribe en cada
+  llamada, sin tocar `execution_outcomes` ni ningún lector existente.
+  Nuevo `list_attempts_for_plan(plan_id)` devuelve el historial completo
+  en orden; `list_for_plan(plan_id)` sigue devolviendo solo el más
+  reciente, sin cambios.
+- Cambio de infraestructura mínimo necesario: `SQLiteDatabase.initialize()`
+  pasó de ejecutar un único `SCHEMA_PATH` hardcodeado a ejecutar cada
+  `*.sql` en `migrations/` en orden alfabético — sin tabla de versiones
+  ni framework de migraciones (eso sigue siendo P2.2, diferido); solo lo
+  mínimo para que pueda existir un segundo archivo de migración aditivo
+  (`CREATE TABLE IF NOT EXISTS`).
+- Cambio puramente aditivo: sin `plan_repository` configurado, o para la
+  primera ejecución de un plan, el comportamiento es idéntico a antes.
+- **Diferido explícitamente, no implementado aquí**: persistencia de
+  idempotency keys por-adapter a través de reinicios (hoy solo en
+  memoria en los 6 adapters — confirmado por grep) — el claim atómico ya
+  cierra el disparador más probable en la práctica (una llamada
+  `execute()` duplicada) antes de que llegue a un adapter una segunda
+  vez; locking SQLite multi-proceso real (P2.6).
+
+Evidencia: `407 → 413 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Scheduling temporal de planes (2026-08-18)
+
+Cierra `specs/032-plan-scheduling/`, el tercer y último P0 restante del
+segundo audit del usuario. CP-SAT elegía el slot correcto (Spec 027) pero
+el Plan resultante no tenía semántica temporal — `execute_plan` ejecutaba
+ya, no en el slot elegido.
+
+- **`Plan.execute_at: datetime | None`** (aditivo). `PlanExecutor.execute()`
+  gana un guard, el PRIMERO de todos (antes incluso del claim atómico de
+  la Spec 031): si `execute_at` está en el futuro, rechaza con
+  `ErrorCode.NOT_YET_DUE` sin tocar ningún adapter. Sin `execute_at`,
+  comportamiento idéntico a siempre.
+- **Splitting multi-slot real, no shortcut con pérdida de información**:
+  cuando una optimización asigna loads a slots distintos, `_proposal_plan`
+  los agrupa por su `execute_at` calculado y emite un `Plan` por cada
+  tiempo distinto (cada uno internamente consistente — nunca mezcla
+  comandos de tiempos distintos). Nuevo `OptimizationResult.plans: list[Plan]`;
+  `.plan` se mantiene como el primero (más temprano) para compatibilidad
+  total con todo caller existente de un único load.
+- **`Scheduler` persistente** (`src/domoai/runtime/scheduler.py`, nueva
+  tabla `scheduled_plans` INSERT/UPDATE por fila, no historial —
+  distinto de `execution_attempts` de la Spec 031): mantiene planes
+  aprobados esperando su hora, sobrevive a un reinicio (verificado con un
+  test que reconstruye repository/scheduler contra el mismo fichero
+  SQLite), y aplica una ventana de gracia acotada — un plan vencido más
+  allá de la ventana se marca `missed` y se audita (`schedule_missed`),
+  NUNCA se ejecuta tarde en silencio ("nunca ejecutar todo lo perdido
+  automáticamente", advertencia explícita del audit). Un sweep completo
+  usa un único `now` consistente para todas las filas.
+- La ejecución real, cuando llega la hora, pasa siempre por el mismo
+  `PlanExecutor.execute()` sin modificar — policy, aprobación, claim
+  atómico (Spec 031), preconditions (Spec 030) e idempotencia se aplican
+  exactamente igual que a una ejecución inmediata. El Scheduler nunca
+  llama a un adapter directamente.
+- Nuevas tools MCP: `schedule_plan`, `cancel_scheduled_plan`,
+  `reschedule_plan`, `list_scheduled_plans` (mismo patrón de
+  digest/aprobación que `execute_plan`). `DomoticsMcpContext.scheduler`
+  es opcional (`None` en despliegues sin persistencia, p. ej. el fixture
+  server). El loop de fondo (`Scheduler.run()`) sigue el mismo patrón ya
+  establecido por `RuntimeEventConsumer.run()` (Spec 023/026), arrancado
+  en `run_stdio()`.
+- **Fallout real detectado y corregido**: tres tests preexistentes
+  hardcodeaban la lista exacta de tools MCP (`test_domotics_mcp_contract.py`,
+  `test_unified_mcp_contract.py`, `test_home_assistant_provider_runtime.py`)
+  — actualizados con las 4 tools nuevas. Dos tests de paridad MCP
+  (`test_ortools_mcp_parity.py`, `test_unified_mcp_compatibility.py`) ya
+  normalizaban `created_at`/`wall_time_seconds` antes de comparar dos
+  clientes byte a byte; se les añadió normalizar también
+  `plans[].created_at`/`plans[].validation.validated_at` por la misma
+  razón (reloj de pared).
+- **Deuda técnica cerrada de paso**: `schemas/v1/` llevaba desde las
+  Specs 027/028 sin regenerar (`base_load_forecast`, `solver_evidence`
+  nunca se habían reflejado); `scripts/export_schemas.py` ejecutado,
+  diff puramente aditivo (328 líneas, 5 archivos), sin romper nada.
+- **Diferido explícitamente, no implementado aquí** (backlog P3.1,
+  "scheduler avanzado"): horarios recurrentes, política DST más allá de
+  usar timestamps timezone-aware, scheduling más fino que por-Plan
+  (per-Command), y conectar el state machine de la skill energética
+  portable al nuevo camino de scheduling (sigue usando `execute_plan`
+  inmediato hoy; el scheduling lo inicia el caller/host que elija usar
+  las tools nuevas).
+
+Evidencia: `413 → 433 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Pipeline de CI en GitHub (2026-08-18)
+
+Cierra `specs/033-ci-pipeline/`, el primer ítem de P2 (production
+hardening). No existía `.github/workflows/` en absoluto — todos los
+gates de calidad (ruff, mypy strict, suite completa, `uv.lock`) se
+verificaban solo a mano, cada vez, por el propio agente.
+
+- Nuevo `.github/workflows/ci.yml`, disparado en `pull_request` y
+  `push` a `main`, con 9 jobs INDEPENDIENTES (sin `needs:` entre ellos,
+  para que cada categoría de fallo sea atribuible por separado en la
+  lista de checks del PR): `lock-check` (`uv lock --check`), `lint`
+  (`ruff check .`), `typecheck` (`mypy src`), cuatro jobs de test que
+  reutilizan el split ya existente `tests/{unit,contract,integration,performance}`
+  (sin inventar una categorización nueva), `package` (`uv build` +
+  import de los dos entrypoints `domoai-mcp`/`domoai-lab`), y
+  `schema-check` (`export_schemas.py` + `git diff --exit-code
+  schemas/v1/` — automatiza literalmente la misma secuencia manual que
+  esta sesión usó para detectar y corregir el drift de las Specs
+  027/028 en la Spec 032).
+- Reporte de cobertura (`pytest-cov`, ya instalado) en el job
+  `test-unit`, subido como artifact — sin umbral numérico obligatorio en
+  este incremento: un umbral es una decisión de política que le
+  corresponde al dueño del repo, no algo que inventar en silencio.
+- Verificado localmente que la lógica de `schema-check` (regenerar +
+  diff) es idempotente: dos ejecuciones consecutivas de
+  `export_schemas.py` producen cero diferencias entre sí — el diff
+  contra `HEAD` que se observa ahora mismo es solo ruido de que esta
+  sesión entera sigue sin ningún commit (`30a43bc` sigue siendo HEAD),
+  no un fallo del mecanismo.
+- **Incidente real durante la verificación, corregido en el momento**:
+  al simular deliberadamente una violación de ruff para probar el
+  aislamiento de checks, se usó `git checkout -- src/domoai/domain/errors.py`
+  para revertir — pero como NINGÚN archivo de esta sesión (021-032)
+  estaba comprometido a git todavía, ese comando borró trabajo real no
+  comprometido (los `ErrorCode.PRECONDITION_FAILED`/`NOT_YET_DUE` de las
+  Specs 030/031). Detectado inmediatamente por mypy (`ErrorCode` sin
+  esos atributos) y corregido restaurando las dos líneas exactas antes
+  de continuar; verificado con la suite completa (`433 passed, 8
+  skipped`) que no quedó ningún daño. Lección aplicada de inmediato para
+  el resto de la verificación: nunca más `git checkout --` sobre
+  archivos con cambios no comprometidos de la sesión; usar `Edit` para
+  simular y deshacer roturas deliberadas.
+- **Diferido explícitamente, no implementado aquí** (fuera del alcance
+  de un cambio de código): configurar branch protection en GitHub para
+  exigir estos checks antes de mergear — es un ajuste administrativo del
+  repositorio que solo un admin puede aplicar desde la UI/API de
+  GitHub, no algo que un workflow YAML pueda activar por sí mismo.
+  Escaneo de vulnerabilidades/secretos y SBOM (P2.9, aparte). Umbral
+  numérico de cobertura (decisión de política pendiente).
+
+Evidencia: `uv lock --check`, `ruff check .`, `mypy src` y las cuatro
+suites de test verificadas localmente comando por comando, coincidiendo
+exactamente con cada job — `433 passed, 8 skipped` total, sin cambios de
+comportamiento (esta spec no modifica ningún archivo fuente, solo añade
+`.github/workflows/ci.yml`).
 
 Las respuestas estructuradas incluyen `schema_version` y, cuando procede,
 `runtime_revision`. Las operaciones de mutación pasan por la frontera de plan

@@ -1,5 +1,32 @@
 {
   "$defs": {
+    "BaseLoadPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "power": {
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "power"
+      ],
+      "title": "BaseLoadPoint",
+      "type": "object"
+    },
     "BatteryProfile": {
       "additionalProperties": false,
       "properties": {
@@ -117,6 +144,21 @@
           },
           "title": "Solar Forecast",
           "type": "array"
+        },
+        "base_load_forecast": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BaseLoadPoint"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Load Forecast"
         },
         "battery": {
           "anyOf": [

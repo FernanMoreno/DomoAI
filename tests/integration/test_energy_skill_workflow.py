@@ -94,6 +94,7 @@ async def test_workflow_pauses_then_resumes_through_domotics_execute_once() -> N
         ("mcp", "optimize_scenario"),
         ("mcp", "validate_plan"),
         ("mcp", "explain_solution"),
+        ("mcp", "request_approval"),
         ("mcp", "execute_plan"),
     ]
     assert len(fixture.domotics_adapter.calls) == 1

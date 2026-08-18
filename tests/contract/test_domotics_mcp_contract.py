@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import anyio
@@ -10,13 +11,18 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.application.state_service import StateService
+from domoai.domain.errors import DomainError
+from domoai.domain.models import Policy, PolicyAction
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.optimizer.energy import StaticEnergyContextProvider
+from domoai.persistence.repositories import PlanRepository, ScheduledPlanRepository
+from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.energy import energy_context_for
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
@@ -45,6 +51,32 @@ async def build_context() -> DomoticsMcpContext:
         registry=registry,
         policies=[],
         energy_context_provider=StaticEnergyContextProvider(energy_context_for()),
+    )
+
+
+async def build_context_with_scheduler(tmp_path) -> DomoticsMcpContext:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    plan_repository = PlanRepository(database)
+    executor = PlanExecutor(adapter, plan_service, audit, plan_repository=plan_repository)
+    facade = DomoticsFacade(plan_service, executor)
+    scheduled_plan_repository = ScheduledPlanRepository(database)
+    scheduler = Scheduler(executor, scheduled_plan_repository, audit)
+    return DomoticsMcpContext(
+        discovery=discovery,
+        state_service=StateService(state_store),
+        facade=facade,
+        registry=registry,
+        policies=[],
+        energy_context_provider=StaticEnergyContextProvider(energy_context_for()),
+        scheduler=scheduler,
     )
 
 
@@ -86,7 +118,12 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "get_energy_context",
         "validate_command",
         "validate_plan",
+        "request_approval",
         "execute_plan",
+        "schedule_plan",
+        "cancel_scheduled_plan",
+        "reschedule_plan",
+        "list_scheduled_plans",
     ]
     assert resources == [
         "domotics://areas",
@@ -159,7 +196,12 @@ async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> N
         "get_energy_context",
         "validate_command",
         "validate_plan",
+        "request_approval",
         "execute_plan",
+        "schedule_plan",
+        "cancel_scheduled_plan",
+        "reschedule_plan",
+        "list_scheduled_plans",
     ]
     assert {device["id"] for device in inventory["devices"]} >= {
         "living_room.main_light",
@@ -220,3 +262,275 @@ async def test_two_mcp_clients_receive_equivalent_contract_results() -> None:
 
     assert first_tools == second_tools
     assert first_result == second_result
+
+
+async def build_confirmation_required_context() -> DomoticsMcpContext:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    policies = [
+        Policy(
+            id="confirm-brightness",
+            target={"capability": "brightness"},
+            action=PolicyAction.CONFIRM,
+        )
+    ]
+    plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
+    facade = DomoticsFacade(plan_service, PlanExecutor(adapter, plan_service, audit))
+    return DomoticsMcpContext(
+        discovery=discovery,
+        state_service=StateService(state_store),
+        facade=facade,
+        registry=registry,
+        policies=policies,
+    )
+
+
+async def _validated_plan_requiring_confirmation(
+    server: Any, context: DomoticsMcpContext
+) -> dict[str, Any]:
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    validated = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-confirm-1",
+                    "commands": [
+                        {
+                            "id": "command-confirm-1",
+                            "device_id": device_id,
+                            "command": "set_brightness",
+                            "value": 50,
+                            "idempotency_key": "confirm-intent-1",
+                        }
+                    ],
+                },
+                "mode": "preview",
+            },
+        )
+    )
+    assert validated["validation"]["status"] == "requires_confirmation"
+    return validated
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_rejects_a_caller_fabricated_approval_object() -> None:
+    context = await build_confirmation_required_context()
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+
+    result = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approval_id": "caller-fabricated-approval",
+            },
+        )
+    )
+
+    assert result["error"]["code"] == "approval_required"
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_succeeds_after_request_approval() -> None:
+    context = await build_confirmation_required_context()
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    approval = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "operator",
+            },
+        )
+    )
+    assert "approval_id" in approval
+
+    executed = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approval_id": approval["approval_id"],
+            },
+        )
+    )
+    assert executed["outcomes"][0]["status"] == "confirmed_success"
+
+
+@pytest.mark.asyncio
+async def test_approval_id_is_rejected_once_already_consumed() -> None:
+    context = await build_confirmation_required_context()
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    approval = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "operator",
+            },
+        )
+    )
+    plan = context.plans[validated["plan"]["id"]]
+
+    # Directly exercises single-use enforcement at the authoritative store,
+    # independent of the plan lifecycle mutation that happens on a real
+    # execute_plan call (tracked separately as a lifecycle/idempotency gap).
+    context.approval_store.consume(approval["approval_id"], plan)
+    with pytest.raises(DomainError):
+        context.approval_store.consume(approval["approval_id"], plan)
+
+
+async def _validated_safe_plan(server, context: DomoticsMcpContext) -> dict[str, Any]:
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    return structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-schedulable-1",
+                    "commands": [
+                        {
+                            "id": "command-schedulable-1",
+                            "device_id": device_id,
+                            "command": "set_brightness",
+                            "value": 60,
+                            "unit": "%",
+                            "idempotency_key": "intent-schedulable-1",
+                        }
+                    ],
+                }
+            },
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_plan_defers_execution_until_due(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    validated = await _validated_safe_plan(server, context)
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+
+    scheduled = structured(
+        await server.call_tool(
+            "schedule_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "execute_at": future,
+            },
+        )
+    )
+    assert scheduled["plan_id"] == validated["plan"]["id"]
+
+    pending = structured(await server.call_tool("list_scheduled_plans", {}))
+    assert [item["plan_id"] for item in pending["plans"]] == [validated["plan"]["id"]]
+
+    direct_execution = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+            },
+        )
+    )
+    assert direct_execution["error"]["code"] == "not_yet_due"
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_scheduled_plan_removes_it_from_pending(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    validated = await _validated_safe_plan(server, context)
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await server.call_tool(
+        "schedule_plan",
+        {
+            "plan_id": validated["plan"]["id"],
+            "validation_digest": validated["validation"]["digest"],
+            "execute_at": future,
+        },
+    )
+
+    cancelled = structured(
+        await server.call_tool("cancel_scheduled_plan", {"plan_id": validated["plan"]["id"]})
+    )
+    assert cancelled["cancelled"] is True
+
+    pending = structured(await server.call_tool("list_scheduled_plans", {}))
+    assert pending["plans"] == []
+
+    second_attempt = structured(
+        await server.call_tool("cancel_scheduled_plan", {"plan_id": validated["plan"]["id"]})
+    )
+    assert second_attempt["cancelled"] is False
+
+
+@pytest.mark.asyncio
+async def test_reschedule_plan_changes_pending_execute_at(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    validated = await _validated_safe_plan(server, context)
+    first_time = datetime.now(UTC) + timedelta(hours=1)
+    await server.call_tool(
+        "schedule_plan",
+        {
+            "plan_id": validated["plan"]["id"],
+            "validation_digest": validated["validation"]["digest"],
+            "execute_at": first_time.isoformat(),
+        },
+    )
+    new_time = datetime.now(UTC) + timedelta(hours=2)
+
+    rescheduled = structured(
+        await server.call_tool(
+            "reschedule_plan",
+            {"plan_id": validated["plan"]["id"], "execute_at": new_time.isoformat()},
+        )
+    )
+    assert rescheduled["rescheduled"] is True
+
+    pending = structured(await server.call_tool("list_scheduled_plans", {}))
+    assert pending["plans"][0]["execute_at"] == new_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_schedule_plan_requires_existing_validation() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+
+    result = structured(
+        await server.call_tool(
+            "schedule_plan",
+            {
+                "plan_id": "unknown-plan",
+                "validation_digest": "sha256:unknown",
+                "execute_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+
+    assert "error" in result

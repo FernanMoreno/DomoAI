@@ -27,6 +27,8 @@ from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.config.policy_loader import load_policy_file
+from domoai.config.risk_classification import load_risk_overrides_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
@@ -39,8 +41,11 @@ from domoai.optimizer.ports import EnergyContextProvider
 from domoai.optimizer.providers import ComposedEnergyContextProvider
 from domoai.persistence.repositories import (
     AuditEventRepository,
+    DeviceRepository,
     ExecutionOutcomeRepository,
     PlanRepository,
+    ScheduledPlanRepository,
+    StateSnapshotRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.composite_adapter import CompositeAdapter
@@ -51,6 +56,8 @@ from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.provider_sdk import ProviderRegistry
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.risk_classifier import RiskClassifier
+from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 
 
@@ -219,6 +226,9 @@ class RuntimeComposition:
     audit_repository: AuditEventRepository
     plan_repository: PlanRepository
     outcome_repository: ExecutionOutcomeRepository
+    device_repository: DeviceRepository
+    state_snapshot_repository: StateSnapshotRepository
+    scheduled_plan_repository: ScheduledPlanRepository
     registry: DeviceRegistry
     provider_registry: ProviderRegistry
     state_store: StateStore
@@ -227,6 +237,7 @@ class RuntimeComposition:
     plan_service: PlanService
     facade: DomoticsFacade
     event_consumer: RuntimeEventConsumer
+    scheduler: Scheduler
     energy_context_provider: EnergyContextProvider | None = None
     energy_closers: tuple[Callable[[], None], ...] = ()
 
@@ -248,7 +259,10 @@ async def build_runtime(
     await database.initialize()
     audit_repository = AuditEventRepository(database)
     audit = AuditLog(sink=audit_repository)
+    device_repository = DeviceRepository(database)
+    state_snapshot_repository = StateSnapshotRepository(database)
     registry = DeviceRegistry()
+    registry.load_persisted(await device_repository.list_all())
     provider_registry = ProviderRegistry()
     selected_adapter = adapter or create_adapter(
         resolved_settings,
@@ -260,10 +274,43 @@ async def build_runtime(
     state_store = StateStore(
         stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds)
     )
-    await selected_adapter.connect()
-    discovery = DiscoveryService(selected_adapter, registry, state_store, audit)
-    await discovery.refresh()
-    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    state_store.load_persisted(await state_snapshot_repository.list_all())
+    discovery = DiscoveryService(
+        selected_adapter,
+        registry,
+        state_store,
+        audit,
+        device_repository=device_repository,
+        state_snapshot_repository=state_snapshot_repository,
+    )
+    try:
+        await selected_adapter.connect()
+        await discovery.refresh()
+    except (ConnectionError, OSError) as error:
+        audit.append(
+            event_type="runtime_started_degraded",
+            actor="runtime",
+            subject_id=selected_adapter.adapter_id,
+            payload={"error": str(error)},
+        )
+    if resolved_settings.policy_config_path is not None:
+        policies = load_policy_file(resolved_settings.policy_config_path)
+    else:
+        policies = []
+        audit.append(
+            event_type="policy_default_applied",
+            actor="runtime",
+            subject_id="build_runtime",
+            payload={"reason": "no policy_config_path configured"},
+        )
+    risk_overrides = (
+        load_risk_overrides_file(resolved_settings.risk_overrides_path)
+        if resolved_settings.risk_overrides_path is not None
+        else []
+    )
+    risk_classifier = RiskClassifier(overrides=tuple(risk_overrides))
+    policy_engine = PolicyEngine(policies, risk_classifier)
+    plan_service = PlanService(registry, state_store, policy_engine, audit)
     plan_repository = PlanRepository(database)
     outcome_repository = ExecutionOutcomeRepository(database)
     executor = PlanExecutor(
@@ -275,6 +322,14 @@ async def build_runtime(
     )
     facade = DomoticsFacade(plan_service, executor)
     event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)
+    scheduled_plan_repository = ScheduledPlanRepository(database)
+    scheduler = Scheduler(
+        executor,
+        scheduled_plan_repository,
+        audit,
+        grace_window=timedelta(seconds=resolved_settings.scheduler_grace_window_seconds),
+        poll_interval=timedelta(seconds=resolved_settings.scheduler_poll_interval_seconds),
+    )
     return RuntimeComposition(
         settings=resolved_settings,
         adapter=selected_adapter,
@@ -282,6 +337,9 @@ async def build_runtime(
         audit_repository=audit_repository,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
+        device_repository=device_repository,
+        state_snapshot_repository=state_snapshot_repository,
+        scheduled_plan_repository=scheduled_plan_repository,
         registry=registry,
         provider_registry=provider_registry,
         state_store=state_store,
@@ -290,6 +348,7 @@ async def build_runtime(
         plan_service=plan_service,
         facade=facade,
         event_consumer=event_consumer,
+        scheduler=scheduler,
         energy_context_provider=energy_context_provider,
         energy_closers=energy_closers,
     )

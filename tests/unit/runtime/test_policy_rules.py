@@ -1,5 +1,16 @@
 from domoai.config.policy_loader import choose_policy, load_policies
-from domoai.domain.models import PolicyAction
+from domoai.domain.models import (
+    Capability,
+    CapabilityKind,
+    Command,
+    Device,
+    DeviceType,
+    PolicyAction,
+    RiskClass,
+    SourceRef,
+)
+from domoai.runtime.policy_engine import PolicyEngine
+from domoai.runtime.risk_classifier import RiskClassifier, RiskOverride
 
 
 def test_policy_loader_orders_higher_priority_first() -> None:
@@ -38,4 +49,78 @@ def test_policy_choice_uses_the_first_matching_rule() -> None:
     decision = choose_policy(policies, device_id="front_door.lock", area_id=None)
 
     assert decision.policy_id == "sensitive"
+    assert decision.action is PolicyAction.CONFIRM
+
+
+def _device(device_id: str, device_type: DeviceType) -> Device:
+    return Device(
+        id=device_id,
+        type=device_type,
+        name=device_id,
+        protocol="fixture",
+        source_refs=[SourceRef(adapter_id="fixture", external_id=device_id)],
+        capabilities=[
+            Capability(
+                name="power",
+                kind=CapabilityKind.BOOLEAN,
+                readable=True,
+                writable=True,
+                commands=["open"],
+            )
+        ],
+    )
+
+
+def _command(*, risk_class: RiskClass = RiskClass.SAFE) -> Command:
+    return Command(
+        id="cmd-1",
+        device_id="cover.garage_main",
+        command="open",
+        risk_class=risk_class,
+        idempotency_key="key-1",
+    )
+
+
+def test_caller_supplied_safe_cannot_downgrade_classifier_restricted() -> None:
+    classifier = RiskClassifier(
+        overrides=(RiskOverride(device_id="cover.garage_main", risk_class=RiskClass.RESTRICTED),)
+    )
+    engine = PolicyEngine([], classifier)
+    device = _device("cover.garage_main", DeviceType.COVER)
+
+    decision = engine.evaluate(_command(risk_class=RiskClass.SAFE), device, "power")
+
+    assert decision.action is PolicyAction.CONFIRM
+
+
+def test_caller_supplied_restricted_is_kept_even_when_classifier_says_safe() -> None:
+    engine = PolicyEngine([], RiskClassifier())
+    device = _device("light.kitchen", DeviceType.LIGHT)
+
+    decision = engine.evaluate(_command(risk_class=RiskClass.RESTRICTED), device, "power")
+
+    assert decision.action is PolicyAction.CONFIRM
+
+
+def test_matching_allow_policy_cannot_downgrade_effective_risk_below_confirm() -> None:
+    classifier = RiskClassifier(
+        overrides=(RiskOverride(device_id="cover.garage_main", risk_class=RiskClass.RESTRICTED),)
+    )
+    policies = load_policies(
+        {
+            "policies": [
+                {
+                    "id": "allow-garage",
+                    "target": {"device_id": "cover.garage_main"},
+                    "action": "allow",
+                    "priority": 100,
+                }
+            ]
+        }
+    )
+    engine = PolicyEngine(policies, classifier)
+    device = _device("cover.garage_main", DeviceType.COVER)
+
+    decision = engine.evaluate(_command(risk_class=RiskClass.SAFE), device, "power")
+
     assert decision.action is PolicyAction.CONFIRM

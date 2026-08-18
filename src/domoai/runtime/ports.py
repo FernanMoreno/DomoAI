@@ -64,6 +64,7 @@ class DatabasePort(Protocol):
 
 class PlanRecordPort(Protocol):
     async def save(self, plan: Plan) -> None: ...
+    async def get(self, plan_id: str) -> Plan | None: ...
 
 
 class ExecutionOutcomePort(Protocol):

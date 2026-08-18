@@ -22,6 +22,7 @@ async def test_energy_context_provider_is_available_through_semantic_mcp_read() 
         "horizon",
         "tariffs",
         "solar_forecast",
+        "base_load_forecast",
         "battery",
         "source_revision",
         "observed_at",

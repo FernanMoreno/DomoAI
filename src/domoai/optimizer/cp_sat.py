@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime, timedelta
 from typing import Any
 
+import ortools
 from ortools.sat.python import cp_model
 
 from domoai.domain.models import Command, Plan
-from domoai.optimizer.ports import OptimizationResult, OptimizationStatus, build_result
+from domoai.optimizer.ports import (
+    OptimizationResult,
+    OptimizationStatus,
+    SolvedTier,
+    SolverEvidence,
+    build_result,
+)
 from domoai.optimizer.scenario import Objective, OptimizationScenario, validate_scenario
 from domoai.runtime.registry import DeviceRegistry
 
@@ -15,6 +24,8 @@ POWER_SCALE = 1_000_000  # mW when the public unit is kW
 SOC_SCALE = 1_000_000  # mWh when the public unit is kWh
 EFFICIENCY_SCALE = 1_000
 OBJECTIVE_SCALE = 1_000_000
+
+_SOLVER_VERSION: str = ortools.__version__  # type: ignore[attr-defined]
 
 
 class CpSatOptimizer:
@@ -69,12 +80,37 @@ class CpSatOptimizer:
             return failure
 
         selected_slots = _selected_slots(solver, start_variables)
+        plans = _proposal_plan(scenario, selected_slots)
+        minimize_start_objective = next(
+            (objective for objective in objectives if objective.name == "minimize_start"), None
+        )
+        solver_evidence = SolverEvidence(
+            solver_name="cp-sat",
+            solver_version=_SOLVER_VERSION,
+            num_search_workers=solver.parameters.num_search_workers,
+            random_seed=solver.parameters.random_seed,
+            wall_time_seconds=solver.WallTime(),
+            tiers=[
+                SolvedTier(
+                    priority=(
+                        minimize_start_objective.priority if minimize_start_objective else None
+                    ),
+                    terms=["minimize_start"] if objective_terms else [],
+                    achieved_value=(
+                        solver.Value(sum(objective_terms)) if objective_terms else 0
+                    ),
+                )
+            ],
+            scenario_fingerprint=_scenario_fingerprint(scenario),
+        )
         return build_result(
             scenario_id=scenario.id,
             status=_status(status),
-            plan=_proposal_plan(scenario, selected_slots),
+            plan=plans[0],
+            plans=plans,
             objective_values={"start_slot_sum": float(sum(selected_slots.values()))},
             constraint_summary={"hard_satisfied": True, "soft_violations": []},
+            solver_evidence=solver_evidence,
         )
 
     def _optimize_energy(self, scenario: OptimizationScenario) -> OptimizationResult:
@@ -88,6 +124,11 @@ class CpSatOptimizer:
             for load in scenario.loads
         }
         solar_powers = [to_solver_int(point.power, point.unit) for point in context.solar_forecast]
+        base_load_powers = (
+            [to_solver_int(point.power, point.unit) for point in context.base_load_forecast]
+            if context.base_load_forecast is not None
+            else [0] * horizon_slots
+        )
 
         battery = context.battery
         charge_variables: list[Any] = []
@@ -111,7 +152,7 @@ class CpSatOptimizer:
             charge_gain = EFFICIENCY_SCALE
             discharge_cost = EFFICIENCY_SCALE
 
-        load_bound = sum(load_powers.values())
+        load_bound = sum(load_powers.values()) + max(base_load_powers, default=0)
         solar_bound = max(solar_powers, default=0)
         grid_bound = max(1, load_bound + solar_bound + max_charge + max_discharge) * 2
         for constraint in scenario.constraints:
@@ -121,6 +162,7 @@ class CpSatOptimizer:
         grid_import: list[Any] = []
         grid_export: list[Any] = []
         peak_import = model.NewIntVar(0, grid_bound, "peak_grid_import")
+        soft_violations: list[tuple[str, int, Any]] = []
         for slot in range(horizon_slots):
             importing = model.NewBoolVar(f"grid_importing_{slot}")
             grid_in = model.NewIntVar(0, grid_bound, f"grid_import_{slot}")
@@ -151,35 +193,39 @@ class CpSatOptimizer:
 
             active_load = sum(_active_load_terms(scenario, start_variables, slot, load_powers))
             model.Add(
-                active_load + charge
+                active_load + charge + base_load_powers[slot]
                 == solar_powers[slot] + grid_in + discharge - grid_out
             )
             _add_energy_constraints(
                 model,
                 scenario,
                 slot,
-                active_load,
+                active_load + base_load_powers[slot],
                 charge,
                 grid_in,
                 grid_out,
                 soc_variables,
+                grid_bound,
+                soft_violations,
             )
 
-        _add_energy_objective(
+        solver, status, solved_tiers, wall_time = _solve_tiers(
             model,
             scenario,
             start_variables,
             grid_import,
             grid_export,
             peak_import,
+            soft_violations,
+            resolution_hours=scenario.horizon.resolution_minutes / 60,
+            context=context,
         )
-
-        solver, status = _solve(model, scenario)
         failure = _failure_result(scenario, status)
         if failure is not None:
             return failure
 
         selected_slots = _selected_slots(solver, start_variables)
+        plans = _proposal_plan(scenario, selected_slots)
         slots: list[dict[str, float | int]] = []
         energy_cost = 0.0
         export_kwh = 0.0
@@ -219,10 +265,20 @@ class CpSatOptimizer:
                 }
             )
 
+        solver_evidence = SolverEvidence(
+            solver_name="cp-sat",
+            solver_version=_SOLVER_VERSION,
+            num_search_workers=solver.parameters.num_search_workers,
+            random_seed=solver.parameters.random_seed,
+            wall_time_seconds=wall_time,
+            tiers=solved_tiers,
+            scenario_fingerprint=_scenario_fingerprint(scenario),
+        )
         return build_result(
             scenario_id=scenario.id,
             status=_status(status),
-            plan=_proposal_plan(scenario, selected_slots),
+            plan=plans[0],
+            plans=plans,
             objective_values={
                 "start_slot_sum": float(sum(selected_slots.values())),
                 "energy_cost": energy_cost,
@@ -233,8 +289,9 @@ class CpSatOptimizer:
                 "hard_satisfied": True,
                 "slots": slots,
                 "violations": [],
-                "soft_violations": [],
+                "soft_violations": _reported_soft_violations(solver, soft_violations),
             },
+            solver_evidence=solver_evidence,
         )
 
 
@@ -284,63 +341,190 @@ def _add_energy_constraints(
     grid_import: Any,
     grid_export: Any,
     soc_variables: list[Any],
+    grid_bound: int,
+    soft_violations: list[tuple[str, int, Any]],
 ) -> None:
+    # (actual quantity expression, limit-is-a-maximum, variable bound for a
+    # possible violation IntVar) per supported constraint type.
+    quantity_by_type: dict[str, tuple[Any, bool, int]] = {
+        "max_house_power": (active_load + charge, True, grid_bound),
+        "max_grid_import": (grid_import, True, grid_bound),
+        "max_grid_export": (grid_export, True, grid_bound),
+        "battery_min_soc": (
+            soc_variables[slot] if soc_variables else None,
+            False,
+            SOC_SCALE * 10**6,
+        ),
+        "battery_max_soc": (
+            soc_variables[slot] if soc_variables else None,
+            True,
+            SOC_SCALE * 10**6,
+        ),
+    }
     for constraint in scenario.constraints:
-        if not constraint.hard:
+        resolved = quantity_by_type.get(constraint.type)
+        if resolved is None:
             continue
-        if constraint.type == "max_house_power":
-            model.Add(active_load + charge <= to_solver_int(constraint.value, constraint.unit))
-        elif constraint.type == "max_grid_import":
-            model.Add(grid_import <= to_solver_int(constraint.value, constraint.unit))
-        elif constraint.type == "max_grid_export":
-            model.Add(grid_export <= to_solver_int(constraint.value, constraint.unit))
-        elif constraint.type == "battery_min_soc":
-            model.Add(soc_variables[slot] >= to_energy_int(constraint.value))
-        elif constraint.type == "battery_max_soc":
-            model.Add(soc_variables[slot] <= to_energy_int(constraint.value))
+        actual, is_max_bound, violation_bound = resolved
+        if actual is None:
+            continue
+        limit = (
+            to_energy_int(constraint.value)
+            if constraint.type in {"battery_min_soc", "battery_max_soc"}
+            else to_solver_int(constraint.value, constraint.unit)
+        )
+        if constraint.hard:
+            if is_max_bound:
+                model.Add(actual <= limit)
+            else:
+                model.Add(actual >= limit)
+            continue
+        violation = model.NewIntVar(
+            0, violation_bound, f"soft_violation_{constraint.type}_{slot}"
+        )
+        if is_max_bound:
+            model.Add(violation >= actual - limit)
+        else:
+            model.Add(violation >= limit - actual)
+        soft_violations.append((constraint.type, slot, violation))
 
 
-def _add_energy_objective(
+def _objective_terms(
+    objective: Objective,
+    context: Any,
+    resolution_hours: float,
+    start_variables: dict[str, dict[int, Any]],
+    grid_import: list[Any],
+    grid_export: list[Any],
+    peak_import: Any,
+) -> list[Any]:
+    sign = -1 if objective.direction == "maximize" else 1
+    weight = objective.weight
+    terms: list[Any] = []
+    if objective.name == "minimize_start":
+        coefficient = max(1, round(sign * weight))
+        for variables in start_variables.values():
+            for start, variable in variables.items():
+                terms.append(coefficient * start * variable)
+    elif objective.name == "minimize_energy_cost":
+        for slot, variable in enumerate(grid_import):
+            coefficient = round(
+                sign
+                * weight
+                * context.tariffs[slot].price_per_kwh
+                * resolution_hours
+                * OBJECTIVE_SCALE
+            )
+            terms.append(coefficient * variable)
+    elif objective.name == "minimize_peak_import":
+        terms.append(round(sign * weight * OBJECTIVE_SCALE) * peak_import)
+    elif objective.name == "maximize_solar_self_consumption":
+        # grid_export has inverse polarity to self-consumption (solar is a
+        # fixed exogenous input, so maximizing self-consumption means
+        # minimizing export), unlike every other objective's term variable —
+        # apply the direction sign a second time to correct for that
+        # inversion.
+        for variable in grid_export:
+            coefficient = round(-sign * weight * resolution_hours * OBJECTIVE_SCALE)
+            terms.append(coefficient * variable)
+    return terms
+
+
+def _energy_objective_tiers(scenario: OptimizationScenario) -> list[list[Objective]]:
+    objectives = scenario.objectives or [Objective(name="minimize_start", direction="minimize")]
+    by_priority: dict[int, list[Objective]] = {}
+    for objective in objectives:
+        by_priority.setdefault(objective.priority, []).append(objective)
+    return [by_priority[priority] for priority in sorted(by_priority)]
+
+
+def _solve_tiers(
     model: Any,
     scenario: OptimizationScenario,
     start_variables: dict[str, dict[int, Any]],
     grid_import: list[Any],
     grid_export: list[Any],
     peak_import: Any,
-) -> None:
-    context = scenario.energy_context
-    assert context is not None
-    resolution_hours = scenario.horizon.resolution_minutes / 60
-    objectives = scenario.objectives or [
-        Objective(name="minimize_start", direction="minimize")
-    ]
-    terms: list[Any] = []
-    for objective in objectives:
-        sign = -1 if objective.direction == "maximize" else 1
-        weight = objective.weight
-        if objective.name == "minimize_start":
-            coefficient = max(1, round(sign * weight))
-            for variables in start_variables.values():
-                for start, variable in variables.items():
-                    terms.append(coefficient * start * variable)
-        elif objective.name == "minimize_energy_cost":
-            for slot, variable in enumerate(grid_import):
-                coefficient = round(
-                    sign
-                    * weight
-                    * context.tariffs[slot].price_per_kwh
-                    * resolution_hours
-                    * OBJECTIVE_SCALE
+    soft_violations: list[tuple[str, int, Any]],
+    *,
+    resolution_hours: float,
+    context: Any,
+) -> tuple[Any, int, list[SolvedTier], float]:
+    tiers: list[dict[str, Any]] = []
+    if soft_violations:
+        distinct_types = sorted({violation_type for violation_type, _slot, _var in soft_violations})
+        tiers.append(
+            {
+                "priority": None,
+                "terms": distinct_types,
+                "tier_terms": [violation for (_type, _slot, violation) in soft_violations],
+            }
+        )
+    for priority_group in _energy_objective_tiers(scenario):
+        tier_terms: list[Any] = []
+        for objective in priority_group:
+            tier_terms.extend(
+                _objective_terms(
+                    objective,
+                    context,
+                    resolution_hours,
+                    start_variables,
+                    grid_import,
+                    grid_export,
+                    peak_import,
                 )
-                terms.append(coefficient * variable)
-        elif objective.name == "minimize_peak_import":
-            terms.append(round(sign * weight * OBJECTIVE_SCALE) * peak_import)
-        elif objective.name == "maximize_solar_self_consumption":
-            for variable in grid_export:
-                coefficient = round(sign * weight * resolution_hours * OBJECTIVE_SCALE)
-                terms.append(coefficient * variable)
-    if terms:
-        model.Minimize(sum(terms))
+            )
+        if tier_terms:
+            tiers.append(
+                {
+                    "priority": priority_group[0].priority,
+                    "terms": [objective.name for objective in priority_group],
+                    "tier_terms": tier_terms,
+                }
+            )
+
+    solver: Any = None
+    status: Any = cp_model.UNKNOWN
+    solved_tiers: list[SolvedTier] = []
+    wall_time = 0.0
+    for tier in tiers:
+        tier_terms = tier["tier_terms"]
+        model.Minimize(sum(tier_terms))
+        solver, status = _solve(model, scenario)
+        wall_time += solver.WallTime()
+        if status not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
+            return solver, status, solved_tiers, wall_time
+        achieved_value = solver.Value(sum(tier_terms))
+        solved_tiers.append(
+            SolvedTier(
+                priority=tier["priority"], terms=tier["terms"], achieved_value=achieved_value
+            )
+        )
+        model.Add(sum(tier_terms) <= achieved_value)
+    if solver is None:
+        solver, status = _solve(model, scenario)
+        wall_time += solver.WallTime()
+    return solver, status, solved_tiers, wall_time
+
+
+def _scenario_fingerprint(scenario: OptimizationScenario) -> str:
+    return hashlib.sha256(scenario.model_dump_json().encode("utf-8")).hexdigest()
+
+
+def _reported_soft_violations(
+    solver: Any, soft_violations: list[tuple[str, int, Any]]
+) -> list[dict[str, Any]]:
+    reported: list[dict[str, Any]] = []
+    for constraint_type, slot, violation in soft_violations:
+        value = solver.Value(violation)
+        if value <= 0:
+            continue
+        is_soc_type = constraint_type in {"battery_min_soc", "battery_max_soc"}
+        scale = SOC_SCALE if is_soc_type else POWER_SCALE
+        reported.append(
+            {"type": constraint_type, "slot": slot, "amount": value / scale}
+        )
+    return reported
 
 
 def _load_power(load: Any, resolution_minutes: int) -> int:
@@ -359,22 +543,38 @@ def _selected_slots(solver: Any, variables: dict[str, dict[int, Any]]) -> dict[s
     }
 
 
-def _proposal_plan(scenario: OptimizationScenario, selected_slots: dict[str, int]) -> Plan:
-    return Plan(
-        id=f"proposal-{scenario.id}",
-        commands=[
-            Command(
-                id=f"{scenario.id}:{load.id}",
-                device_id=load.device_id,
-                command=load.command,
-                value=load.value,
-                unit=load.unit,
-                idempotency_key=f"optimization:{scenario.id}:{load.id}",
-                intent=f"scheduled_slot:{selected_slots[load.id]}",
+def _proposal_plan(scenario: OptimizationScenario, selected_slots: dict[str, int]) -> list[Plan]:
+    groups: dict[datetime, list[Any]] = {}
+    for load in scenario.loads:
+        slot = selected_slots[load.id]
+        execute_at = scenario.horizon.start + timedelta(
+            minutes=slot * scenario.horizon.resolution_minutes
+        )
+        groups.setdefault(execute_at, []).append(load)
+    ordered_times = sorted(groups)
+    single = len(ordered_times) == 1
+    plans: list[Plan] = []
+    for index, execute_at in enumerate(ordered_times):
+        plan_id = f"proposal-{scenario.id}" if single else f"proposal-{scenario.id}-{index}"
+        plans.append(
+            Plan(
+                id=plan_id,
+                execute_at=execute_at,
+                commands=[
+                    Command(
+                        id=f"{scenario.id}:{load.id}",
+                        device_id=load.device_id,
+                        command=load.command,
+                        value=load.value,
+                        unit=load.unit,
+                        idempotency_key=f"optimization:{scenario.id}:{load.id}",
+                        intent=f"scheduled_slot:{selected_slots[load.id]}",
+                    )
+                    for load in groups[execute_at]
+                ],
             )
-            for load in scenario.loads
-        ],
-    )
+        )
+    return plans
 
 
 def _solve(model: Any, scenario: OptimizationScenario) -> tuple[Any, int]:

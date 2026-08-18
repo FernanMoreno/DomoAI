@@ -492,7 +492,19 @@ class EnergySkillWorkflow:
                 "dry_run": False,
             }
             if approval is not None:
-                arguments["approval"] = approval.model_dump(mode="json", exclude_none=True)
+                approval_response = await self._call_tool(
+                    "mcp",
+                    "request_approval",
+                    {
+                        "plan_id": plan_id,
+                        "validation_digest": validation_digest,
+                        "approved_by": approval.approved_by or "operator",
+                    },
+                    stage=WorkflowStage.EXECUTING,
+                )
+                arguments["approval_id"] = self._required_string(
+                    approval_response, "approval_id", "approval issuance"
+                )
             response = await self._call(
                 "execute_plan", arguments, stage=WorkflowStage.EXECUTING
             )
@@ -561,6 +573,16 @@ class EnergySkillWorkflow:
         stage: WorkflowStage,
     ) -> dict[str, Any]:
         provider, tool, _mode = self._operation_bindings[operation]
+        return await self._call_tool(provider, tool, arguments, stage=stage)
+
+    async def _call_tool(
+        self,
+        provider: str,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        stage: WorkflowStage,
+    ) -> dict[str, Any]:
         try:
             raw = await self.router.call(provider, tool, arguments)
         except Exception as error:

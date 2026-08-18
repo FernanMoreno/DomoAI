@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 
 from domoai.application.discovery_service import DiscoveryService
-from domoai.domain.models import SourceEvent
+from domoai.domain.models import SourceEvent, SourceRef
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.state_store import StateStore
+
+_VALUE_ONLY_EVENT_KIND = "state_changed"
 
 
 class RuntimeEventConsumer:
@@ -44,7 +46,7 @@ class RuntimeEventConsumer:
             return None
 
         try:
-            await self.discovery.refresh()
+            await self._apply_event(event)
         except (ConnectionError, OSError) as error:
             stale = await self.state_store.mark_all_stale()
             self.audit.append(
@@ -63,14 +65,29 @@ class RuntimeEventConsumer:
         )
         return event
 
-    async def run(self, *, reconnect_delay: float = 1.0) -> None:
-        """Keep applying events and reconnect after a source stream failure."""
+    async def run(
+        self, *, reconnect_delay: float = 1.0, max_reconnect_delay: float = 60.0
+    ) -> None:
+        """Keep applying events and reconnect (with capped backoff) after a failure."""
 
+        delay = reconnect_delay
         while True:
+            health = await self.adapter.health()
+            if not health.connected:
+                try:
+                    await self.adapter.connect()
+                    await self.discovery.refresh()
+                except (ConnectionError, OSError) as error:
+                    await self._mark_unavailable(error)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, max_reconnect_delay)
+                    continue
+                delay = reconnect_delay
+
             try:
-                async for _event in self.adapter.subscribe_events():
+                async for event in self.adapter.subscribe_events():
                     try:
-                        await self.discovery.refresh()
+                        await self._apply_event(event)
                     except (ConnectionError, OSError) as error:
                         await self._mark_unavailable(error)
                         break
@@ -78,7 +95,39 @@ class RuntimeEventConsumer:
                     return
             except (ConnectionError, OSError) as error:
                 await self._mark_unavailable(error)
-            await asyncio.sleep(reconnect_delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_reconnect_delay)
+
+    async def _apply_event(self, event: SourceEvent) -> None:
+        """Apply state-only events cheaply; fall back to full discovery otherwise."""
+
+        if event.kind == _VALUE_ONLY_EVENT_KIND:
+            await self._apply_state_only()
+        else:
+            await self.discovery.refresh()
+
+    async def _apply_state_only(self) -> None:
+        source_refs = self._known_source_refs(self.adapter.adapter_id)
+        if not source_refs:
+            return
+        snapshots = await self.adapter.read_state(source_refs)
+        registry = self.discovery.registry
+        for snapshot in snapshots:
+            canonical_id = registry.canonical_id_for_source(
+                snapshot.source_ref.adapter_id, snapshot.source_ref.external_id
+            )
+            if canonical_id is None:
+                continue
+            normalized = snapshot.model_copy(update={"device_id": canonical_id})
+            await self.state_store.save(normalized)
+
+    def _known_source_refs(self, adapter_id: str) -> list[SourceRef]:
+        return [
+            source_ref
+            for device in self.discovery.registry.devices
+            for source_ref in device.source_refs
+            if source_ref.adapter_id == adapter_id
+        ]
 
     async def _mark_unavailable(self, error: Exception) -> None:
         stale = await self.state_store.mark_all_stale()

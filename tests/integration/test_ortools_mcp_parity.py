@@ -17,6 +17,17 @@ def normalized_json(payload: object) -> str:
             validation = plan.get("validation")
             if isinstance(validation, dict):
                 validation.pop("validated_at", None)
+        solver_evidence = normalized.get("solver_evidence")
+        if isinstance(solver_evidence, dict):
+            solver_evidence.pop("wall_time_seconds", None)
+        plans = normalized.get("plans")
+        if isinstance(plans, list):
+            for item in plans:
+                if isinstance(item, dict):
+                    item.pop("created_at", None)
+                    item_validation = item.get("validation")
+                    if isinstance(item_validation, dict):
+                        item_validation.pop("validated_at", None)
     return json.dumps(normalized, sort_keys=True)
 
 

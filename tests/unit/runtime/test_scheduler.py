@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, Plan
-from domoai.persistence.repositories import ScheduledPlanRepository
+from domoai.domain.models import Command, Plan, RecurrenceRule, RiskClass
+from domoai.persistence.repositories import RecurringScheduleRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -31,8 +31,27 @@ async def _build_scheduler(
     database = SQLiteDatabase(tmp_path / "repo.sqlite3")
     await database.initialize()
     repository = ScheduledPlanRepository(database)
-    scheduler = Scheduler(executor, repository, audit, grace_window=grace_window)
+    recurring_repository = RecurringScheduleRepository(database)
+    scheduler = Scheduler(
+        executor,
+        repository,
+        audit,
+        grace_window=grace_window,
+        recurring_repository=recurring_repository,
+    )
     return adapter, plan_service, scheduler, repository, audit
+
+
+def _command(device_id: str, *, plan_id: str, risk_class: RiskClass = RiskClass.SAFE) -> Command:
+    return Command(
+        id=f"{plan_id}:command",
+        device_id=device_id,
+        command="set_brightness",
+        value=60,
+        unit="%",
+        idempotency_key=f"{plan_id}:intent",
+        risk_class=risk_class,
+    )
 
 
 def _plan(device_id: str, *, plan_id: str, execute_at: datetime) -> Plan:
@@ -204,3 +223,145 @@ async def test_reschedule_moves_execution_time(tmp_path) -> None:
     assert await scheduler.reschedule("plan-reschedule-1", new_time) is True
     pending = await scheduler.list_pending()
     assert pending[0].execute_at == new_time
+
+
+@pytest.mark.asyncio
+async def test_due_recurring_schedule_executes_and_advances(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-1"
+    await scheduler.recurring_repository.create(
+        schedule_id,
+        [_command(device_id, plan_id=schedule_id)],
+        rule,
+        datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    results = await scheduler.run_due_recurring()
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "executed"}]
+    assert len(adapter.calls) == 1
+    active = await scheduler.list_recurring()
+    assert active[0][0] == schedule_id
+    assert active[0][3] > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_run_due_recurring_does_not_double_execute_before_next_occurrence(
+    tmp_path,
+) -> None:
+    adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-2"
+    await scheduler.recurring_repository.create(
+        schedule_id,
+        [_command(device_id, plan_id=schedule_id)],
+        rule,
+        datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    await scheduler.run_due_recurring()
+    second_sweep = await scheduler.run_due_recurring()
+
+    assert second_sweep == []
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_recurring_occurrence_is_skipped_when_device_no_longer_exists(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-invalid"
+    await scheduler.recurring_repository.create(
+        schedule_id,
+        [_command("no-such-device", plan_id=schedule_id)],
+        rule,
+        datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    results = await scheduler.run_due_recurring()
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "skipped"}]
+    assert adapter.calls == []
+    active = await scheduler.list_recurring()
+    assert active[0][3] > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_recurring_occurrence_requiring_confirmation_is_skipped_never_auto_approved(
+    tmp_path,
+) -> None:
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-confirm"
+    await scheduler.recurring_repository.create(
+        schedule_id,
+        [_command(device_id, plan_id=schedule_id, risk_class=RiskClass.CONFIRM)],
+        rule,
+        datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    results = await scheduler.run_due_recurring()
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "skipped"}]
+    assert adapter.calls == []
+    skipped_events = [
+        event for event in audit.events if event.event_type == "recurring_occurrence_skipped"
+    ]
+    assert len(skipped_events) == 1
+    assert skipped_events[0].payload["reason"] == "requires_confirmation"
+    assert skipped_events[0].payload["schedule_id"] == schedule_id
+
+
+@pytest.mark.asyncio
+async def test_recurring_schedule_continues_after_a_skipped_occurrence(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-recover"
+    await scheduler.recurring_repository.create(
+        schedule_id,
+        [_command(device_id, plan_id=schedule_id, risk_class=RiskClass.CONFIRM)],
+        rule,
+        datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    await scheduler.run_due_recurring()
+    active = await scheduler.list_recurring()
+    next_time = active[0][3]
+
+    second_results = await scheduler.run_due_recurring(now=next_time)
+
+    assert second_results == [{"schedule_id": schedule_id, "outcome": "skipped"}]
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_recurring_schedule_stops_future_occurrences(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "recurring-cancel"
+    await scheduler.schedule_recurring(
+        schedule_id, [_command(device_id, plan_id=schedule_id)], rule
+    )
+
+    assert await scheduler.cancel_recurring(schedule_id) is True
+    assert await scheduler.list_recurring() == []
+
+    results = await scheduler.run_due_recurring(now=datetime.now(UTC) + timedelta(days=2))
+    assert results == []
+    assert adapter.calls == []

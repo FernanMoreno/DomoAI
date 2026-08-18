@@ -7,7 +7,15 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
-from domoai.domain.models import AuditEvent, Device, ExecutionOutcome, Plan, StateSnapshot
+from domoai.domain.models import (
+    AuditEvent,
+    Command,
+    Device,
+    ExecutionOutcome,
+    Plan,
+    RecurrenceRule,
+    StateSnapshot,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import redact_payload
 
@@ -335,6 +343,88 @@ class ScheduledPlanRepository:
             """UPDATE scheduled_plans SET status = ?, updated_at = ?
                WHERE plan_id = ? AND status = 'pending'""",
             (status, datetime.now(UTC).isoformat(), plan_id),
+        )
+        self.database.connection.commit()
+        return cursor.rowcount > 0
+
+
+class RecurringScheduleRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
+
+    async def create(
+        self,
+        schedule_id: str,
+        commands: list[Command],
+        rule: RecurrenceRule,
+        next_execute_at: datetime,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.database.connection.execute(
+            """INSERT INTO recurring_schedules
+               (schedule_id, template_payload, recurrence_payload, next_execute_at,
+                status, updated_at)
+               VALUES (?, ?, ?, ?, 'active', ?)""",
+            (
+                schedule_id,
+                json.dumps(
+                    [command.model_dump(mode="json") for command in commands], sort_keys=True
+                ),
+                json.dumps(rule.model_dump(mode="json"), sort_keys=True),
+                next_execute_at.isoformat(),
+                now,
+            ),
+        )
+        self.database.connection.commit()
+
+    async def get(
+        self, schedule_id: str
+    ) -> tuple[list[Command], RecurrenceRule, datetime, str] | None:
+        cursor = self.database.connection.execute(
+            """SELECT template_payload, recurrence_payload, next_execute_at, status
+               FROM recurring_schedules WHERE schedule_id = ?""",
+            (schedule_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        commands = [Command.model_validate(item) for item in json.loads(row[0])]
+        rule = RecurrenceRule.model_validate(json.loads(row[1]))
+        return commands, rule, datetime.fromisoformat(row[2]), row[3]
+
+    async def list_active(
+        self,
+    ) -> list[tuple[str, list[Command], RecurrenceRule, datetime]]:
+        cursor = self.database.connection.execute(
+            """SELECT schedule_id, template_payload, recurrence_payload, next_execute_at
+               FROM recurring_schedules WHERE status = 'active' ORDER BY next_execute_at""",
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            (
+                row[0],
+                [Command.model_validate(item) for item in json.loads(row[1])],
+                RecurrenceRule.model_validate(json.loads(row[2])),
+                datetime.fromisoformat(row[3]),
+            )
+            for row in rows
+        ]
+
+    async def advance(self, schedule_id: str, next_execute_at: datetime) -> None:
+        self.database.connection.execute(
+            """UPDATE recurring_schedules SET next_execute_at = ?, updated_at = ?
+               WHERE schedule_id = ? AND status = 'active'""",
+            (next_execute_at.isoformat(), datetime.now(UTC).isoformat(), schedule_id),
+        )
+        self.database.connection.commit()
+
+    async def cancel(self, schedule_id: str) -> bool:
+        cursor = self.database.connection.execute(
+            """UPDATE recurring_schedules SET status = 'cancelled', updated_at = ?
+               WHERE schedule_id = ? AND status = 'active'""",
+            (datetime.now(UTC).isoformat(), schedule_id),
         )
         self.database.connection.commit()
         return cursor.rowcount > 0

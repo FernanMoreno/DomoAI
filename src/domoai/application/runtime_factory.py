@@ -44,6 +44,7 @@ from domoai.persistence.repositories import (
     DeviceRepository,
     ExecutionOutcomeRepository,
     PlanRepository,
+    RecurringScheduleRepository,
     ScheduledPlanRepository,
     StateSnapshotRepository,
 )
@@ -238,6 +239,7 @@ class RuntimeComposition:
     device_repository: DeviceRepository
     state_snapshot_repository: StateSnapshotRepository
     scheduled_plan_repository: ScheduledPlanRepository
+    recurring_schedule_repository: RecurringScheduleRepository
     registry: DeviceRegistry
     provider_registry: ProviderRegistry
     state_store: StateStore
@@ -335,12 +337,14 @@ async def build_runtime(
     facade = DomoticsFacade(plan_service, executor)
     event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)
     scheduled_plan_repository = ScheduledPlanRepository(database)
+    recurring_schedule_repository = RecurringScheduleRepository(database)
     scheduler = Scheduler(
         executor,
         scheduled_plan_repository,
         audit,
         grace_window=timedelta(seconds=resolved_settings.scheduler_grace_window_seconds),
         poll_interval=timedelta(seconds=resolved_settings.scheduler_poll_interval_seconds),
+        recurring_repository=recurring_schedule_repository,
     )
     return RuntimeComposition(
         settings=resolved_settings,
@@ -352,6 +356,7 @@ async def build_runtime(
         device_repository=device_repository,
         state_snapshot_repository=state_snapshot_repository,
         scheduled_plan_repository=scheduled_plan_repository,
+        recurring_schedule_repository=recurring_schedule_repository,
         registry=registry,
         provider_registry=provider_registry,
         state_store=state_store,

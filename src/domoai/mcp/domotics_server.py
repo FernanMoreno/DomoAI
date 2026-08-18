@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.state_service import StateService
-from domoai.domain.models import Command, DeviceType, Plan, PlanStatus, Policy
+from domoai.domain.models import Command, DeviceType, Plan, PlanStatus, Policy, RecurrenceRule
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
 from domoai.mcp.resources import (
@@ -347,6 +347,88 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                         "execute_at": plan.execute_at.isoformat() if plan.execute_at else None,
                     }
                     for plan in pending
+                ],
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="schedule_recurring_plan",
+        description=(
+            "Schedule a plan's commands to run repeatedly at a fixed local "
+            "time, optionally restricted to specific weekdays. Every "
+            "occurrence is independently revalidated against live state "
+            "before it executes; an occurrence requiring confirmation is "
+            "skipped and audited, never auto-approved, and recurrence "
+            "continues to its next scheduled time."
+        ),
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def schedule_recurring_plan(
+        plan_id: str,
+        time_of_day: str,
+        timezone: str,
+        days_of_week: list[int] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            plan = context.plans.get(plan_id)
+            if plan is None:
+                raise ValueError(f"Unknown plan: {plan_id}")
+            hour, minute = (int(part) for part in time_of_day.split(":"))
+            rule = RecurrenceRule(
+                time_of_day=time(hour=hour, minute=minute),
+                timezone=timezone,
+                days_of_week=days_of_week,
+            )
+            schedule_id = f"recurring:{plan_id}:{datetime.now(UTC).isoformat()}"
+            first_occurrence = await context.scheduler.schedule_recurring(
+                schedule_id, plan.commands, rule
+            )
+            return {
+                "schema_version": "v1",
+                "schedule_id": schedule_id,
+                "next_execute_at": first_occurrence.isoformat(),
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="cancel_recurring_schedule",
+        description="Cancel a recurring schedule; stops all future occurrences.",
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    async def cancel_recurring_schedule(schedule_id: str) -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            cancelled = await context.scheduler.cancel_recurring(schedule_id)
+            return {"schema_version": "v1", "schedule_id": schedule_id, "cancelled": cancelled}
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="list_recurring_schedules",
+        description="List active recurring schedules and their next occurrence.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    async def list_recurring_schedules() -> dict[str, Any]:
+        try:
+            if context.scheduler is None:
+                raise ValueError("Scheduling is unavailable in this deployment")
+            active = await context.scheduler.list_recurring()
+            return {
+                "schema_version": "v1",
+                "schedules": [
+                    {
+                        "schedule_id": schedule_id,
+                        "next_execute_at": next_execute_at.isoformat(),
+                    }
+                    for schedule_id, _commands, _rule, next_execute_at in active
                 ],
             }
         except (ValueError, ValidationError) as error:

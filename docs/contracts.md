@@ -985,6 +985,114 @@ de detección que faltaba, no corrige una vulnerabilidad ya presente.
 Evidencia: `490 passed, 8 skipped` (sin cambios — esta spec no toca
 código Python). Ruff y mypy limpios.
 
+## Planificación recurrente con revalidación por-ocurrencia (2026-08-19)
+
+Cierra `specs/042-recurring-plan-scheduling/`, primer ítem de P3. Gap
+verificado leyendo `Scheduler` (Spec 032) completo: solo soporta una
+ejecución por `Plan` — `mark_executed(plan_id)` lo mueve a un estado
+terminal `executed` y `grep -ri "recur|RRULE|cron|repeat" src/domoai/
+runtime/scheduler.py src/domoai/domain/models.py` no devolvía nada. Un
+operador que quiere "esto todos los días a las 22:00" no tenía forma
+de expresarlo: tendría que recrear y reprogramar un `Plan` nuevo a
+mano tras cada ejecución, para siempre.
+
+Decisión de diseño confirmada con el usuario vía AskUserQuestion antes
+de escribir el spec: cada ocurrencia de un schedule recurrente se
+revalida contra el estado real del runtime inmediatamente antes de
+ejecutar — nunca se valida una vez y se reproduce ciegamente. Esto es
+un requisito directo del Principio III de la constitución
+(capacidades/política pueden cambiar entre ocurrencias) y tiene una
+consecuencia de seguridad concreta: una ocurrencia cuyos comandos
+resulten `REQUIRES_CONFIRMATION` o inválidos en el momento de revalidar
+NUNCA se auto-aprueba — se salta y se audita, y la recurrencia sigue
+hasta su siguiente ocurrencia programada en vez de romperse.
+
+- Nuevo modelo `RecurrenceRule` (`time_of_day`, `timezone` IANA,
+  `days_of_week` opcional — `None` = diario), en
+  `src/domoai/domain/models.py`.
+- Nueva función pura `next_occurrence(rule, after) -> datetime` en
+  `src/domoai/runtime/recurrence.py`, usando `zoneinfo` de la stdlib
+  (sin dependencia nueva). Calcula siempre en hora local del
+  `timezone` de la regla y convierte a UTC solo al final — nunca al
+  revés — para que "22:00 hora local" siga siendo 22:00 hora local
+  cruzando un cambio de horario de verano/invierno, no un salto
+  silencioso de una hora en UTC. Probado contra fechas reales de
+  cambio de DST en `Europe/Madrid` (spring-forward 2026-03-29 y
+  fall-back 2026-10-25) — ambas verifican que la hora local resultante
+  sigue siendo exactamente 22:00.
+- Nueva tabla `recurring_schedules` (migración
+  `005_recurring_schedules.sql`), completamente independiente de
+  `scheduled_plans` — mismo patrón `payload TEXT` JSON-serializado ya
+  usado por `ScheduledPlanRepository`. Nuevo
+  `RecurringScheduleRepository` (`create`/`get`/`list_active`/
+  `advance`/`cancel`) en `src/domoai/persistence/repositories.py`.
+- `Scheduler` extendido (no modificado) con
+  `schedule_recurring`/`cancel_recurring`/`list_recurring`/
+  `run_due_recurring`, en `src/domoai/runtime/scheduler.py`. El nuevo
+  `recurring_repository` es un parámetro keyword-only con default
+  `None`, así que los 4 call sites existentes de `Scheduler(...)`
+  siguen funcionando sin modificar. `run_due_recurring()` es un método
+  nuevo y paralelo a `run_due()` (Spec 032), no una fusión — mantiene
+  el camino one-shot ya probado completamente intacto. Por cada
+  schedule activo vencido: construye un `Plan` fresco con
+  `id=f"{schedule_id}@{execute_at.isoformat()}"` (único por
+  construcción, no colisiona con el guard de reclamo de Spec 031 al
+  ser siempre un id nuevo), llama `PlanService.validate()` contra el
+  estado real; si el resultado es `PlanStatus.READY` ejecuta vía
+  `PlanExecutor.execute()`; si no (`REQUIRES_CONFIRMATION` o
+  inválido), audita `recurring_occurrence_skipped` con
+  `payload.reason` (`"requires_confirmation"` o `"invalid"`) — un solo
+  tipo de evento para ambos casos, por decisión explícita del spec.
+  Cualquiera que sea el resultado, calcula la siguiente ocurrencia y
+  hace `advance(...)`, así que un salto nunca rompe la recurrencia.
+  `Scheduler.run()` ahora llama a `run_due()` y `run_due_recurring()`
+  en cada iteración del poll loop.
+- `build_runtime()` en `runtime_factory.py` construye
+  `RecurringScheduleRepository` y la pasa a `Scheduler(...)`; expuesta
+  también en `RuntimeComposition.recurring_schedule_repository`.
+- Tres tools MCP nuevas en `domotics_server.py`:
+  `schedule_recurring_plan` (toma un `plan_id` ya validado vía
+  `validate_plan`, descarta su validación obsoleta y usa solo
+  `.commands` como plantilla — coherente con la decisión de revalidar
+  cada ocurrencia), `cancel_recurring_schedule`,
+  `list_recurring_schedules`. Mismo patrón de
+  `mutation_annotations`/`read_annotations` que las tools de
+  scheduling one-shot existentes. Listas de nombres de tools
+  hardcodeadas actualizadas en `test_domotics_mcp_contract.py`,
+  `test_unified_mcp_contract.py` y
+  `test_home_assistant_provider_runtime.py`.
+- Probado: `next_occurrence` correcto en spring-forward, fall-back,
+  restricción por `days_of_week`, y garantía "siempre estrictamente
+  después de `after`" (`tests/unit/runtime/test_recurrence.py`, 4
+  tests). Un schedule recurrente de riesgo SAFE se auto-ejecuta y
+  avanza sin doble-ejecución antes de su siguiente hora; una ocurrencia
+  cuyo dispositivo ya no existe se salta como inválida; una ocurrencia
+  con `risk_class=CONFIRM` se salta, nunca se auto-aprueba, y queda
+  auditada con `reason="requires_confirmation"`; tras ese salto la
+  recurrencia sigue funcionando con normalidad en su siguiente hora;
+  cancelar detiene toda ocurrencia futura (`tests/unit/runtime/
+  test_scheduler.py`, 7 tests nuevos). Los 6 tests one-shot existentes
+  en ese mismo fichero siguen pasando sin ninguna modificación —
+  cero regresión a Spec 032.
+- **Fuera de alcance, con justificación explícita en el spec**: EV/HVAC
+  como modelos de dominio de primera clase, tarifas de exportación,
+  incertidumbre de forecast, degradación de batería, Provider SDK
+  externo — ítems P3 separados e independientes, sin dependencia de
+  recurrencia. Expresiones de recurrencia complejas tipo RRULE
+  (mensual/anual, fechas de excepción) — `time_of_day` + `days_of_week`
+  opcional cubre los patrones reales de automatización del hogar sin
+  inventar una gramática de calendario que nadie ha pedido. Reintentar
+  o recuperar automáticamente una ocurrencia saltada — el
+  comportamiento seguro es saltarla y seguir con el horario, no
+  inventar un mecanismo de retry/backfill con sus propias implicaciones
+  de seguridad. Editar un schedule recurrente existente in-place —
+  este spec soporta crear y cancelar; cambiar su regla se asume
+  cancelar-y-recrear por ahora, una operación más pequeña y segura que
+  una API de mutación in-place.
+
+Evidencia: `500 passed, 8 skipped` (490 → 500). Ruff y mypy limpios
+(93 ficheros fuente).
+
 ## Planes, políticas y ejecución
 
 Un `Plan` contiene entre 1 y 50 `Command`. Cada comando identifica

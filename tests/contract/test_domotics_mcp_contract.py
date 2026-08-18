@@ -151,6 +151,9 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "cancel_scheduled_plan",
         "reschedule_plan",
         "list_scheduled_plans",
+        "schedule_recurring_plan",
+        "cancel_recurring_schedule",
+        "list_recurring_schedules",
         "list_audit_events",
     ]
     assert resources == [
@@ -272,6 +275,9 @@ async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> N
         "cancel_scheduled_plan",
         "reschedule_plan",
         "list_scheduled_plans",
+        "schedule_recurring_plan",
+        "cancel_recurring_schedule",
+        "list_recurring_schedules",
         "list_audit_events",
     ]
     assert {device["id"] for device in inventory["devices"]} >= {

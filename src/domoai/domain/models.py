@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from enum import StrEnum
 from typing import Any
 
@@ -271,6 +271,21 @@ class Plan(StrictModel):
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
     approval: Approval | None = None
     execution: ExecutionSummary | None = None
+
+
+class RecurrenceRule(StrictModel):
+    time_of_day: time
+    timezone: str = Field(min_length=1)
+    days_of_week: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_days_of_week(self) -> RecurrenceRule:
+        if self.days_of_week is not None:
+            if not self.days_of_week:
+                raise ValueError("days_of_week, if provided, must not be empty")
+            if any(day < 0 or day > 6 for day in self.days_of_week):
+                raise ValueError("days_of_week entries must be in 0..6 (0=Monday)")
+        return self
 
 
 class AuditEvent(StrictModel):

@@ -1,0 +1,29 @@
+"""DST-correct computation of a recurring schedule's next occurrence."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from domoai.domain.models import RecurrenceRule
+
+_MAX_DAYS_SEARCHED = 8
+
+
+def next_occurrence(rule: RecurrenceRule, after: datetime) -> datetime:
+    """First occurrence strictly after `after`, in UTC.
+
+    Computed entirely in local (zoneinfo) time and converted to UTC only
+    as the final step, so a fixed local time (e.g. 22:00) survives a DST
+    transition instead of silently drifting by an hour.
+    """
+    zone = ZoneInfo(rule.timezone)
+    local_after = after.astimezone(zone)
+    candidate_date = local_after.date()
+    for _ in range(_MAX_DAYS_SEARCHED):
+        if rule.days_of_week is None or candidate_date.weekday() in rule.days_of_week:
+            candidate = datetime.combine(candidate_date, rule.time_of_day, tzinfo=zone)
+            if candidate > local_after:
+                return candidate.astimezone(UTC)
+        candidate_date = candidate_date + timedelta(days=1)
+    raise ValueError("No matching occurrence found within the search window")

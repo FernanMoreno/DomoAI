@@ -118,13 +118,13 @@ def _create_configured_adapters(
         parsed = urlparse(settings.zigbee2mqtt_url)
         if parsed.scheme not in {"mqtt", "mqtts"} or parsed.hostname is None:
             raise ValueError("DOMOAI_ZIGBEE2MQTT_URL must be a valid mqtt:// or mqtts:// URL")
-        if parsed.scheme == "mqtts":
-            raise ValueError("mqtts:// is not supported by the initial Zigbee2MQTT transport")
+        use_tls = parsed.scheme == "mqtts"
+        default_port = 8883 if use_tls else 1883
         adapters.append(
             Zigbee2MqttAdapter(
                 AiomqttTransport(
                     parsed.hostname,
-                    port=parsed.port or 1883,
+                    port=parsed.port or default_port,
                     username=settings.mqtt_username,
                     password=(
                         settings.mqtt_password.get_secret_value()
@@ -132,6 +132,11 @@ def _create_configured_adapters(
                         else None
                     ),
                     timeout=settings.mqtt_timeout_seconds,
+                    tls=use_tls,
+                    ca_cert_path=settings.mqtt_ca_cert_path,
+                    client_cert_path=settings.mqtt_client_cert_path,
+                    client_key_path=settings.mqtt_client_key_path,
+                    tls_insecure=settings.mqtt_tls_insecure,
                 ),
                 base_topic=settings.zigbee2mqtt_base_topic,
                 discovery_timeout=settings.mqtt_timeout_seconds,

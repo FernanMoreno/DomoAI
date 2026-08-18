@@ -32,6 +32,10 @@ class Settings(StrictModel):
     mqtt_username: str | None = None
     mqtt_password: SecretStr | None = None
     mqtt_timeout_seconds: float = Field(default=5.0, gt=0)
+    mqtt_ca_cert_path: Path | None = None
+    mqtt_client_cert_path: Path | None = None
+    mqtt_client_key_path: Path | None = None
+    mqtt_tls_insecure: bool = False
     matter_timeout_seconds: float = Field(default=5.0, gt=0)
     state_stale_after_seconds: int = 300
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
@@ -77,6 +81,15 @@ class Settings(StrictModel):
             )
         if self.mqtt_password is not None and self.mqtt_username is None:
             raise ValueError("DOMOAI_MQTT_USERNAME is required when a password is configured")
+        mqtt_client_cert_settings = (
+            self.mqtt_client_cert_path is not None,
+            self.mqtt_client_key_path is not None,
+        )
+        if mqtt_client_cert_settings[0] != mqtt_client_cert_settings[1]:
+            raise ValueError(
+                "DOMOAI_MQTT_CLIENT_CERT_PATH and DOMOAI_MQTT_CLIENT_KEY_PATH "
+                "must be configured together"
+            )
         legacy_solar_values = (
             self.solar_latitude,
             self.solar_longitude,
@@ -187,6 +200,22 @@ class Settings(StrictModel):
                 else None
             ),
             mqtt_timeout_seconds=float(os.getenv("DOMOAI_MQTT_TIMEOUT_SECONDS", "5")),
+            mqtt_ca_cert_path=(
+                Path(ca_path)
+                if (ca_path := os.getenv("DOMOAI_MQTT_CA_CERT_PATH"))
+                else None
+            ),
+            mqtt_client_cert_path=(
+                Path(cert_path)
+                if (cert_path := os.getenv("DOMOAI_MQTT_CLIENT_CERT_PATH"))
+                else None
+            ),
+            mqtt_client_key_path=(
+                Path(key_path)
+                if (key_path := os.getenv("DOMOAI_MQTT_CLIENT_KEY_PATH"))
+                else None
+            ),
+            mqtt_tls_insecure=boolean("DOMOAI_MQTT_TLS_INSECURE"),
             matter_timeout_seconds=float(os.getenv("DOMOAI_MATTER_TIMEOUT_SECONDS", "5")),
             state_stale_after_seconds=int(stale_after),
             energy_live=boolean("DOMOAI_ENERGY_LIVE"),

@@ -512,9 +512,95 @@ exactamente con cada job — `433 passed, 8 skipped` total, sin cambios de
 comportamiento (esta spec no modifica ningún archivo fuente, solo añade
 `.github/workflows/ci.yml`).
 
+## Tracking real de migraciones de esquema (2026-08-18)
+
+Cierra `specs/034-schema-migration-tracking/`, segundo ítem de P2.
+`SQLiteDatabase.initialize()` ejecutaba TODOS los ficheros de migración
+en CADA arranque, sin ningún ledger de qué ya se había aplicado —
+funcionaba hoy solo por accidente, porque las tres migraciones
+existentes eran `CREATE TABLE IF NOT EXISTS` (tolera re-ejecución). El
+primer `ALTER TABLE`/backfill real habría roto en el segundo arranque
+tras añadirse.
+
+- Nueva tabla `schema_migrations (filename TEXT PRIMARY KEY, applied_at
+  TEXT NOT NULL)`, añadida a `001_initial.sql` (única ubicación posible
+  sin problema del huevo-y-la-gallina: tiene que existir antes de poder
+  consultarse a sí misma).
+- `SQLiteDatabase.initialize()`: bootstrap incondicional e idempotente
+  de `schema_migrations`, lee qué ficheros ya están aplicados, y solo
+  ejecuta + registra los que faltan, en orden, uno a uno (commit tras
+  cada fichero, no una transacción gigante) — una migración se aplica
+  exactamente una vez, para siempre, por fichero de base de datos.
+- Nuevo parámetro `migrations_dir` opcional (por defecto el directorio
+  real) — permite testear la lógica real contra un directorio temporal
+  sin fabricar un cambio de esquema falso en producción.
+- Probado con datos reales: una base con solo `001_initial.sql`
+  registrado (simulando un despliegue antiguo), con un `Plan` insertado
+  vía `PlanRepository`, reabierta con el set de migraciones completo —
+  el `Plan` original sigue íntegro Y las tablas de migraciones
+  posteriores (`scheduled_plans`) ya son usables.
+- Probado con una sentencia genuinamente no-idempotente: directorio de
+  migraciones temporal con un `ALTER TABLE ... ADD COLUMN` real —
+  inicializar la misma base dos veces seguidas no falla ni duplica la
+  columna. Este es el caso concreto que el mecanismo anterior no podía
+  sobrevivir.
+- Sin renumerar `002_execution_attempts.sql`/`004_scheduled_plans.sql`
+  (el hueco en 003 se mantiene — renumerar migraciones ya "aplicadas en
+  la práctica" sería exactamente el tipo de drift sin versionar que
+  esta spec existe para evitar).
+- **Diferido explícitamente, no implementado aquí**: mecanismo de
+  rollback/down-migration (sin necesidad expresada para el modelo
+  local-first de un solo desarrollador); documento de política de
+  compatibilidad semver para `schemas/v1/`; librería de migraciones
+  externa (sigue siendo `sqlite3` stdlib puro).
+
+Evidencia: `433 → 438 passed, 8 skipped`. Ruff y mypy limpios.
+
 Las respuestas estructuradas incluyen `schema_version` y, cuando procede,
 `runtime_revision`. Las operaciones de mutación pasan por la frontera de plan
 y política; no existe una tool MCP por fabricante.
+
+## TLS en el transporte MQTT (2026-08-18)
+
+Cierra `specs/035-mqtt-tls/`, tercer ítem de P2. `AiomqttTransport`
+(`src/domoai/adapters/zigbee2mqtt/transport.py`) construía su
+`aiomqtt.Client` sin ningún parámetro TLS — toda conexión MQTT era
+en claro, credenciales incluidas. `runtime_factory.py` rechazaba
+`mqtts://` explícitamente con un `ValueError`. La librería `aiomqtt`
+2.5.1 ya exponía `tls_context`/`tls_params`/`tls_insecure` en su
+`Client.__init__` — solo faltaba la conexión desde el lado de DomoAI.
+
+- `AiomqttTransport` gana `tls`, `ca_cert_path`, `client_cert_path`,
+  `client_key_path`, `tls_insecure` — `connect()` construye un
+  `ssl.SSLContext` vía `_build_tls_context()` solo cuando `tls=True`
+  (CA propia opcional → certificado de cliente opcional para mTLS →
+  override inseguro aplicado al final) y lo pasa como `tls_context=` a
+  `aiomqtt.Client`. Con `tls=False` (por defecto) el comportamiento
+  es idéntico al anterior.
+- `Settings` gana `mqtt_ca_cert_path`, `mqtt_client_cert_path`,
+  `mqtt_client_key_path`, `mqtt_tls_insecure` (nuevas env vars
+  `DOMOAI_MQTT_CA_CERT_PATH`, `DOMOAI_MQTT_CLIENT_CERT_PATH`,
+  `DOMOAI_MQTT_CLIENT_KEY_PATH`, `DOMOAI_MQTT_TLS_INSECURE`) —
+  certificado de cliente y clave deben configurarse juntos, mismo
+  patrón de validación por tupla que ya existía para KNX/Modbus y para
+  `mqtt_password`/`mqtt_username`.
+- `runtime_factory.py`: la rama `mqtts://` ya no lanza — puerto por
+  defecto 8883 (distinto del 1883 de `mqtt://`), TLS habilitado, los
+  cuatro settings nuevos se pasan al transporte.
+- `mqtt_tls_insecure` es **opt-in, por defecto `False`** — desactivarlo
+  deshabilita verificación de certificado y de hostname
+  (`check_hostname=False`, `verify_mode=ssl.CERT_NONE`); probado que el
+  valor por defecto deja la verificación activa y que el flag, cuando
+  se activa, gana incluso si hay una CA propia configurada (combinación
+  válida para laboratorios locales, no un error).
+- **Fuera de alcance, documentado en el spec**: TLS para Modbus TCP y
+  KNX/IP (sin variante TLS de uso común / KNX Data Secure es un
+  mecanismo distinto, no TLS); Home Assistant y Matter Server ya llevan
+  TLS a nivel de esquema de URL (`https://`/`wss://`) vía sus propias
+  librerías cliente, sin hueco equivalente que cerrar; gestión de ciclo
+  de vida de certificados (rotación/renovación).
+
+Evidencia: `438 → 451 passed, 8 skipped`. Ruff y mypy limpios.
 
 ## Planes, políticas y ejecución
 

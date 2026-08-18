@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -93,14 +95,38 @@ class AiomqttTransport:
         username: str | None = None,
         password: str | None = None,
         timeout: float = 5.0,
+        tls: bool = False,
+        ca_cert_path: Path | None = None,
+        client_cert_path: Path | None = None,
+        client_key_path: Path | None = None,
+        tls_insecure: bool = False,
     ) -> None:
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.tls = tls
+        self.ca_cert_path = ca_cert_path
+        self.client_cert_path = client_cert_path
+        self.client_key_path = client_key_path
+        self.tls_insecure = tls_insecure
         self._client: Any = None
         self._messages: AsyncIterator[Any] | None = None
+
+    def _build_tls_context(self) -> ssl.SSLContext:
+        context = ssl.create_default_context()
+        if self.ca_cert_path is not None:
+            context.load_verify_locations(cafile=str(self.ca_cert_path))
+        if self.client_cert_path is not None and self.client_key_path is not None:
+            context.load_cert_chain(
+                certfile=str(self.client_cert_path),
+                keyfile=str(self.client_key_path),
+            )
+        if self.tls_insecure:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        return context
 
     async def connect(self) -> None:
         try:
@@ -112,6 +138,7 @@ class AiomqttTransport:
                 username=self.username,
                 password=self.password,
                 timeout=self.timeout,
+                tls_context=self._build_tls_context() if self.tls else None,
             )
             await asyncio.wait_for(self._client.__aenter__(), self.timeout)
             self._messages = self._client.messages.__aiter__()

@@ -52,10 +52,17 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         ),
         HomeAssistantProviderAdapter,
     )
-    assert isinstance(
-        create_adapter(Settings(zigbee2mqtt_url="mqtt://broker.test:1884")),
-        Zigbee2MqttAdapter,
+    plaintext_adapter = create_adapter(
+        Settings(zigbee2mqtt_url="mqtt://broker.test:1884")
     )
+    assert isinstance(plaintext_adapter, Zigbee2MqttAdapter)
+    assert plaintext_adapter.transport.port == 1884
+    assert plaintext_adapter.transport.tls is False
+
+    tls_adapter = create_adapter(Settings(zigbee2mqtt_url="mqtts://broker.test"))
+    assert isinstance(tls_adapter, Zigbee2MqttAdapter)
+    assert tls_adapter.transport.port == 8883
+    assert tls_adapter.transport.tls is True
     assert isinstance(
         create_adapter(Settings(matter_server_url="ws://matter.test:5580/ws")),
         MatterServerAdapter,

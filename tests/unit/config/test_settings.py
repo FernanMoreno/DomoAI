@@ -114,6 +114,50 @@ def test_modbus_settings_can_coexist_with_existing_sources() -> None:
     assert settings.knx_gateway_host is not None
 
 
+def test_mqtt_tls_settings_default_to_no_ca_and_verification_on() -> None:
+    settings = Settings(zigbee2mqtt_url="mqtts://broker.test:8883")
+
+    assert settings.mqtt_ca_cert_path is None
+    assert settings.mqtt_client_cert_path is None
+    assert settings.mqtt_client_key_path is None
+    assert settings.mqtt_tls_insecure is False
+
+
+def test_mqtt_client_cert_and_key_must_be_configured_together() -> None:
+    with pytest.raises(ValueError, match="DOMOAI_MQTT_CLIENT_KEY_PATH"):
+        Settings(mqtt_client_cert_path=Path("config/mqtt-client.crt"))
+
+    with pytest.raises(ValueError, match="DOMOAI_MQTT_CLIENT_CERT_PATH"):
+        Settings(mqtt_client_key_path=Path("config/mqtt-client.key"))
+
+
+def test_mqtt_client_cert_and_key_pair_is_accepted_together() -> None:
+    settings = Settings(
+        mqtt_client_cert_path=Path("config/mqtt-client.crt"),
+        mqtt_client_key_path=Path("config/mqtt-client.key"),
+    )
+
+    assert settings.mqtt_client_cert_path == Path("config/mqtt-client.crt")
+    assert settings.mqtt_client_key_path == Path("config/mqtt-client.key")
+
+
+def test_mqtt_tls_settings_are_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_ZIGBEE2MQTT_URL", "mqtts://broker.test:8883")
+    monkeypatch.setenv("DOMOAI_MQTT_CA_CERT_PATH", "config/mqtt-ca.pem")
+    monkeypatch.setenv("DOMOAI_MQTT_CLIENT_CERT_PATH", "config/mqtt-client.crt")
+    monkeypatch.setenv("DOMOAI_MQTT_CLIENT_KEY_PATH", "config/mqtt-client.key")
+    monkeypatch.setenv("DOMOAI_MQTT_TLS_INSECURE", "true")
+
+    settings = Settings.from_environment()
+
+    assert settings.mqtt_ca_cert_path == Path("config/mqtt-ca.pem")
+    assert settings.mqtt_client_cert_path == Path("config/mqtt-client.crt")
+    assert settings.mqtt_client_key_path == Path("config/mqtt-client.key")
+    assert settings.mqtt_tls_insecure is True
+
+
 def test_energy_live_is_network_free_by_default() -> None:
     settings = Settings()
 

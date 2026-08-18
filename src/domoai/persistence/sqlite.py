@@ -17,13 +17,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 
 class SQLiteDatabase:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, busy_timeout_ms: int = 5000) -> None:
         self.path = path
+        self._busy_timeout_ms = busy_timeout_ms
         self._connection: sqlite3.Connection | None = None
 
     async def initialize(self, *, migrations_dir: Path | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         self._connection.executescript(_BOOTSTRAP_LEDGER)
         self._connection.commit()
         applied = {

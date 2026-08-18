@@ -328,3 +328,63 @@ async def test_backoff_resets_to_initial_delay_after_successful_reconnect(
     # succeeds and resets it, so the post-reconnect stream drop's delay is
     # back at the initial value instead of continuing to grow.
     assert recorded_delays == [1.0, 2.0, 1.0]
+
+
+class _PartiallyDegradedCompositeAdapter(SimulatedHomeAdapter):
+    """Reports connected=True overall but one component down (Spec 026's gap)."""
+
+    def __init__(self, *, component_down: bool) -> None:
+        super().__init__()
+        self.connect_calls = 0
+        self._component_down = component_down
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        self._component_down = False
+        raise _StopTest
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(
+            adapter_id=self.adapter_id,
+            connected=True,
+            components=[
+                AdapterHealth(adapter_id="home_assistant", connected=True),
+                AdapterHealth(
+                    adapter_id="modbus", connected=not self._component_down
+                ),
+            ],
+        )
+
+    async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
+        raise _StopTest
+        yield  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_run_reconnects_when_one_composite_component_is_down() -> None:
+    adapter = _PartiallyDegradedCompositeAdapter(component_down=True)
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    with pytest.raises(_StopTest):
+        await consumer.run(reconnect_delay=0.001)
+
+    assert adapter.connect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_reconnect_when_every_composite_component_is_healthy() -> None:
+    adapter = _PartiallyDegradedCompositeAdapter(component_down=False)
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    with pytest.raises(_StopTest):
+        await consumer.run(reconnect_delay=0.001)
+
+    assert adapter.connect_calls == 0

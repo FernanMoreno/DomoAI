@@ -104,6 +104,20 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         "home_assistant",
         "modbus",
     }
+    assert composite._event_queue_max_size == 1000
+
+    custom_size_composite = create_adapter(
+        Settings(
+            home_assistant_url="http://home-assistant.test",
+            home_assistant_token=SecretStr("fixture-token"),
+            modbus_host="192.0.2.20",
+            modbus_config_path=modbus_mapping_path,
+            composite_event_queue_max_size=42,
+        )
+    )
+    assert isinstance(custom_size_composite, CompositeAdapter)
+    assert custom_size_composite._event_queue_max_size == 42
+
     provider_registry = ProviderRegistry()
     provider_composite = create_adapter(
         Settings(
@@ -173,7 +187,24 @@ async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Pat
     assert recovered_plan.execution.outcomes == summary.outcomes
     assert recovered_outcomes == summary.outcomes
     assert any(event.event_type == "plan_validated" for event in audit_events)
-    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_threads_configured_sqlite_busy_timeout(tmp_path: Path) -> None:
+    runtime = await build_runtime(
+        Settings(
+            database_path=tmp_path / "runtime.sqlite3",
+            sqlite_busy_timeout_ms=250,
+        ),
+        adapter=SimulatedHomeAdapter(),
+    )
+
+    cursor = runtime.database.connection.execute("PRAGMA busy_timeout")
+    timeout = cursor.fetchone()[0]
+    cursor.close()
+    await runtime.close()
+
+    assert timeout == 250
 
 
 @pytest.mark.asyncio

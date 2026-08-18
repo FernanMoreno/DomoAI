@@ -109,7 +109,7 @@ class PlanExecutor:
                             after_state = await self._readback(
                                 command, capability.name if capability else None
                             )
-                        except ConnectionError as readback_error:
+                        except (ConnectionError, OSError, TimeoutError) as readback_error:
                             status = ExecutionStatus.UNKNOWN
                             error = ErrorDetail(
                                 code=ErrorCode.ADAPTER_UNAVAILABLE,
@@ -146,7 +146,7 @@ class PlanExecutor:
                         after_state=after_state,
                         error=error,
                     )
-                except ConnectionError as error:
+                except (ConnectionError, OSError, TimeoutError) as error:
                     outcome = ExecutionOutcome(
                         plan_id=plan.id,
                         command_id=command.id,

@@ -73,7 +73,11 @@ class RuntimeEventConsumer:
         delay = reconnect_delay
         while True:
             health = await self.adapter.health()
-            if not health.connected:
+            degraded = not health.connected or (
+                health.components is not None
+                and any(not component.connected for component in health.components)
+            )
+            if degraded:
                 try:
                     await self.adapter.connect()
                     await self.discovery.refresh()

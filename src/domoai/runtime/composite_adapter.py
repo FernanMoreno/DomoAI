@@ -30,6 +30,7 @@ class CompositeAdapter:
         adapters: Sequence[AdapterPort],
         *,
         registry: DeviceRegistry | None = None,
+        event_queue_max_size: int = 1000,
     ) -> None:
         if not adapters:
             raise ValueError("CompositeAdapter requires at least one adapter")
@@ -41,6 +42,7 @@ class CompositeAdapter:
         self.registry = registry
         self._connected: set[str] = set()
         self._diagnostics: list[dict[str, Any]] = []
+        self._event_queue_max_size = event_queue_max_size
 
     def bind_registry(self, registry: DeviceRegistry) -> None:
         self.registry = registry
@@ -159,13 +161,18 @@ class CompositeAdapter:
         return self._event_stream()
 
     async def _event_stream(self) -> AsyncIterator[SourceEvent]:
-        queue: asyncio.Queue[tuple[str, SourceEvent | None, BaseException | None]] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, SourceEvent | None, BaseException | None]] = (
+            asyncio.Queue(maxsize=self._event_queue_max_size)
+        )
         active = [adapter for adapter in self.adapters if adapter.adapter_id in self._connected]
 
         async def pump(adapter: AdapterPort) -> None:
             try:
                 async for event in adapter.subscribe_events():
-                    await queue.put((adapter.adapter_id, event, None))
+                    try:
+                        queue.put_nowait((adapter.adapter_id, event, None))
+                    except asyncio.QueueFull:
+                        self._record_drop(adapter.adapter_id, event)
             except (ConnectionError, OSError, TimeoutError) as error:
                 await queue.put((adapter.adapter_id, None, error))
             finally:
@@ -210,10 +217,24 @@ class CompositeAdapter:
             for item in health
             if isinstance(item, AdapterHealth) and item.message
         ]
+        components = [item for item in health if isinstance(item, AdapterHealth)]
         return AdapterHealth(
             adapter_id=self.adapter_id,
             connected=connected,
             message="; ".join(messages)[:200] if messages else None,
+            components=components,
+        )
+
+    def _record_drop(self, adapter_id: str, event: SourceEvent) -> None:
+        self._diagnostics.append(
+            {
+                "event_type": "adapter_event_dropped_backpressure",
+                "adapter_id": adapter_id,
+                "message": (
+                    f"event kind={event.kind!r} dropped: queue at capacity "
+                    f"({self._event_queue_max_size})"
+                ),
+            }
         )
 
     def _record_failure(self, adapter_id: str, kind: str, error: BaseException) -> None:

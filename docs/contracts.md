@@ -602,6 +602,389 @@ en claro, credenciales incluidas. `runtime_factory.py` rechazaba
 
 Evidencia: `438 → 451 passed, 8 skipped`. Ruff y mypy limpios.
 
+## Consulta del audit trail (2026-08-18)
+
+Cierra `specs/036-audit-trail-query/`, cuarto ítem de P2. DomoAI ya
+registraba un audit trail rico, persistente y con secretos redactados
+(`AuditEventRepository.append_event()`, sink de `AuditLog` para cada
+servicio del runtime) — pero `list_all()`, el único método de lectura
+existente, no tenía ningún caller fuera de su propia clase (`grep -rn
+"list_all" src/domoai` restringido a audit no encontró ningún sitio de
+llamada real). El audit trail era de solo escritura en la práctica:
+nada exponía "qué pasó" sin abrir el fichero SQLite directamente con un
+cliente SQL crudo.
+
+- Nuevo `AuditEventRepository.list_events(*, event_type=None,
+  subject_id=None, since=None, limit=100)` — filtrado y acotado en la
+  capa SQL (`WHERE`/`LIMIT`, no fetch-y-descarta en Python), orden más
+  reciente primero (`ORDER BY created_at DESC, id DESC`), límite
+  siempre acotado a `min(limit, 500)` sin importar lo que pida el
+  caller. `list_all()` queda intacto (lo siguen usando cuatro tests de
+  integración existentes como lector de historial completo).
+- Nueva tool MCP de solo lectura `list_audit_events`
+  (`readOnlyHint=True, destructiveHint=False`, mismo patrón que
+  `discover_devices`/`get_state`) con parámetros opcionales
+  `event_type`, `subject_id`, `since`, `limit`.
+- `DomoticsMcpContext` gana `audit_repository: AuditEventRepository |
+  None = None` (mismo patrón que `energy_context_provider`/`scheduler`)
+  — `None` en el path fixture en memoria sin persistencia, poblado
+  desde `runtime.audit_repository` en `build_configured_server()`. Sin
+  repositorio configurado, la tool devuelve un `error_envelope`
+  claramente distinto de una respuesta vacía, nunca un crash.
+- Probado que el filtrado por `event_type`/`subject_id` (individual y
+  combinado) realmente reduce resultados, que `since` excluye eventos
+  en o antes del timestamp dado, que el límite por defecto es 100 y el
+  tope duro de 500 se respeta incluso pidiendo un límite absurdamente
+  alto, y el path `None` de la tool MCP.
+- **Fuera de alcance, con justificación explícita**: logging estructurado
+  a stdout/stderr (segundo hueco real, verificado — cero usos de
+  `import logging` en `src/domoai` — pero es una preocupación distinta,
+  telemetría en vivo del proceso, no historial retrospectivo
+  consultable); métricas/tracing (Prometheus/OpenTelemetry, sin
+  requisito nombrado); política de retención/poda del audit trail (real
+  pero ortogonal a "poder leer lo que ya existe", sin problema
+  observado todavía en el modelo local-first de un solo desarrollador).
+
+Evidencia: `451 → 462 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Backpressure de eventos en CompositeAdapter (2026-08-19)
+
+Cierra `specs/037-composite-adapter-backpressure/`, quinto ítem de P2.
+`CompositeAdapter._event_stream()` (`src/domoai/runtime/composite_adapter.py`)
+fusiona los streams de eventos de todos los adapters conectados en una
+única `asyncio.Queue()` compartida construida SIN `maxsize` — un event
+storm de cualquier fuente conectada (un mesh Zigbee reconectando, un
+broker MQTT reproduciendo un backlog grande de mensajes retained, un
+dispositivo mal comportado) hacía crecer la cola sin límite, consumiendo
+memoria indefinidamente. Cero cobertura de test existía sobre
+`_event_stream()`/`subscribe_events()` de `CompositeAdapter` bajo
+cualquier condición de carga.
+
+- Nuevo parámetro `CompositeAdapter(..., event_queue_max_size=1000)` —
+  se convierte en el `maxsize` de la cola interna (antes ilimitada).
+  Nuevo `Settings.composite_event_queue_max_size` (env var
+  `DOMOAI_COMPOSITE_EVENT_QUEUE_MAX_SIZE`), enhebrado en el único punto
+  de construcción de `CompositeAdapter` en `create_adapter()`.
+- Cada tarea `pump(adapter)` usa `queue.put_nowait(...)` en vez de
+  `await queue.put(...)`; en `asyncio.QueueFull` el evento se
+  DESCARTA (nunca se bloquea, nunca se reintenta) y el drop se registra
+  en la lista `self._diagnostics` ya existente, con la misma forma que
+  `_record_failure()` (`event_type`, `adapter_id`, `message`).
+  Deliberadamente NO se emite un nuevo `SourceEvent` por cada drop —
+  `RuntimeEventConsumer._apply_event()` ya trata cualquier kind
+  distinto de `state_changed` como disparador de un `discovery.refresh()`
+  completo, así que emitir un diagnóstico por cada drop durante un storm
+  crearía un bucle de retroalimentación real (más diagnósticos → más
+  refreshes caros → drenado más lento → más drops).
+- El drop es no-bloqueante y por-`put` individual (no una cola aparte
+  por adapter): un adapter que inunda la cola compartida absorbe la
+  mayoría de sus propios drops por simple probabilidad (intenta muchos
+  más `put`s que uno bien comportado), sin necesitar sub-colas
+  aisladas ni scheduling de fairness — probado explícitamente que un
+  segundo adapter bien comportado NO queda completamente silenciado
+  durante el flood de otro (al menos algunos de sus eventos llegan),
+  sin reclamar fairness perfecto.
+- Probado: tráfico normal por debajo del umbral se entrega íntegro, sin
+  drops, sin cambio de comportamiento; un burst mayor al umbral
+  configurado resulta en como mucho `event_queue_max_size` eventos
+  entregados de ese burst, el resto descartado y registrado
+  individualmente por `adapter_id`; drops de dos adapters simultáneos
+  se registran distinguibles entre sí; ningún `SourceEvent` con
+  `kind="adapter_diagnostic"` se emite como consecuencia de un drop; el
+  umbral es honrado end-to-end desde `Settings` hasta
+  `create_adapter()`.
+- **Fuera de alcance, con justificación explícita en el spec**:
+  sub-colas por-adapter o fairness scheduling ponderado (diseño
+  materialmente mayor al que exige el hueco verificado — crecimiento
+  de memoria sin límite); conectar `CompositeAdapter.diagnostics` a una
+  superficie de lectura (MCP tool, audit log) — hueco real,
+  pre-existente, de la misma forma que el que cerró la Spec 036 para el
+  audit trail, pero pertenece naturalmente a P2.7 (health model
+  unificado), no a este fix; backpressure en el path de un solo adapter
+  (sin `CompositeAdapter` de por medio) — ya tiene backpressure natural
+  vía `await` directo, sin cola intermedia que desbordar; rate-limiting
+  o desconexión automática de una fuente persistentemente ruidosa —
+  decisión de política más grande, no requerida para cerrar el hueco
+  concreto de esta spec.
+
+Evidencia: `462 → 470 passed, 8 skipped`. Ruff y mypy limpios.
+
+## SQLite hardening (2026-08-19)
+
+Cierra `specs/038-sqlite-hardening/`, sexto ítem de P2.
+`SQLiteDatabase.initialize()` conectaba sin ningún `PRAGMA` — sin WAL,
+sin `busy_timeout` explícito. `ExecutionOutcomeRepository.save()`
+(única escritura multi-statement de todo `repositories.py` — el resto
+hace un `execute()` por `commit()`, atómico por construcción) nunca
+llamaba a `rollback()` si el segundo `execute()` fallaba, dejando la
+conexión compartida y de larga vida con una escritura a medias sin
+confirmar.
+
+- `SQLiteDatabase.initialize()` ejecuta `PRAGMA journal_mode=WAL` y
+  `PRAGMA busy_timeout={ms}` justo tras conectar, antes de las
+  migraciones. Nuevo `SQLiteDatabase(path, busy_timeout_ms=5000)` —
+  default explícito que preserva el comportamiento de facto actual
+  (Python ya defaulteaba `timeout=5.0s` en `sqlite3.connect()`, pero
+  como efecto secundario no documentado, no como valor deliberado).
+  Nuevo `Settings.sqlite_busy_timeout_ms` (env var
+  `DOMOAI_SQLITE_BUSY_TIMEOUT_MS`), enhebrado en el único punto de
+  construcción de `SQLiteDatabase` en `build_runtime()`.
+- `ExecutionOutcomeRepository.save()`: el segundo `execute()`
+  (`execution_attempts`) envuelto en `try/except sqlite3.Error:
+  rollback(); raise` — deshace también el primer insert
+  (`execution_outcomes`), re-lanza la excepción original sin cambiar
+  su tipo, deja la conexión limpia para la siguiente operación.
+- Probado: `PRAGMA journal_mode` reporta `"wal"` tras `initialize()`;
+  `PRAGMA busy_timeout` reporta el default (5000) y un valor custom
+  configurado; el fallo del segundo insert deja CERO filas de ambas
+  tablas (no solo la segunda); la excepción sigue siendo
+  `sqlite3.IntegrityError`; una `save()` posterior no relacionada
+  funciona con normalidad tras el fallo; el caso exitoso inserta ambas
+  filas igual que antes.
+- Técnica de test: `sqlite3.Connection` es un tipo C inmutable —
+  `monkeypatch.setattr(sqlite3.Connection, "execute", ...)` falla con
+  `TypeError: cannot set 'execute' attribute of immutable type`.
+  Los tests intercambian `SQLiteDatabase._connection` por un proxy
+  delegante pequeño que falla solo el `execute()` dirigido a
+  `execution_attempts`.
+- **Fuera de alcance, con justificación explícita**: convertir otros
+  métodos de repositorio a transacciones explícitas (todos los demás
+  ya son atómicos por construcción, un solo `execute()` por
+  `commit()`); un context manager genérico `with database.transaction():`
+  (infraestructura especulativa para una segunda escritura
+  multi-statement que no existe todavía); benchmarking de WAL o
+  stress-testing multi-proceso (fuera de escala local-first); cambiar
+  la arquitectura de conexión única de larga vida (cambio
+  arquitectónico mayor no requerido por los huecos concretos
+  verificados).
+
+Evidencia: `470 → 479 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Health model unificado por-adapter (2026-08-19)
+
+Cierra `specs/039-unified-adapter-health/`, séptimo ítem de P2, y el
+límite documentado y diferido explícitamente en la Spec 026 ("Límite
+documentado: `CompositeAdapter.health()` reporta conectado con
+cualquier sub-adapter vivo, así que una caída parcial del composite no
+dispara este reconnect — health model unificado por-adapter es P2.7,
+aparte"). `CompositeAdapter.health()` colapsaba el health individual de
+cada sub-adapter conectado en un único booleano agregado `connected =
+any(...)` — verdadero si AL MENOS UN sub-adapter está vivo, sin
+importar cuántos otros estén caídos. Dos consecuencias reales
+verificadas: (1) sin visibilidad de CUÁL adapter concreto está caído
+en un despliegue multi-adapter (cero referencias a `AdapterHealth` bajo
+`src/domoai/mcp`); (2) un hueco funcional real —
+`RuntimeEventConsumer.run()` solo intenta `connect()` cuando
+`health.connected` es falso; con la semántica "al menos uno vivo", un
+despliegue con 1 de N adapters caído reporta `connected=True` para
+siempre mientras quede otro vivo, así que el bucle de reconexión nunca
+se dispara para ese adapter muerto — se queda desconectado en silencio
+y para siempre hasta que todos los demás también mueran o el proceso
+se reinicie.
+
+- `AdapterHealth` (`src/domoai/domain/models.py`) gana
+  `components: list[AdapterHealth] | None = None` — aditivo, `None`
+  para cada implementación `health()` de un solo adapter (ninguna de
+  las seis cambia). `CompositeAdapter.health()` ya calculaba el
+  `AdapterHealth` de cada sub-adapter vía `asyncio.gather()` y lo
+  descartaba tras reducirlo a dos escalares — ahora incluye esa lista
+  ya calculada como `components`, sin gather adicional, sin I/O nuevo.
+- `connected`/`message` de `CompositeAdapter.health()` mantienen su
+  cálculo y significado agregado exactos de hoy ("al menos uno vivo")
+  — sin redefinir semántica existente, deliberadamente, para no
+  ambigüar el otro lector existente de `.connected`
+  (`adapters/sdk/conformance.py`).
+- `RuntimeEventConsumer.run()`: condición de reconexión extendida de
+  `if not health.connected` a `degraded = not health.connected or
+  (health.components is not None and any(not c.connected for c in
+  health.components)); if degraded:`. Para un adapter único,
+  `components` siempre es `None`, así que la cláusula añadida es
+  siempre falsa y la condición se reduce exactamente a la de hoy —
+  cambio de comportamiento cero para el caso no-composite, por
+  construcción, no solo por test. Reconectar sigue significando
+  `self.adapter.connect()`, que para `CompositeAdapter` ya reintenta
+  TODOS los sub-adapters vía su `asyncio.gather()` existente, sin
+  cambios — mismo mecanismo ya aceptado por el diseño de reconexión de
+  la Spec 026 para el caso de fallo total.
+- Probado: con todos los sub-adapters sanos, `components` los lista
+  todos conectados; con uno caído de varios, `connected` agregado
+  sigue en `True` (semántica sin cambios) mientras `components`
+  identifica el `adapter_id` concreto caído; con dos caídos
+  simultáneamente, ambos identificables individualmente, no fusionados
+  en una sola señal; `RuntimeEventConsumer.run()` ahora SÍ llama a
+  `connect()` ante un fallo parcial (la regresión exacta nombrada en
+  la nota de la Spec 026); NO llama a `connect()` cuando todos los
+  componentes están sanos (sin reconexión espuria); los doce tests
+  preexistentes de `test_runtime_event_consumer.py` (añadidos en la
+  Spec 026 y desde entonces) siguen pasando sin modificar — prueba de
+  regresión cero para el caso de un solo adapter.
+- **Fuera de alcance, con justificación explícita en el spec**:
+  exponer el health por-adapter vía una tool MCP (mismo hueco real que
+  la Spec 036 cerró para el audit trail, pero pertenece a una spec
+  separada, no bundleada aquí); redefinir qué significa `connected` en
+  el composite (p.ej. a "todos vivos") — rechazado explícitamente para
+  no ambigüar el otro lector existente; reconexión selectiva por-adapter
+  (reintentar solo el sub-adapter concreto caído en vez de todo el
+  composite) — `connect()` del composite ya reintenta todos
+  incondicionalmente, comportamiento existente ya aceptado por el
+  diseño de la Spec 026; una abstracción de "modelo de salud unificado"
+  más amplia (historial, métricas, alerting) — sin requisito nombrado
+  por ninguna auditoría.
+
+Evidencia: `479 → 484 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Failure injection sistemático (2026-08-19)
+
+Cierra `specs/040-systematic-failure-injection/`, octavo ítem de P2.
+`PlanExecutor.execute()` (`src/domoai/runtime/executor.py`) era el
+ÚNICO sitio en todo el código que capturaba `ConnectionError` a secas
+— verificado con `grep -rn "except (ConnectionError" src/domoai`
+(cada adapter, `composite_adapter.py`, `event_consumer.py`,
+`runtime_factory.py` capturan consistentemente la tupla
+`(ConnectionError, OSError, TimeoutError)`) contra `grep -rn "except
+ConnectionError" src/domoai` (solo dos sitios, ambos en
+`executor.py`). Bug real y severo, no solo inconsistencia de estilo:
+`PlanExecutor.execute()` persiste `status=EXECUTING` ANTES del bucle
+de comandos y solo persiste un status terminal DESPUÉS de que el
+bucle completo termine sin excepción sin capturar. Un `OSError` o
+`TimeoutError` desde un adapter (ambos, fallos reales que CADA
+implementación de adapter real ya lanza desde su propia capa de
+transporte) durante `execute()` o el `read_state()` del readback no
+era capturado — se propagaba sin capturar, saltándose tanto el
+registro del outcome del comando como el guardado final de status
+terminal. Combinado con el guard atómico de reclamación de la Spec
+031 (`EXECUTING` está en `_NON_CLAIMABLE_STATUSES`), un solo
+`OSError`/`TimeoutError` dejaba ese plan atascado en `EXECUTING` para
+siempre — sin outcome registrado, sin evento de auditoría
+`plan_execution_completed`, con una excepción sin capturar propagando
+hacia quien haya llamado a `execute()`. Confirmado como no testeado en
+absoluto: `grep -rn "TimeoutError\|OSError"
+tests/integration/test_plan_lifecycle.py` devolvía cero resultados —
+el hueco era invisible porque cada test de failure-injection existente
+usaba `ConnectionError` específicamente para simular "adapter caído",
+nunca los otros dos tipos que los adapters reales realmente lanzan.
+
+- Ambos sitios `except ConnectionError` en `executor.py` ampliados a
+  `except (ConnectionError, OSError, TimeoutError)` — sin ningún otro
+  cambio de lógica, solo alinea con el patrón ya establecido en todo
+  el resto del código.
+- Nuevo `FailureInjectingAdapter`
+  (`tests/fixtures/failure_injection.py`) — implementación completa de
+  `AdapterPort` (los siete métodos), construible con
+  `fail: dict[str, BaseException]` para inyectar cualquier excepción
+  en cualquier método concreto; cada método no configurado tiene éxito
+  trivial por defecto. Reemplaza la necesidad de escribir una clase de
+  adapter-que-falla ad-hoc por cada test nuevo (patrón disperso
+  existente en `test_multi_adapter_runtime.py`,
+  `test_runtime_event_consumer.py`, `test_composite_adapter_health.py`).
+- Corrección real durante la implementación, documentada
+  explícitamente en `tasks.md`: la garantía original del spec
+  ("el plan queda reintentable") era imprecisa —
+  `PlanStatus.UNKNOWN` YA estaba deliberadamente en
+  `_NON_CLAIMABLE_STATUSES` desde la Spec 031 (un outcome incierto no
+  debe reintentarse automáticamente, para no arriesgar una doble
+  actuación sobre un dispositivo) — así que ni siquiera `ConnectionError`
+  permite reintento automático por el mismo `plan_id` hoy. La garantía
+  real y precisa que este fix entrega: `OSError`/`TimeoutError` ahora
+  alcanzan el MISMO estado terminal bien definido (`UNKNOWN`, con
+  outcome registrado y evento de auditoría) que `ConnectionError` ya
+  alcanza — no un estado nuevo de "atascado en EXECUTING para siempre
+  sin ningún outcome registrado y una excepción sin capturar".
+- Probado: `OSError`/`TimeoutError` desde `execute()` y desde el
+  `read_state()` del readback ya no dejan el plan atascado en
+  `EXECUTING`; el outcome se registra correctamente
+  (`UNAVAILABLE`/`UNKNOWN` según el punto de fallo, código
+  `adapter_unavailable`); `ConnectionError` produce exactamente el
+  mismo estado terminal `PlanStatus.UNKNOWN` (test de regresión); el
+  fixture solo falla el método configurado, no todos. Verificación
+  empírica adicional: se revirtió temporalmente el fix, se confirmó
+  que exactamente los 4 tests dirigidos fallaban con la excepción sin
+  capturar, y se restauró el fix confirmando que los 24 tests del
+  fichero pasan.
+- **Fuera de alcance, con justificación explícita en el spec**:
+  migrar las clases de adapter-que-falla ad-hoc existentes al nuevo
+  fixture compartido (limpieza futura válida, no requerida para
+  cerrar el bug verificado); añadir manejo de `OSError`/`TimeoutError`
+  en `adapters/sdk/conformance.py` (valida el contrato de manejo de
+  errores del AUTOR del adapter, preocupación distinta al boundary de
+  `PlanExecutor` que esta spec cierra); inyección de fallos
+  aleatoria/chaos-engineering, simulación de fallos a nivel de red —
+  sin requisito nombrado por ninguna auditoría.
+
+Evidencia: `484 → 490 passed, 8 skipped`. Ruff y mypy limpios.
+
+## Supply-chain security en CI (2026-08-19)
+
+Cierra `specs/041-supply-chain-security/`, noveno y último ítem de P2.
+Las tres GitHub Actions que usa `.github/workflows/ci.yml` en sus 9
+jobs (`actions/checkout@v4`, `astral-sh/setup-uv@v3`,
+`actions/upload-artifact@v4`) estaban fijadas a un tag de versión
+mutable, no a un commit inmutable — verificado con `gh api
+repos/actions/checkout/git/ref/tags/v4` etc. Un tag mutable es un
+vector de ataque de supply-chain real y bien documentado (la
+recomendación #1 de la propia guía de hardening de GitHub Actions y
+el check "Pinned-Dependencies" de OpenSSF Scorecard): si el
+repositorio de una de esas actions fuera comprometido, un commit
+malicioso publicado bajo el tag existente se descargaría en silencio
+en cada run futuro de CI, sin ningún cambio de código en DomoAI que
+revisar. Segundo hueco verificado: no existía `.github/dependabot.yml`
+en ningún sitio del repo (`command find .github -type f` solo
+encontraba `ci.yml`), así que ni los SHAs fijados (una vez fijados) ni
+las dependencias Python de `uv.lock` recibían nunca propuestas de
+actualización automatizadas. Tercer hueco verificado: ningún job de CI
+ni mecanismo alguno escaneaba el conjunto de dependencias bloqueado
+contra vulnerabilidades conocidas — `uvx pip-audit --local` ejecutado
+contra el entorno real sincronizado confirmó cero vulnerabilidades
+conocidas hoy (confirmado, no asumido) — esta spec añade el mecanismo
+de detección que faltaba, no corrige una vulnerabilidad ya presente.
+
+- Las tres actions fijadas a su commit SHA exacto y ya resuelto,
+  obtenido directamente vía `gh api` contra los repositorios reales
+  (`actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`,
+  `astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3`,
+  `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4`)
+  — con comentario de versión legible preservado. Detalle no trivial:
+  el tag `v3` de `astral-sh/setup-uv` es un tag anotado (`object.type
+  == "tag"`, no `"commit"`), así que su `object.sha` es el SHA del
+  propio objeto tag, no del commit — dereferenciado correctamente vía
+  `gh api repos/astral-sh/setup-uv/git/tags/<sha-del-tag>` para
+  obtener el commit real. Aplicado en las 9 ocurrencias de
+  `checkout`/`setup-uv` (una por job) y la única ocurrencia de
+  `upload-artifact` (solo en `test-unit`); cero cambio de
+  comportamiento en ningún job — verificado con diff completo del
+  fichero, solo cambian las líneas `uses:` y se añade un job nuevo.
+- Nuevo `.github/dependabot.yml`: dos entradas `updates`, ecosistemas
+  `github-actions` y `pip`, cadencia semanal, sin auto-merge (las
+  propuestas quedan para revisión humana, comportamiento por defecto
+  de GitHub sin configuración adicional).
+- Nuevo job `dependency-audit` en `ci.yml`: mismo patrón de setup que
+  cada otro job (`uv sync`), ejecuta `uvx pip-audit --local` contra el
+  entorno sincronizado — falla el job si encuentra cualquier
+  vulnerabilidad conocida. `pip-audit` invocado vía `uvx` (no añadido
+  a `pyproject.toml`) — herramienta de solo-CI, no dependencia del
+  proyecto en tiempo de ejecución ni desarrollo.
+- Probado: grep confirma cero referencias `@v4`/`@v3` mutables
+  restantes en todo el fichero; el fichero sigue siendo YAML válido;
+  `dependabot.yml` es YAML válido con ambos ecosistemas presentes;
+  `uv sync && uvx pip-audit --local` ejecutado de verdad contra el
+  entorno real sincronizado de este repositorio, reportando su
+  resultado real actual ("No known vulnerabilities found", 57
+  paquetes verificados). `uv.lock` ya pinaba versiones exactas con
+  hash para cada dependencia (277 entradas `hash = ` confirmadas) —
+  correcto ya de antes, sin cambios necesarios ahí.
+- **Fuera de alcance, con justificación explícita en el spec**:
+  generación de SBOM (práctica adyacente real pero sin hueco nombrado
+  por ninguna auditoría); firma/attestation de artefactos de build
+  (Sigstore/cosign — DomoAI no publica artefactos firmados en ningún
+  registro hoy, nada que firmar todavía); pinning de dependencias
+  transitivas más allá de lo que `uv.lock` ya hace (ya correcto);
+  auto-merge de PRs de Dependabot (decisión de política del dueño del
+  repo, no un cambio de código unilateral); escaneo de vulnerabilidades
+  en ecosistemas no-Python (el repo no tiene ninguno hoy).
+
+Evidencia: `490 passed, 8 skipped` (sin cambios — esta spec no toca
+código Python). Ruff y mypy limpios.
+
 ## Planes, políticas y ejecución
 
 Un `Plan` contiene entre 1 y 50 `Command`. Cada comando identifica

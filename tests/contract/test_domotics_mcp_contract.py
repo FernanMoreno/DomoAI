@@ -15,7 +15,11 @@ from domoai.domain.errors import DomainError
 from domoai.domain.models import Policy, PolicyAction
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.optimizer.energy import StaticEnergyContextProvider
-from domoai.persistence.repositories import PlanRepository, ScheduledPlanRepository
+from domoai.persistence.repositories import (
+    AuditEventRepository,
+    PlanRepository,
+    ScheduledPlanRepository,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
@@ -80,6 +84,29 @@ async def build_context_with_scheduler(tmp_path) -> DomoticsMcpContext:
     )
 
 
+async def build_context_with_audit_repository(tmp_path) -> DomoticsMcpContext:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    audit_repository = AuditEventRepository(database)
+    audit = AuditLog(sink=audit_repository)
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    facade = DomoticsFacade(plan_service, PlanExecutor(adapter, plan_service, audit))
+    return DomoticsMcpContext(
+        discovery=discovery,
+        state_service=StateService(state_store),
+        facade=facade,
+        registry=registry,
+        policies=[],
+        energy_context_provider=StaticEnergyContextProvider(energy_context_for()),
+        audit_repository=audit_repository,
+    )
+
+
 async def build_composed_context() -> DomoticsMcpContext:
     home_assistant = RecordingAdapter(
         "home_assistant", source_snapshot(adapter_id="home_assistant")
@@ -124,6 +151,7 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "cancel_scheduled_plan",
         "reschedule_plan",
         "list_scheduled_plans",
+        "list_audit_events",
     ]
     assert resources == [
         "domotics://areas",
@@ -170,6 +198,48 @@ async def test_resource_snapshots_are_json_and_versioned() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_audit_events_reports_unavailable_without_a_repository() -> None:
+    server = create_domotics_server(await build_context())
+
+    result = structured(await server.call_tool("list_audit_events", {}))
+
+    assert "error" in result
+    assert "events" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_audit_events_filters_through_to_the_repository(tmp_path) -> None:
+    context = await build_context_with_audit_repository(tmp_path)
+    server = create_domotics_server(context)
+    assert context.audit_repository is not None
+    await context.audit_repository.append(
+        event_id="e1",
+        event_type="plan_approved",
+        actor="system",
+        subject_id="plan-1",
+        payload={},
+        created_at=datetime.now(UTC).isoformat(),
+    )
+    await context.audit_repository.append(
+        event_id="e2",
+        event_type="precondition_failed",
+        actor="system",
+        subject_id="plan-2",
+        payload={},
+        created_at=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+    )
+
+    all_events = structured(await server.call_tool("list_audit_events", {}))
+    filtered = structured(
+        await server.call_tool("list_audit_events", {"event_type": "precondition_failed"})
+    )
+
+    all_ids = {event["id"] for event in all_events["events"]}
+    assert {"e1", "e2"} <= all_ids
+    assert [event["id"] for event in filtered["events"]] == ["e2"]
+
+
+@pytest.mark.asyncio
 async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> None:
     context = await build_composed_context()
     server = create_domotics_server(context)
@@ -202,6 +272,7 @@ async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> N
         "cancel_scheduled_plan",
         "reschedule_plan",
         "list_scheduled_plans",
+        "list_audit_events",
     ]
     assert {device["id"] for device in inventory["devices"]} >= {
         "living_room.main_light",

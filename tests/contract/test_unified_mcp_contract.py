@@ -101,6 +101,7 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
         "cancel_scheduled_plan",
         "reschedule_plan",
         "list_scheduled_plans",
+        "list_audit_events",
         "validate_scenario",
         "optimize_scenario",
         "explain_solution",

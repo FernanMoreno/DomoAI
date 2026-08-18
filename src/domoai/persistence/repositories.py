@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -106,6 +107,52 @@ class AuditEventRepository:
             for row in rows
         ]
 
+    _MAX_LIST_EVENTS_LIMIT = 500
+
+    async def list_events(
+        self,
+        *,
+        event_type: str | None = None,
+        subject_id: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if event_type is not None:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        if subject_id is not None:
+            clauses.append("subject_id = ?")
+            params.append(subject_id)
+        if since is not None:
+            clauses.append("created_at > ?")
+            params.append(since.isoformat())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
+        params.append(bounded_limit)
+
+        cursor = self.database.connection.execute(
+            f"""SELECT id, event_type, actor, subject_id, payload, created_at
+                FROM audit_events {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?""",
+            params,
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            AuditEvent(
+                id=row[0],
+                event_type=row[1],
+                actor=row[2],
+                subject_id=row[3],
+                payload=json.loads(row[4]),
+                created_at=row[5],
+            )
+            for row in rows
+        ]
+
 
 class PlanRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
@@ -181,12 +228,16 @@ class ExecutionOutcomeRepository:
                payload=excluded.payload, completed_at=excluded.completed_at""",
             (outcome.plan_id, outcome.command_id, payload, outcome.completed_at.isoformat()),
         )
-        self.database.connection.execute(
-            """INSERT INTO execution_attempts
-               (plan_id, command_id, payload, completed_at)
-               VALUES (?, ?, ?, ?)""",
-            (outcome.plan_id, outcome.command_id, payload, outcome.completed_at.isoformat()),
-        )
+        try:
+            self.database.connection.execute(
+                """INSERT INTO execution_attempts
+                   (plan_id, command_id, payload, completed_at)
+                   VALUES (?, ?, ?, ?)""",
+                (outcome.plan_id, outcome.command_id, payload, outcome.completed_at.isoformat()),
+            )
+        except sqlite3.Error:
+            self.database.connection.rollback()
+            raise
         self.database.connection.commit()
 
     async def list_for_plan(self, plan_id: str) -> list[ExecutionOutcome]:

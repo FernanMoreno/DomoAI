@@ -40,6 +40,8 @@ class Settings(StrictModel):
     state_stale_after_seconds: int = 300
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
     scheduler_grace_window_seconds: int = Field(default=900, gt=0)
+    composite_event_queue_max_size: int = Field(default=1000, gt=0)
+    sqlite_busy_timeout_ms: int = Field(default=5000, gt=0)
     energy_live: bool = False
     tariff_provider: str | None = None
     solar_provider: str | None = None
@@ -216,6 +218,12 @@ class Settings(StrictModel):
                 else None
             ),
             mqtt_tls_insecure=boolean("DOMOAI_MQTT_TLS_INSECURE"),
+            composite_event_queue_max_size=int(
+                os.getenv("DOMOAI_COMPOSITE_EVENT_QUEUE_MAX_SIZE", "1000")
+            ),
+            sqlite_busy_timeout_ms=int(
+                os.getenv("DOMOAI_SQLITE_BUSY_TIMEOUT_MS", "5000")
+            ),
             matter_timeout_seconds=float(os.getenv("DOMOAI_MATTER_TIMEOUT_SECONDS", "5")),
             state_stale_after_seconds=int(stale_after),
             energy_live=boolean("DOMOAI_ENERGY_LIVE"),

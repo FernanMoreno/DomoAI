@@ -27,6 +27,7 @@ from domoai.mcp.resources import (
 from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.horizon import Horizon
 from domoai.optimizer.ports import EnergyContextProvider
+from domoai.persistence.repositories import AuditEventRepository
 from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.scheduler import Scheduler
@@ -44,6 +45,7 @@ class DomoticsMcpContext:
     plans: dict[str, Plan] = field(default_factory=dict)
     last_refreshed_at: datetime | None = None
     scheduler: Scheduler | None = None
+    audit_repository: AuditEventRepository | None = None
 
 
 def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> FastMCP:
@@ -346,6 +348,34 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     }
                     for plan in pending
                 ],
+            }
+        except (ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="list_audit_events",
+        description="Query the bounded, filterable audit trail of runtime decisions.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    async def list_audit_events(
+        event_type: str | None = None,
+        subject_id: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            if context.audit_repository is None:
+                raise ValueError("The audit trail is not available in this deployment")
+            events = await context.audit_repository.list_events(
+                event_type=event_type,
+                subject_id=subject_id,
+                since=datetime.fromisoformat(since) if since is not None else None,
+                limit=limit,
+            )
+            return {
+                "schema_version": "v1",
+                "events": [event.model_dump(mode="json") for event in events],
             }
         except (ValueError, ValidationError) as error:
             return error_envelope(error)

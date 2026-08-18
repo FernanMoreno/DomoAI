@@ -293,6 +293,7 @@ class AdapterHealth(StrictModel):
     adapter_id: str = Field(min_length=1)
     connected: bool
     message: str | None = None
+    components: list[AdapterHealth] | None = None
 
 
 class AdapterExecutionAck(StrictModel):

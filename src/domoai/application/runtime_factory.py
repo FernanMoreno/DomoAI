@@ -72,7 +72,11 @@ def create_adapter(
         return SimulatedHomeAdapter()
     if len(adapters) == 1:
         return adapters[0]
-    return CompositeAdapter(adapters, registry=registry)
+    return CompositeAdapter(
+        adapters,
+        registry=registry,
+        event_queue_max_size=settings.composite_event_queue_max_size,
+    )
 
 
 def _create_configured_adapters(
@@ -260,7 +264,10 @@ async def build_runtime(
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
     energy_context_provider, energy_closers = _create_energy_context_provider(resolved_settings)
-    database = SQLiteDatabase(resolved_settings.database_path)
+    database = SQLiteDatabase(
+        resolved_settings.database_path,
+        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+    )
     await database.initialize()
     audit_repository = AuditEventRepository(database)
     audit = AuditLog(sink=audit_repository)

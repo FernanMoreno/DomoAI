@@ -70,6 +70,7 @@ async def test_provider_runtime_feeds_registry_state_store_and_semantic_mcp(
             "cancel_scheduled_plan",
             "reschedule_plan",
             "list_scheduled_plans",
+            "list_audit_events",
         ]
         inventory = structured(await server.call_tool("discover_devices", {"refresh": False}))
         light_id = next(

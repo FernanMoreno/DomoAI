@@ -14,6 +14,7 @@ from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
+from tests.fixtures.failure_injection import FailureInjectingAdapter
 
 
 async def build_plan_context() -> tuple[
@@ -570,3 +571,144 @@ async def test_expired_plan_is_stale_before_adapter_call() -> None:
     with pytest.raises(ValueError, match="expired"):
         await executor.execute(validated)
     assert adapter.calls == []
+
+
+async def _build_context_with_failing_adapter(
+    tmp_path, *, fail: dict[str, BaseException]
+) -> tuple[PlanService, PlanExecutor, PlanRepository, Plan]:
+    discovery_adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    await DiscoveryService(discovery_adapter, registry, state_store, audit).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    plan_repository = PlanRepository(database)
+    failing_adapter = FailureInjectingAdapter(fail=fail)
+    executor = PlanExecutor(
+        failing_adapter, plan_service, audit, plan_repository=plan_repository
+    )
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-failure-injection-1",
+        commands=[
+            Command(
+                id="command-failure-injection-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-failure-injection-1",
+            )
+        ],
+    )
+    return plan_service, executor, plan_repository, plan
+
+
+@pytest.mark.asyncio
+async def test_os_error_during_execute_does_not_brick_the_plan(tmp_path) -> None:
+    plan_service, executor, plan_repository, plan = await _build_context_with_failing_adapter(
+        tmp_path, fail={"execute": OSError("adapter down")}
+    )
+    validated = plan_service.validate(plan)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "unavailable"
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == "adapter_unavailable"
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is not PlanStatus.EXECUTING
+
+
+@pytest.mark.asyncio
+async def test_timeout_error_during_execute_does_not_brick_the_plan(tmp_path) -> None:
+    plan_service, executor, plan_repository, plan = await _build_context_with_failing_adapter(
+        tmp_path, fail={"execute": TimeoutError("adapter timed out")}
+    )
+    validated = plan_service.validate(plan)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "unavailable"
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is not PlanStatus.EXECUTING
+
+
+@pytest.mark.asyncio
+async def test_os_error_during_readback_does_not_brick_the_plan(tmp_path) -> None:
+    plan_service, executor, plan_repository, plan = await _build_context_with_failing_adapter(
+        tmp_path, fail={"read_state": OSError("readback failed")}
+    )
+    validated = plan_service.validate(plan)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "unknown"
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == "adapter_unavailable"
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is not PlanStatus.EXECUTING
+
+
+@pytest.mark.asyncio
+async def test_timeout_error_during_readback_does_not_brick_the_plan(tmp_path) -> None:
+    plan_service, executor, plan_repository, plan = await _build_context_with_failing_adapter(
+        tmp_path, fail={"read_state": TimeoutError("readback timed out")}
+    )
+    validated = plan_service.validate(plan)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "unknown"
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is not PlanStatus.EXECUTING
+
+
+@pytest.mark.asyncio
+async def test_plan_reaches_the_same_terminal_state_as_connection_error(tmp_path) -> None:
+    """Regression guardrail: OSError/TimeoutError land in the identical
+    already-correct terminal state ConnectionError already produces today —
+    the plan is never left silently stuck in EXECUTING with no outcome
+    recorded, and a retry via the same plan_id is refused consistently,
+    the same way it already is for ConnectionError."""
+    plan_service, executor, plan_repository, plan = await _build_context_with_failing_adapter(
+        tmp_path, fail={"execute": ConnectionError("adapter down")}
+    )
+    validated = plan_service.validate(plan)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status.value == "unavailable"
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.UNKNOWN
+
+    with pytest.raises(ValueError, match="invalid_transition|already"):
+        await executor.execute(validated)
+
+
+@pytest.mark.asyncio
+async def test_failure_injection_only_fails_the_configured_method() -> None:
+    adapter = FailureInjectingAdapter(fail={"discover": OSError("configured failure")})
+
+    await adapter.connect()
+    health = await adapter.health()
+    ack = await adapter.execute(
+        Command(
+            id="probe",
+            device_id="device.probe",
+            command="turn_on",
+            idempotency_key="probe-intent",
+        )
+    )
+
+    assert health.connected is True
+    assert ack.accepted is True
+    with pytest.raises(OSError, match="configured failure"):
+        await adapter.discover()

@@ -141,6 +141,30 @@ def test_mqtt_client_cert_and_key_pair_is_accepted_together() -> None:
     assert settings.mqtt_client_key_path == Path("config/mqtt-client.key")
 
 
+def test_composite_event_queue_max_size_defaults_and_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_settings = Settings()
+    assert default_settings.composite_event_queue_max_size == 1000
+
+    monkeypatch.setenv("DOMOAI_COMPOSITE_EVENT_QUEUE_MAX_SIZE", "42")
+    settings = Settings.from_environment()
+
+    assert settings.composite_event_queue_max_size == 42
+
+
+def test_sqlite_busy_timeout_ms_defaults_and_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_settings = Settings()
+    assert default_settings.sqlite_busy_timeout_ms == 5000
+
+    monkeypatch.setenv("DOMOAI_SQLITE_BUSY_TIMEOUT_MS", "250")
+    settings = Settings.from_environment()
+
+    assert settings.sqlite_busy_timeout_ms == 250
+
+
 def test_mqtt_tls_settings_are_loaded_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

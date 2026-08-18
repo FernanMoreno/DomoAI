@@ -69,6 +69,7 @@ async def build_configured_server(
         policies=[],
         energy_context_provider=runtime.energy_context_provider,
         scheduler=runtime.scheduler,
+        audit_repository=runtime.audit_repository,
     )
     optimizer_context = OrtoolsMcpContext(
         registry=runtime.registry,

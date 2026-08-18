@@ -50,6 +50,24 @@ listener is bound to port `3671`. The `xknx` package being installed does not
 constitute a gateway.
 
 This closes the fixture-first/local acceptance described by Specs 006 and 019;
-live `connect()`/`discover()` remains externally blocked until a KNX Virtual/ETS
-gateway and its confirmed group-address mapping are supplied. Never infer the
-gateway address or replace the reference mapping from fixture data.
+live `connect()`/`discover()` is opt-in and now has a validated KNX Virtual/ETS
+path. Never infer the gateway address or replace the reference mapping from
+fixture data.
+
+## Live validation (2026-08-18)
+
+The read-only smoke was validated end-to-end from WSL against KNX Virtual on
+Windows:
+
+```text
+DOMOAI_KNX_GATEWAY_HOST=172.26.80.1
+DOMOAI_KNX_CONFIG_PATH=dev/lab/configs/knx-virtual.json
+DOMOAI_KNX_TIMEOUT_SECONDS=5
+tests/integration/test_knx_smoke.py: 1 passed in 12.38s
+```
+
+The test discovered configured virtual entities and asserted that the live
+transport emitted no writes. WSL currently has `172.26.93.253` and routes via
+`172.26.80.1`; a Windows firewall rule restricted to the current WSL address
+may need updating after a WSL/Windows restart. Export the ETS project, retain
+KNX Virtual's `interface.txt` and preserve the firewall rule outside Git.

@@ -20,18 +20,18 @@ DEFAULT_OPERATIONS = frozenset(
 )
 
 V1_OPERATION_BINDINGS: dict[str, tuple[str, str, str]] = {
-    "discover_devices": ("domotics", "discover_devices", "read"),
-    "get_state": ("domotics", "get_state", "read"),
-    "optimize_scenario": ("ortools", "optimize_scenario", "proposal"),
-    "validate_plan": ("domotics", "validate_plan", "validation"),
-    "explain_solution": ("ortools", "explain_solution", "read"),
+    "discover_devices": ("mcp", "discover_devices", "read"),
+    "get_state": ("mcp", "get_state", "read"),
+    "optimize_scenario": ("mcp", "optimize_scenario", "proposal"),
+    "validate_plan": ("mcp", "validate_plan", "validation"),
+    "explain_solution": ("mcp", "explain_solution", "read"),
     "operator_approval": ("operator", "request_approval", "approval"),
-    "execute_plan": ("domotics", "execute_plan", "mutation"),
+    "execute_plan": ("mcp", "execute_plan", "mutation"),
 }
 
 V2_OPERATION_BINDINGS: dict[str, tuple[str, str, str]] = {
     **V1_OPERATION_BINDINGS,
-    "get_energy_context": ("domotics", "get_energy_context", "read"),
+    "get_energy_context": ("mcp", "get_energy_context", "read"),
 }
 
 _BINDING_PATTERN = re.compile(

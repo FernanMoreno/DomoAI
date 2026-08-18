@@ -13,8 +13,9 @@ from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.application.state_service import StateService
 from domoai.domain.models import Policy, PolicyAction
-from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
-from domoai.mcp.ortools_server import OrtoolsMcpContext, create_ortools_server
+from domoai.mcp.domotics_server import DomoticsMcpContext
+from domoai.mcp.ortools_server import OrtoolsMcpContext
+from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
@@ -52,8 +53,7 @@ class FixtureApprovalPort:
 
 @dataclass
 class FixtureToolRouter:
-    domotics_server: Any
-    ortools_server: Any
+    unified_server: Any
     domotics_context: DomoticsMcpContext
     ortools_context: OrtoolsMcpContext
     calls: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
@@ -64,19 +64,14 @@ class FixtureToolRouter:
     ) -> dict[str, Any]:
         self.calls.append((provider, tool, arguments))
         actual_tool = self.tool_aliases.get((provider, tool), tool)
-        if provider == "domotics":
-            result = await self.domotics_server.call_tool(actual_tool, arguments)
-        elif provider == "ortools":
-            result = await self.ortools_server.call_tool(actual_tool, arguments)
-        else:
+        if provider != "mcp":
             raise AssertionError(f"Unexpected provider role: {provider}")
+        result = await self.unified_server.call_tool(actual_tool, arguments)
         return structured(result)
 
     def current_revision(self, provider: str) -> str | None:
-        if provider == "domotics":
+        if provider == "mcp":
             return self.domotics_context.facade.plan_service.current_revision
-        if provider == "ortools":
-            return self.ortools_context.runtime_revision
         return None
 
 
@@ -98,11 +93,23 @@ async def build_workflow_fixture(
     domotics_adapter, domotics_context = await _build_domotics_context(
         confirmation_required=confirmation_required
     )
-    _, ortools_context = await _build_ortools_context()
+    ortools_context = OrtoolsMcpContext(
+        registry=domotics_context.registry,
+        plan_service=domotics_context.facade.plan_service,
+        optimization_service=OptimizationService(
+            domotics_context.registry,
+            domotics_context.facade.plan_service,
+            CpSatOptimizer(domotics_context.registry),
+        ),
+        runtime_revision=domotics_context.facade.plan_service.current_revision,
+    )
+    unified_context = UnifiedMcpContext(
+        domotics=domotics_context,
+        optimizer=ortools_context,
+    )
     approval = FixtureApprovalPort(decisions=list(approval_decisions or []))
     router = FixtureToolRouter(
-        domotics_server=create_domotics_server(domotics_context),
-        ortools_server=create_ortools_server(ortools_context),
+        unified_server=create_unified_server(unified_context),
         domotics_context=domotics_context,
         ortools_context=ortools_context,
         tool_aliases=tool_aliases or {},
@@ -154,26 +161,6 @@ async def _build_domotics_context(
                 )
             )
         ),
-    )
-
-
-async def _build_ortools_context() -> tuple[SimulatedHomeAdapter, OrtoolsMcpContext]:
-    adapter = SimulatedHomeAdapter()
-    registry = DeviceRegistry()
-    state_store = StateStore()
-    audit = AuditLog()
-    discovery = DiscoveryService(adapter, registry, state_store, audit)
-    await discovery.refresh()
-    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
-    return adapter, OrtoolsMcpContext(
-        registry=registry,
-        plan_service=plan_service,
-        optimization_service=OptimizationService(
-            registry,
-            plan_service,
-            CpSatOptimizer(registry),
-        ),
-        runtime_revision=plan_service.current_revision,
     )
 
 

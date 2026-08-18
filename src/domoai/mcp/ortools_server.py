@@ -75,14 +75,8 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
     )
 
 
-def create_ortools_server(context: OrtoolsMcpContext) -> FastMCP:
+def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastMCP:
     ensure_fastmcp_settings_ready()
-    server = FastMCP(
-        "DomoAI OR-Tools Optimization",
-        instructions=(
-            "Proposal-only optimization tools. Physical execution belongs to the Domotics runtime."
-        ),
-    )
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 
     @server.tool(
@@ -137,3 +131,19 @@ def create_ortools_server(context: OrtoolsMcpContext) -> FastMCP:
             return error_envelope(error)
 
     return server
+
+
+def create_ortools_server(context: OrtoolsMcpContext) -> FastMCP:
+    """Create the internal optimizer-only factory for focused contract tests."""
+
+    ensure_fastmcp_settings_ready()
+    return register_ortools_tools(
+        FastMCP(
+            "DomoAI OR-Tools Optimization",
+            instructions=(
+                "Proposal-only optimization tools. Physical execution belongs "
+                "to the Domotics runtime."
+            ),
+        ),
+        context,
+    )

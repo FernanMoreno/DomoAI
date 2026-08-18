@@ -24,5 +24,5 @@ def test_energy_skill_gathers_context_optimizes_and_pauses_before_execution() ->
     assert procedure.operations.index("operator_approval") < procedure.operations.index(
         "execute_plan"
     )
-    assert procedure.bindings[0].provider == "domotics"
+    assert procedure.bindings[0].provider == "mcp"
     assert procedure.bindings[-1].tool == "execute_plan"

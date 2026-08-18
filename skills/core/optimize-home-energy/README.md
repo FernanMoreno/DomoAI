@@ -12,11 +12,11 @@ The fixture contract is validated by
 the optimizer and hands all mutations to the DomoAI runtime safety boundary.
 
 Its machine-readable bindings are validated by
-`src/domoai/skills/validator.py`. The reference host maps provider roles to
-semantic MCP calls, pauses at `operator.request_approval` when policy requires
-it, and resumes only through `domotics.execute_plan` with the matching digest.
+`src/domoai/skills/validator.py`. The reference host maps the single `mcp` role
+to semantic calls, pauses at `operator.request_approval` when policy requires
+it, and resumes only through `mcp.execute_plan` with the matching digest.
 
-Host extensions may map `optimize_scenario` and `explain_solution` to local
-application or MCP capabilities. They must preserve the declared order and may
-not replace `validate_plan`, `operator_approval` or `execute_plan` with direct
-adapter calls.
+Host extensions may adapt presentation or invocation details, but all semantic
+operations remain on the one general MCP connection. They must preserve the
+declared order and may not replace `validate_plan`, `operator_approval` or
+`execute_plan` with direct adapter calls.

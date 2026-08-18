@@ -15,9 +15,9 @@ does not grant authorization and it never calls a physical adapter directly.
 - Contract version: `v2`
 - Fixture reference: `tests/integration/test_core_skill.py`
 - Safety owner: DomoAI runtime policy and plan executor
-- Host mapping: `optimize_scenario` and `explain_solution` may be provided by a
-  local optimizer/application service; hosts must not replace them with arbitrary
-  solver code.
+- Host mapping: every DomoAI operation uses one general `mcp` connection;
+  hosts must not replace it with separate server instances, vendor calls or
+  arbitrary solver code.
 
 ## Declared operations
 
@@ -32,14 +32,14 @@ does not grant authorization and it never calls a physical adapter directly.
 
 ## Operation bindings
 
-- `discover_devices` → `domotics.discover_devices` (`read`)
-- `get_state` → `domotics.get_state` (`read`)
-- `get_energy_context` → `domotics.get_energy_context` (`read`)
-- `optimize_scenario` → `ortools.optimize_scenario` (`proposal`)
-- `validate_plan` → `domotics.validate_plan` (`validation`)
-- `explain_solution` → `ortools.explain_solution` (`read`)
+- `discover_devices` → `mcp.discover_devices` (`read`)
+- `get_state` → `mcp.get_state` (`read`)
+- `get_energy_context` → `mcp.get_energy_context` (`read`)
+- `optimize_scenario` → `mcp.optimize_scenario` (`proposal`)
+- `validate_plan` → `mcp.validate_plan` (`validation`)
+- `explain_solution` → `mcp.explain_solution` (`read`)
 - `operator_approval` → `operator.request_approval` (`approval`)
-- `execute_plan` → `domotics.execute_plan` (`mutation`)
+- `execute_plan` → `mcp.execute_plan` (`mutation`)
 
 ## Procedure
 
@@ -68,5 +68,5 @@ does not grant authorization and it never calls a physical adapter directly.
 - A missing approval is a stop condition, not an invitation to retry execution.
 - A changed runtime revision or validation digest requires revalidation.
 - The skill may explain or revise a proposal, but may not edit runtime policies.
-- Vendor APIs, adapter identifiers and arbitrary Python/solver code are outside
-  this procedure.
+- Vendor APIs, adapter identifiers, extra MCP servers and arbitrary
+  Python/solver code are outside this procedure.

@@ -6,9 +6,9 @@ Procedures under `skills/core/` use the Agent Skills `SKILL.md` convention and
 must remain host-agnostic. They may coordinate semantic reads, optimization,
 explanation, validation and explicit operator approval.
 
-The portable procedure declares semantic operation bindings by provider role:
-`domotics`, `ortools` and `operator`. Host configuration maps those roles to
-concrete MCP connections; the core skill does not name server instances,
+The portable procedure declares one semantic `mcp` operation binding plus the
+separate `operator` consent boundary. Host configuration maps `mcp` to one
+general DomoAI MCP connection; the core skill does not name server instances,
 vendors, protocols, adapters or solver code.
 
 ## Host extensions

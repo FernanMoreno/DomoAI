@@ -15,7 +15,7 @@ silenciosamente: produce un error de validación seguro.
 
 ## Superficie MCP v1
 
-El servidor stdio local registra estas tools semánticas:
+El único servidor stdio local registra estas tools semánticas:
 
 | Tool | Efecto |
 | --- | --- |
@@ -25,6 +25,9 @@ El servidor stdio local registra estas tools semánticas:
 | `validate_command` | Valida un comando sin invocar el adapter. |
 | `validate_plan` | Aplica capacidades, políticas, revisión y digest a un plan. |
 | `execute_plan` | Ejecuta un plan validado, con digest y aprobación cuando corresponda. |
+| `validate_scenario` | Valida un escenario de optimización contra dispositivos y capacidades canónicas. |
+| `optimize_scenario` | Produce una propuesta determinista sin ejecutar comandos físicos. |
+| `explain_solution` | Explica una propuesta tipada sin cambiar el estado del runtime. |
 
 Resources de solo lectura:
 
@@ -163,8 +166,8 @@ del camino determinista.
 `domoai.mcp.compat.ensure_fastmcp_settings_ready()` es una corrección estrecha
 de compatibilidad para el `Settings.lifespan` genérico de FastMCP cuando la
 versión instalada de Pydantic lo deja incompleto. Se invoca antes de construir
-los dos servidores semánticos, no modifica modelos de dominio, no crea una
-ruta MCP alternativa y no instala filtros globales de warnings. Si el SDK ya
+el servidor unificado, no modifica modelos de dominio, no crea una ruta MCP
+alternativa y no instala filtros globales de warnings. Si el SDK ya
 está completo, la función no hace nada.
 
 ## Optimización
@@ -256,24 +259,24 @@ una futura fuente de Home Assistant o inversor sin cambiar MCP.
 
 ## Orquestación del skill de energía
 
-El skill portable `optimize-home-energy` declara la secuencia y el proveedor
-semántico de cada operación, sin fijar nombres de servidores:
+El skill portable `optimize-home-energy` declara la secuencia y el rol de la
+única conexión MCP general, sin fijar nombres de servidores:
 
 | Operación | Rol | Tool | Modo |
 | --- | --- | --- | --- |
-| `discover_devices` | `domotics` | `discover_devices` | lectura |
-| `get_state` | `domotics` | `get_state` | lectura |
-| `get_energy_context` | `domotics` | `get_energy_context` | lectura |
-| `optimize_scenario` | `ortools` | `optimize_scenario` | propuesta |
-| `validate_plan` | `domotics` | `validate_plan` | validación |
-| `explain_solution` | `ortools` | `explain_solution` | lectura |
+| `discover_devices` | `mcp` | `discover_devices` | lectura |
+| `get_state` | `mcp` | `get_state` | lectura |
+| `get_energy_context` | `mcp` | `get_energy_context` | lectura |
+| `optimize_scenario` | `mcp` | `optimize_scenario` | propuesta |
+| `validate_plan` | `mcp` | `validate_plan` | validación |
+| `explain_solution` | `mcp` | `explain_solution` | lectura |
 | `operator_approval` | `operator` | `request_approval` | aprobación |
-| `execute_plan` | `domotics` | `execute_plan` | mutación |
+| `execute_plan` | `mcp` | `execute_plan` | mutación |
 
-El workflow coordina ambos MCP mediante puertos semánticos inyectados. En v2
-lee `get_energy_context` antes de construir la propuesta y detiene el flujo si
-falta el contexto o su revisión no coincide. No es un MCP adicional, no llama
-adapters ni `OptimizerPort` directamente y no
+El workflow usa una sola conexión MCP mediante un puerto semántico inyectado.
+En v2 lee `get_energy_context` antes de construir la propuesta y detiene el
+flujo si falta el contexto o su revisión no coincide. No es un MCP adicional,
+no llama adapters ni `OptimizerPort` directamente y no
 autoriza su propio plan. La validación final, revisión, digest, aprobación y
 postcondiciones permanecen en el Domotics Runtime. Las entradas desconocidas,
 estado obsoleto, propuestas no factibles, cambios de revisión/digest y

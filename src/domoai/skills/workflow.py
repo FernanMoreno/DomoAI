@@ -84,13 +84,13 @@ class SkillRunResult(StrictModel):
 
 
 class SkillToolRouter(Protocol):
-    """Semantic provider-role router supplied by a compatible host."""
+    """Single MCP-role router supplied by a compatible host."""
 
     def call(
-        self, provider: str, tool: str, arguments: dict[str, Any]
+        self, role: str, tool: str, arguments: dict[str, Any]
     ) -> Awaitable[Mapping[str, Any]]: ...
 
-    def current_revision(self, provider: str) -> str | None: ...
+    def current_revision(self, role: str) -> str | None: ...
 
 
 class ApprovalPort(Protocol):
@@ -399,7 +399,7 @@ class EnergySkillWorkflow:
             self._validate_approval(
                 decision, stored.validation_digest, WorkflowStage.AWAITING_APPROVAL
             )
-            current_revision = self.router.current_revision("domotics")
+            current_revision = self.router.current_revision("mcp")
             if current_revision is None:
                 raise _WorkflowFailure(
                     status=WorkflowStatus.BLOCKED,
@@ -470,7 +470,7 @@ class EnergySkillWorkflow:
                 )
             )
         try:
-            current_revision = self.router.current_revision("domotics")
+            current_revision = self.router.current_revision("mcp")
             if current_revision is None:
                 raise _WorkflowFailure(
                     status=WorkflowStatus.BLOCKED,

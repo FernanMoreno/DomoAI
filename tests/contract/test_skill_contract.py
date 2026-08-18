@@ -23,13 +23,13 @@ description: test procedure
 VALID_BINDINGS = """
 ## Operation bindings
 
-- `discover_devices` → `domotics.discover_devices` (`read`)
-- `get_state` → `domotics.get_state` (`read`)
-- `optimize_scenario` → `ortools.optimize_scenario` (`proposal`)
-- `validate_plan` → `domotics.validate_plan` (`validation`)
-- `explain_solution` → `ortools.explain_solution` (`read`)
+- `discover_devices` → `mcp.discover_devices` (`read`)
+- `get_state` → `mcp.get_state` (`read`)
+- `optimize_scenario` → `mcp.optimize_scenario` (`proposal`)
+- `validate_plan` → `mcp.validate_plan` (`validation`)
+- `explain_solution` → `mcp.explain_solution` (`read`)
 - `operator_approval` → `operator.request_approval` (`approval`)
-- `execute_plan` → `domotics.execute_plan` (`mutation`)
+- `execute_plan` → `mcp.execute_plan` (`mutation`)
 """
 
 FULL_SKILL = """---
@@ -84,14 +84,28 @@ def test_validator_returns_exact_provider_bindings(tmp_path: Path) -> None:
     assert [
         (item.operation, item.provider, item.tool, item.mode) for item in procedure.bindings
     ] == [
-        ("discover_devices", "domotics", "discover_devices", "read"),
-        ("get_state", "domotics", "get_state", "read"),
-        ("optimize_scenario", "ortools", "optimize_scenario", "proposal"),
-        ("validate_plan", "domotics", "validate_plan", "validation"),
-        ("explain_solution", "ortools", "explain_solution", "read"),
+        ("discover_devices", "mcp", "discover_devices", "read"),
+        ("get_state", "mcp", "get_state", "read"),
+        ("optimize_scenario", "mcp", "optimize_scenario", "proposal"),
+        ("validate_plan", "mcp", "validate_plan", "validation"),
+        ("explain_solution", "mcp", "explain_solution", "read"),
         ("operator_approval", "operator", "request_approval", "approval"),
-        ("execute_plan", "domotics", "execute_plan", "mutation"),
+        ("execute_plan", "mcp", "execute_plan", "mutation"),
     ]
+
+
+def test_validator_accepts_one_general_mcp_binding(tmp_path: Path) -> None:
+    single_connection = FULL_SKILL.replace("domotics.", "mcp.").replace("ortools.", "mcp.")
+    path = tmp_path / "SKILL.md"
+    path.write_text(single_connection, encoding="utf-8")
+
+    procedure = validate_skill(path)
+
+    assert {item.provider for item in procedure.bindings} == {"mcp", "operator"}
+    assert all(
+        item.provider == "operator" or item.provider == "mcp"
+        for item in procedure.bindings
+    )
 
 
 def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: Path) -> None:
@@ -107,9 +121,9 @@ def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: P
             "3. `get_energy_context` — read energy.\n",
         )
         .replace(
-            "- `get_state` → `domotics.get_state` (`read`)\n",
-            "- `get_state` → `domotics.get_state` (`read`)\n"
-            "- `get_energy_context` → `domotics.get_energy_context` (`read`)\n",
+            "- `get_state` → `mcp.get_state` (`read`)\n",
+            "- `get_state` → `mcp.get_state` (`read`)\n"
+            "- `get_energy_context` → `mcp.get_energy_context` (`read`)\n",
         )
     )
     path = tmp_path / "SKILL.md"
@@ -127,7 +141,7 @@ def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: P
     ("binding", "message"),
     [
         (
-            "- `discover_devices` → `domotics.discover_devices` (`proposal`)",
+            "- `discover_devices` → `mcp.discover_devices` (`proposal`)",
             "binding",
         ),
         (
@@ -135,7 +149,7 @@ def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: P
             "binding",
         ),
         (
-            "- `discover_devices` → `domotics.vendor_cluster` (`read`)",
+            "- `discover_devices` → `mcp.vendor_cluster` (`read`)",
             "binding",
         ),
     ],
@@ -146,7 +160,7 @@ def test_validator_rejects_invalid_provider_tool_or_mode(
     path = tmp_path / "SKILL.md"
     path.write_text(
         FULL_SKILL.replace(
-            "- `discover_devices` → `domotics.discover_devices` (`read`)", binding
+            "- `discover_devices` → `mcp.discover_devices` (`read`)", binding
         ),
         encoding="utf-8",
     )
@@ -158,7 +172,7 @@ def test_validator_rejects_invalid_provider_tool_or_mode(
 def test_validator_rejects_missing_binding(tmp_path: Path) -> None:
     path = tmp_path / "SKILL.md"
     path.write_text(
-        FULL_SKILL.replace("- `get_state` → `domotics.get_state` (`read`)\n", ""),
+        FULL_SKILL.replace("- `get_state` → `mcp.get_state` (`read`)\n", ""),
         encoding="utf-8",
     )
 

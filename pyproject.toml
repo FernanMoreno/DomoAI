@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "domoai"
 version = "0.1.0"
-description = "Universal agentic domotics runtime and MCP integrations"
+description = "Universal agentic domotics runtime and general MCP interface"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -22,7 +22,6 @@ dependencies = [
 
 [project.scripts]
 domoai-mcp = "domoai.mcp.stdio:main"
-domoai-ortools-mcp = "domoai.mcp.ortools_stdio:main"
 domoai-lab = "domoai.lab.cli:main"
 
 [dependency-groups]

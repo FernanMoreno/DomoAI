@@ -1,6 +1,6 @@
 # DomoAI
 
-Universal agentic domotics runtime with a semantic device model, multi-adapter composition and MCP interface.
+Universal agentic domotics runtime with a semantic device model, multi-adapter composition and one general MCP interface.
 
 ## Development environment
 
@@ -48,17 +48,13 @@ Example host configuration:
 The same command can be registered in Claude Code, Codex or another compatible
 MCP client.
 
-## OR-Tools optimization MCP server
+## Unified MCP surface
 
-The optimization boundary is available as a separate, proposal-only MCP
-server. It exposes `validate_scenario`, `optimize_scenario` and
-`explain_solution`; it has no physical execution or approval tools:
-
-```bash
-uv run domoai-ortools-mcp
-```
-
-Register it as a second server alongside `domoai-mcp`:
+The single `domoai-mcp` server exposes discovery, state, energy context,
+policy-aware plan validation/execution and the proposal-only OR-Tools tools
+`validate_scenario`, `optimize_scenario` and `explain_solution` through the same
+MCP session. Register exactly one server in Claude Code, Codex or any other
+compatible MCP client that supports local stdio:
 
 ```json
 {
@@ -67,35 +63,30 @@ Register it as a second server alongside `domoai-mcp`:
       "command": "uv",
       "args": ["run", "domoai-mcp"],
       "cwd": "/path/to/DomoAI"
-    },
-    "domoai-ortools": {
-      "command": "uv",
-      "args": ["run", "domoai-ortools-mcp"],
-      "cwd": "/path/to/DomoAI"
     }
   }
 }
 ```
 
-This JSON shape can be adapted to Claude Code, Codex or any MCP host that
-supports stdio servers. The optimizer returns a proposal; any later physical
-action remains behind the Domotics runtime policy and execution boundary.
+OR-Tools remains an internal proposal/validation/explanation layer. It cannot
+execute a device, approve a plan or call an adapter, and there is no second
+public OR-Tools MCP endpoint.
 
-The portable `optimize-home-energy` skill composes these two MCPs by provider
-role rather than by hard-coded server name. Its reference workflow is validated
-locally with deterministic in-process fixtures:
+The portable `optimize-home-energy` skill routes every DomoAI operation through
+one `mcp` role. Its reference workflow is validated locally with deterministic
+in-process fixtures:
 
 ```bash
 uv run pytest -q tests/contract/test_skill_contract.py
 uv run pytest -q tests/integration/test_energy_skill_workflow.py
 ```
 
-The workflow sends semantic reads to Domotics, proposals and explanations to
-OR-Tools, returns proposals to Domotics for plan validation, and never executes
-outside `execute_plan`. Sensitive plans pause for explicit operator approval.
+The workflow uses the same connection for semantic reads, proposals,
+explanations and plan validation, and never executes outside `execute_plan`.
+Sensitive plans pause for explicit operator approval.
 
 For energy-aware scenarios, the portable v2 procedure reads a complete typed
-context through `domotics.get_energy_context` before calling the proposal-only
+context through `mcp.get_energy_context` before calling the proposal-only
 optimizer. The context aligns tariffs and solar forecasts to a fixed horizon
 and may include one battery profile. CP-SAT returns cost, peak-import and
 solar-self-consumption evidence plus per-slot energy balance; it never calls a

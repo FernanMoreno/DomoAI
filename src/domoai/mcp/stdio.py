@@ -10,11 +10,15 @@ from mcp.server.fastmcp import FastMCP
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
+from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.application.runtime_factory import RuntimeComposition, build_runtime
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
-from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
+from domoai.mcp.domotics_server import DomoticsMcpContext
+from domoai.mcp.ortools_server import OrtoolsMcpContext
+from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
+from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
@@ -38,7 +42,19 @@ async def build_fixture_server() -> FastMCP:
         registry=registry,
         policies=[],
     )
-    return create_domotics_server(context)
+    optimizer_context = OrtoolsMcpContext(
+        registry=registry,
+        plan_service=plan_service,
+        optimization_service=OptimizationService(
+            registry,
+            plan_service,
+            CpSatOptimizer(registry),
+        ),
+        runtime_revision=plan_service.current_revision,
+    )
+    return create_unified_server(
+        UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
+    )
 
 
 async def build_configured_server(
@@ -53,7 +69,19 @@ async def build_configured_server(
         policies=[],
         energy_context_provider=runtime.energy_context_provider,
     )
-    return runtime, create_domotics_server(context)
+    optimizer_context = OrtoolsMcpContext(
+        registry=runtime.registry,
+        plan_service=runtime.plan_service,
+        optimization_service=OptimizationService(
+            runtime.registry,
+            runtime.plan_service,
+            CpSatOptimizer(runtime.registry),
+        ),
+        runtime_revision=runtime.plan_service.current_revision,
+    )
+    return runtime, create_unified_server(
+        UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
+    )
 
 
 async def run_stdio() -> None:

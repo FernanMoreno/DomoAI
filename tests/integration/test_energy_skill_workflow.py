@@ -48,9 +48,9 @@ async def test_workflow_routes_semantic_operations_across_both_mcp_servers() -> 
         "operator_approval",
     ]
     assert fixture.router.calls == [
-        ("domotics", "discover_devices", {"refresh": False}),
+        ("mcp", "discover_devices", {"refresh": False}),
         (
-            "domotics",
+            "mcp",
             "get_state",
             {
                 "devices": [light_device_id(fixture)],
@@ -58,10 +58,10 @@ async def test_workflow_routes_semantic_operations_across_both_mcp_servers() -> 
                 "allow_stale": True,
             },
         ),
-        ("domotics", "get_energy_context", ANY),
-        ("ortools", "optimize_scenario", ANY),
-        ("domotics", "validate_plan", ANY),
-        ("ortools", "explain_solution", ANY),
+        ("mcp", "get_energy_context", ANY),
+        ("mcp", "optimize_scenario", ANY),
+        ("mcp", "validate_plan", ANY),
+        ("mcp", "explain_solution", ANY),
     ]
     optimize_arguments = fixture.router.calls[3][2]
     assert optimize_arguments["scenario"]["energy_context"]["schema_version"] == "v1"
@@ -88,13 +88,13 @@ async def test_workflow_pauses_then_resumes_through_domotics_execute_once() -> N
     assert completed.status is WorkflowStatus.COMPLETED
     assert completed.stage is WorkflowStage.COMPLETED
     assert [call[0:2] for call in fixture.router.calls] == [
-        ("domotics", "discover_devices"),
-        ("domotics", "get_state"),
-        ("domotics", "get_energy_context"),
-        ("ortools", "optimize_scenario"),
-        ("domotics", "validate_plan"),
-        ("ortools", "explain_solution"),
-        ("domotics", "execute_plan"),
+        ("mcp", "discover_devices"),
+        ("mcp", "get_state"),
+        ("mcp", "get_energy_context"),
+        ("mcp", "optimize_scenario"),
+        ("mcp", "validate_plan"),
+        ("mcp", "explain_solution"),
+        ("mcp", "execute_plan"),
     ]
     assert len(fixture.domotics_adapter.calls) == 1
     assert repeated == completed
@@ -354,13 +354,13 @@ async def test_two_host_role_mappings_produce_equivalent_traces() -> None:
     first = await build_workflow_fixture()
     second = await build_workflow_fixture(
         tool_aliases={
-            ("domotics", "discover_devices"): "discover_devices",
-            ("domotics", "get_state"): "get_state",
-            ("domotics", "get_energy_context"): "get_energy_context",
-            ("ortools", "optimize_scenario"): "optimize_scenario",
-            ("domotics", "validate_plan"): "validate_plan",
-            ("ortools", "explain_solution"): "explain_solution",
-            ("domotics", "execute_plan"): "execute_plan",
+            ("mcp", "discover_devices"): "discover_devices",
+            ("mcp", "get_state"): "get_state",
+            ("mcp", "get_energy_context"): "get_energy_context",
+            ("mcp", "optimize_scenario"): "optimize_scenario",
+            ("mcp", "validate_plan"): "validate_plan",
+            ("mcp", "explain_solution"): "explain_solution",
+            ("mcp", "execute_plan"): "execute_plan",
         }
     )
     first_result = await EnergySkillWorkflow(first.router, first.approval).run(request_for(first))
@@ -381,8 +381,8 @@ async def test_two_host_role_mappings_produce_equivalent_traces() -> None:
     "invalid_binding",
     [
         ("hue", "turn_on"),
-        ("domotics", "vendor_cluster"),
-        ("ortools", "execute_python"),
+        ("mcp", "vendor_cluster"),
+        ("mcp", "execute_python"),
     ],
 )
 async def test_router_rejects_nonportable_routes(

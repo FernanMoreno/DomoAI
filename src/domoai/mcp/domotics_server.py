@@ -42,14 +42,8 @@ class DomoticsMcpContext:
     last_refreshed_at: datetime | None = None
 
 
-def create_domotics_server(context: DomoticsMcpContext) -> FastMCP:
+def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> FastMCP:
     ensure_fastmcp_settings_ready()
-    server = FastMCP(
-        "DomoAI Domotics",
-        instructions=(
-            "Semantic home automation tools. Runtime policy and approval are authoritative."
-        ),
-    )
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
     mutation_annotations = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
@@ -263,3 +257,18 @@ def create_domotics_server(context: DomoticsMcpContext) -> FastMCP:
         )
 
     return server
+
+
+def create_domotics_server(context: DomoticsMcpContext) -> FastMCP:
+    """Create the legacy domain-only server used by focused contract tests."""
+
+    ensure_fastmcp_settings_ready()
+    return register_domotics_tools(
+        FastMCP(
+            "DomoAI Domotics",
+            instructions=(
+                "Semantic home automation tools. Runtime policy and approval are authoritative."
+            ),
+        ),
+        context,
+    )

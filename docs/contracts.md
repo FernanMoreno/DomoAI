@@ -1662,6 +1662,64 @@ Evidencia: `528 → 533 passed, 8 skipped` (5 tests nuevos, más 2 de
 mypy limpios (94 ficheros fuente). Sin cambio de schema — dependencia
 interna del runtime, sin contrato público afectado.
 
+## Replay determinista de planes (2026-08-19)
+
+Segundo ítem de P4, elegido por el usuario tras completar la Spec 047
+(virtual clock). Depurar la ejecución de un plan concreto exigía hoy
+reproducirlo en vivo a una hora de reloj no controlada, o leer eventos
+resumidos del audit trail (`plan_validated`, `command_execution_outcome`,
+`plan_execution_completed`) que capturan estado/contadores pero no
+bastan para volver a ejecutar el mismo plan. `PlanRepository` ya
+persiste el `Plan` completo; la Spec 047 ya añadió `Clock`. Nada
+combinaba ambos.
+
+- Nuevo `PlanReplayer` (`src/domoai/runtime/replay.py`) y `ReplayResult`
+  (estado repetido, `outcomes` por comando, notas de reconstrucción
+  incompleta). `replay(plan_id)` carga el plan persistido, construye un
+  `DeviceRegistry`/`StateStore`/`PlanService`/`PlanExecutor` totalmente
+  aislados, y re-valida + re-ejecuta contra un `FixedClock` anclado al
+  propio `execute_at`/`created_at` del plan — el resultado no depende
+  de cuándo se pide el replay.
+- **Corrección real de diseño durante la implementación**: el plan
+  original proponía reconstruir el registry vía
+  `DeviceRegistry.load_persisted(...)` (igual que `build_runtime`).
+  La implementación descubrió, leyendo el propio docstring del método,
+  que `load_persisted` deja las rutas de comando (`_routes`) vacías a
+  propósito — solo `apply_snapshot` (un discovery real) las reconstruye
+  — así que cualquier comando replayado habría fallado siempre con
+  `route_not_found`, sin relación con si el dispositivo "existía".
+  `build_runtime` nunca lo sufre porque siempre encadena
+  `discovery.refresh()` contra el adapter EN VIVO justo después. Como
+  el replay no puede tocar nunca un adapter real (FR-003), la
+  corrección fue construir el registry vía `DiscoveryService` contra
+  un `SimulatedHomeAdapter` fresco — el mismo mecanismo, pero apuntado
+  al fixture determinista. Consecuencia asumida explícitamente: el
+  replay opera dentro del universo de dispositivos del fixture, no
+  necesariamente los dispositivos de producción originales del plan.
+- Por eso el reporte de reconstrucción incompleta (`incomplete_reconstruction_notes`)
+  es más importante de lo previsto: cualquier dispositivo del plan que
+  no exista en el fixture se reporta explícitamente, en vez de fallar
+  en silencio o fingir fidelidad que no existe.
+- Aislamiento verificado como propiedad dura, no best-effort: el
+  adapter, `AuditLog`, `PolicyEngine`, registry y state store del
+  replay son instancias nuevas y locales a cada llamada — nunca
+  comparten estado con el runtime en vivo, y `replay()` nunca llama a
+  `save()` en ningún repositorio. Tres tests dedicados prueban que el
+  adapter en vivo no recibe llamadas, el state store en vivo no
+  cambia, y el plan persistido no se modifica.
+- Replay repetible: llamar `replay()` dos veces sobre el mismo plan
+  produce resultados idénticos — verificado directamente por test.
+- Fuera de alcance, con justificación explícita en el spec: exposición
+  vía tool MCP o CLI (esta spec entrega solo el mecanismo subyacente,
+  igual que la Spec 047 no añadió CLI para `Clock`); historial de
+  estado por-punto-en-el-tiempo (no existe tal histórico en la capa de
+  persistencia actual — los snapshots se sobrescriben, no se
+  versionan); replay masivo o programado.
+
+Evidencia: `533 → 541 passed, 8 skipped` (8 tests nuevos). Ruff y
+mypy limpios (95 ficheros fuente). Sin cambio de schema — nuevo
+módulo interno del runtime, sin contrato público nuevo.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

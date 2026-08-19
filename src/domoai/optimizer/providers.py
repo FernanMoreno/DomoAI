@@ -176,6 +176,7 @@ class ComposedEnergyContextProvider:
         tariffs: TariffProvider,
         solar: SolarForecastProvider,
         battery: BatteryProvider | None = None,
+        export_tariffs: TariffProvider | None = None,
         *,
         max_age_seconds: float | None = 900,
         now: Callable[[], datetime] | None = None,
@@ -185,6 +186,7 @@ class ComposedEnergyContextProvider:
         self.tariffs = tariffs
         self.solar = solar
         self.battery = battery
+        self.export_tariffs = export_tariffs
         self.max_age_seconds = max_age_seconds
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -192,15 +194,22 @@ class ComposedEnergyContextProvider:
         tariff_result = self._get_tariffs(horizon)
         solar_result = self._get_solar(horizon)
         battery_result = self._get_battery(horizon) if self.battery is not None else None
+        export_tariff_result = (
+            self._get_export_tariffs(horizon) if self.export_tariffs is not None else None
+        )
 
         self._validate_result_horizon(tariff_result, horizon, "tariff")
         self._validate_result_horizon(solar_result, horizon, "solar")
         if battery_result is not None:
             self._validate_result_horizon(battery_result, horizon, "battery")
+        if export_tariff_result is not None:
+            self._validate_result_horizon(export_tariff_result, horizon, "export_tariff")
 
         results = [tariff_result, solar_result]
         if battery_result is not None:
             results.append(battery_result)
+        if export_tariff_result is not None:
+            results.append(export_tariff_result)
         for result in results:
             self._validate_freshness(result)
 
@@ -209,26 +218,42 @@ class ComposedEnergyContextProvider:
             if battery_result is not None
             else "none"
         )
-        source_revision = "|".join(
-            (
-                f"tariff:{tariff_result.source_id}@{tariff_result.source_revision}",
-                f"solar:{solar_result.source_id}@{solar_result.source_revision}",
-                f"battery:{battery_revision}",
+        revision_parts = [
+            f"tariff:{tariff_result.source_id}@{tariff_result.source_revision}",
+            f"solar:{solar_result.source_id}@{solar_result.source_revision}",
+            f"battery:{battery_revision}",
+        ]
+        if export_tariff_result is not None:
+            revision_parts.append(
+                f"export_tariff:{export_tariff_result.source_id}"
+                f"@{export_tariff_result.source_revision}"
             )
-        )
+        source_revision = "|".join(revision_parts)
         return EnergyContext(
             horizon=horizon,
             tariffs=tariff_result.points,
             solar_forecast=solar_result.points,
             battery=battery_result.battery if battery_result is not None else None,
+            export_tariffs=(
+                export_tariff_result.points if export_tariff_result is not None else None
+            ),
             source_revision=source_revision,
             observed_at=min(result.observed_at for result in results),
         )
 
     def _get_tariffs(self, horizon: Horizon) -> TariffSeries:
-        provider_id = _safe_provider_id(self.tariffs, "tariff")
+        return self._get_tariff_series(self.tariffs, horizon, "tariff")
+
+    def _get_export_tariffs(self, horizon: Horizon) -> TariffSeries:
+        assert self.export_tariffs is not None
+        return self._get_tariff_series(self.export_tariffs, horizon, "export_tariff")
+
+    def _get_tariff_series(
+        self, provider: TariffProvider, horizon: Horizon, label: str
+    ) -> TariffSeries:
+        provider_id = _safe_provider_id(provider, label)
         try:
-            result = self.tariffs.get_tariffs(horizon)
+            result = provider.get_tariffs(horizon)
         except EnergyProviderError:
             raise
         except Exception as error:
@@ -239,14 +264,14 @@ class ComposedEnergyContextProvider:
                     if _is_retryable_exception(error)
                     else "provider_invalid"
                 ),
-                message="tariff provider failed",
+                message=f"{label} provider failed",
                 retryable=_is_retryable_exception(error),
             ) from error
         if not isinstance(result, TariffSeries):
             raise _provider_error(
                 provider_id,
                 code="provider_invalid",
-                message="tariff provider returned an invalid result",
+                message=f"{label} provider returned an invalid result",
             )
         return result
 

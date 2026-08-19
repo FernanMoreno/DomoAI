@@ -1409,6 +1409,83 @@ optimization-scenario.schema.json` regenerado — solo cambio aditivo
 (dos nuevas definiciones de modelo, dos nuevos campos opcionales en
 `OptimizationScenario`), ningún campo existente cambia de forma.
 
+## Tarifa de exportación como ingreso en el optimizador (2026-08-19)
+
+Cierra `specs/044-export-tariff-revenue/`, tercer ítem de P3. Gap
+verificado leyendo `cp_sat.py` completo: `context.tariffs` se lee
+exactamente dos veces, ambas contra cantidades de importación
+(`grid_import`/`import_kw`) — `command grep -rn "\.tariffs\b"
+src/domoai --include="*.py"` lo confirma. La energía exportada tenía
+valor económico cero en todo el optimizador: `minimize_energy_cost`
+solo sumaba `grid_import * precio`, y el `energy_cost` reportado nunca
+restaba ingresos por exportación, aunque `max_grid_export` y
+`grid_export` ya existían como cantidad física.
+
+- Nuevo campo aditivo `EnergyContext.export_tariffs: list[TariffPoint]
+  | None = None`, estructuralmente idéntico a `tariffs` — reutiliza el
+  mismo modelo `TariffPoint`, sin modelo nuevo. `validate_series`
+  extendida para cubrirlo cuando está presente, con el mismo bucle
+  genérico de cobertura-por-slot ya usado para `base_load_forecast`.
+- `_objective_terms()`, rama `minimize_energy_cost`: nuevo término
+  simétrico al de importación pero de signo opuesto
+  (`-sign * weight * export_tariffs[slot].price_per_kwh * horas *
+  OBJECTIVE_SCALE * grid_export[slot]`), añadido SOLO cuando
+  `context.export_tariffs is not None` — con el campo ausente el
+  término literalmente no se genera, objetivo matemáticamente
+  idéntico a antes.
+- Bucle de reporte tras resolver: nuevo `export_revenue` acumulado
+  igual que `energy_cost` pero sobre `export_kw`; `objective_values
+  ["energy_cost"]` pasa a ser neto (`energy_cost - export_revenue`,
+  que es `energy_cost` sin cambios cuando `export_revenue` es `0.0`
+  por defecto); nuevo `objective_values["export_revenue"]` expuesto
+  por separado — el ingreso nunca queda oculto dentro de una única
+  cifra combinada, sirviendo directamente la auditabilidad exigida
+  por el Principio III.
+- `ComposedEnergyContextProvider` gana un parámetro opcional
+  `export_tariffs: TariffProvider | None = None`, con el mismo
+  tratamiento ya existente para `battery` (opcional, se resuelve solo
+  si está presente, se valida horizonte/frescura con los mismos
+  helpers genéricos). Reutiliza el protocolo `TariffProvider` tal
+  cual — sin protocolo nuevo, cualquier `TariffProvider` existente
+  (incluido `StaticTariffProvider`) ya sirve para tarifa de
+  exportación sin código adicional. Detalle de compatibilidad
+  encontrado y corregido durante la implementación: la primera versión
+  añadía siempre un segmento `export_tariff:none` a `source_revision`
+  incluso sin tarifa de exportación configurada, rompiendo un test
+  existente (`test_energy_providers.py::...endswith("battery:none")`)
+  — corregido para solo añadir el segmento cuando la tarifa de
+  exportación está realmente presente, preservando el `source_revision`
+  exacto de todo escenario existente.
+- Probado: una tarifa de exportación con exportación real reduce el
+  coste neto reportado frente a un escenario idéntico sin ella; un
+  precio de exportación más alto en un slot desplaza la exportación
+  hacia ese slot cuando hacerlo es gratis; el ingreso de exportación
+  se reporta como valor propio, distinto del coste neto; un escenario
+  sin tarifa de exportación reporta `export_revenue == 0.0`
+  exactamente; una serie de tarifa de exportación que no cubre el
+  horizonte se rechaza igual que ya se rechazaba `tariffs`; los tests
+  preexistentes de los tres ficheros del solver siguen pasando sin
+  ninguna modificación — cero regresión. Un test de contrato MCP
+  (`test_energy_context_mcp.py`) que enumeraba explícitamente el
+  conjunto completo de campos de `EnergyContext` sí necesitó
+  actualizarse para incluir `export_tariffs` — actualización esperada
+  de un contrato que ya declaraba la forma exacta del modelo, no una
+  regresión.
+- **Fuera de alcance, con justificación explícita en el spec**: cablear
+  una fuente de datos real de tarifa de exportación (proveedor de
+  feed-in tariff concreto, API de contrato de comercializadora) — esta
+  spec añade el modelo semántico y el puerto de proveedor opcional,
+  mismo patrón aditivo ya usado para `base_load_forecast`; una fuente
+  live puede añadirse después sin cambiar este contrato. Ningún modelo
+  de precios nuevo (tarifas escalonadas, topes contractuales, umbrales
+  de autoconsumo) — la tarifa de exportación usa la misma forma de
+  serie por slot que la de importación, sin inventar semántica nueva.
+
+Evidencia: `507 passed, 8 skipped` (507 → 512, 5 tests nuevos). Ruff y
+mypy limpios (93 ficheros fuente). `schemas/v1/energy-context.schema.json`
+y `schemas/v1/optimization-scenario.schema.json` regenerados — ambos
+cambios puramente aditivos (un campo opcional nuevo cada uno).
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

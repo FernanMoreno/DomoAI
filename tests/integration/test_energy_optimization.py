@@ -834,3 +834,187 @@ async def test_ev_and_comfort_coexist_with_generic_load_and_battery() -> None:
             + slot["comfort_power_kw"]
         )
         assert total <= 6 + 1e-6
+
+
+def _export_tariff_scenario(*, export_price_per_kwh: float, with_export_tariff: bool):
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(slot=0, power=5.0),
+            SolarForecastPoint(slot=1, power=5.0),
+        ],
+        export_tariffs=(
+            [
+                TariffPoint(slot=0, price_per_kwh=export_price_per_kwh, currency="EUR"),
+                TariffPoint(slot=1, price_per_kwh=export_price_per_kwh, currency="EUR"),
+            ]
+            if with_export_tariff
+            else None
+        ),
+        battery=None,
+        source_revision="export-tariff-scenario",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    return context, horizon
+
+
+@pytest.mark.asyncio
+async def test_export_tariff_reduces_net_cost() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context_with, horizon = _export_tariff_scenario(
+        export_price_per_kwh=0.05, with_export_tariff=True
+    )
+    context_without, _ = _export_tariff_scenario(
+        export_price_per_kwh=0.05, with_export_tariff=False
+    )
+    scenario_with = OptimizationScenario(
+        id="export-tariff-with-1",
+        horizon=horizon,
+        energy_context=context_with,
+        loads=[flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=1)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+    scenario_without = scenario_with.model_copy(
+        update={"id": "export-tariff-without-1", "energy_context": context_without}
+    )
+
+    result_with = service.optimize(scenario_with)
+    result_without = service.optimize(scenario_without)
+
+    assert result_with.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_without.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_with.objective_values["energy_cost"] < result_without.objective_values[
+        "energy_cost"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_export_tariff_shifts_export_toward_higher_price_slot() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(slot=0, power=5.0),
+            SolarForecastPoint(slot=1, power=5.0),
+        ],
+        export_tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.02, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.20, currency="EUR"),
+        ],
+        battery=None,
+        source_revision="export-tariff-shift",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="export-tariff-shift-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[
+            flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=1, duration_slots=1)
+        ],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.plan is not None
+    command = next(cmd for cmd in result.plan.commands if cmd.device_id == device_id)
+    assert command.intent == "scheduled_slot:0"
+
+
+@pytest.mark.asyncio
+async def test_export_revenue_reported_separately_from_net_cost() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _export_tariff_scenario(
+        export_price_per_kwh=0.05, with_export_tariff=True
+    )
+    scenario = OptimizationScenario(
+        id="export-revenue-reported-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=1)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.objective_values["export_revenue"] > 0
+    assert result.objective_values["energy_cost"] == pytest.approx(
+        sum(
+            slot["grid_import_kw"] * (horizon.resolution_minutes / 60) * 0.10
+            for slot in result.constraint_summary["slots"]
+        )
+        - result.objective_values["export_revenue"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_scenario_without_export_tariff_reports_zero_export_revenue() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _export_tariff_scenario(
+        export_price_per_kwh=0.05, with_export_tariff=False
+    )
+    scenario = OptimizationScenario(
+        id="export-revenue-absent-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=1)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.objective_values["export_revenue"] == 0.0
+
+
+def test_export_tariff_series_must_cover_the_horizon() -> None:
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    with pytest.raises(ValidationError):
+        EnergyContext(
+            horizon=horizon,
+            tariffs=[
+                TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+                TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+            ],
+            solar_forecast=[
+                SolarForecastPoint(slot=0, power=0.0),
+                SolarForecastPoint(slot=1, power=0.0),
+            ],
+            export_tariffs=[TariffPoint(slot=0, price_per_kwh=0.05, currency="EUR")],
+            battery=None,
+            source_revision="export-tariff-invalid",
+            observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        )

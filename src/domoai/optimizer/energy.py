@@ -63,6 +63,7 @@ class EnergyContext(StrictModel):
     tariffs: list[TariffPoint]
     solar_forecast: list[SolarForecastPoint]
     base_load_forecast: list[BaseLoadPoint] | None = None
+    export_tariffs: list[TariffPoint] | None = None
     battery: BatteryProfile | None = None
     source_revision: str = Field(min_length=1)
     observed_at: datetime
@@ -81,6 +82,8 @@ class EnergyContext(StrictModel):
         ]
         if self.base_load_forecast is not None:
             series.append(("base_load_forecast", self.base_load_forecast))
+        if self.export_tariffs is not None:
+            series.append(("export_tariffs", self.export_tariffs))
         for name, points in series:
             slots = [point.slot for point in points]
             if len(points) != self.horizon.slots:

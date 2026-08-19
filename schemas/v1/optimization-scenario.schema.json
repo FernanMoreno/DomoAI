@@ -334,6 +334,21 @@
           "default": null,
           "title": "Base Load Forecast"
         },
+        "export_tariffs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/TariffPoint"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Export Tariffs"
+        },
         "battery": {
           "anyOf": [
             {

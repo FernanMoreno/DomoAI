@@ -313,6 +313,7 @@ class CpSatOptimizer:
         plans = _proposal_plan(scenario, selected_slots, ev_charge_slots, comfort_active_slots)
         slots: list[dict[str, float | int]] = []
         energy_cost = 0.0
+        export_revenue = 0.0
         export_kwh = 0.0
         solar_kwh = 0.0
         resolution_hours = scenario.horizon.resolution_minutes / 60
@@ -345,6 +346,10 @@ class CpSatOptimizer:
                 and solver.Value(comfort_active_variables[comfort_load.id][slot])
             )
             energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
+            if context.export_tariffs is not None:
+                export_revenue += (
+                    export_kw * resolution_hours * context.export_tariffs[slot].price_per_kwh
+                )
             export_kwh += export_kw * resolution_hours
             solar_kwh += solar_kw * resolution_hours
             slots.append(
@@ -378,7 +383,8 @@ class CpSatOptimizer:
             plans=plans,
             objective_values={
                 "start_slot_sum": float(sum(selected_slots.values())),
-                "energy_cost": energy_cost,
+                "energy_cost": energy_cost - export_revenue,
+                "export_revenue": export_revenue,
                 "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
                 "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
             },
@@ -513,6 +519,16 @@ def _objective_terms(
                 * OBJECTIVE_SCALE
             )
             terms.append(coefficient * variable)
+        if context.export_tariffs is not None:
+            for slot, variable in enumerate(grid_export):
+                coefficient = round(
+                    -sign
+                    * weight
+                    * context.export_tariffs[slot].price_per_kwh
+                    * resolution_hours
+                    * OBJECTIVE_SCALE
+                )
+                terms.append(coefficient * variable)
     elif objective.name == "minimize_peak_import":
         terms.append(round(sign * weight * OBJECTIVE_SCALE) * peak_import)
     elif objective.name == "maximize_solar_self_consumption":

@@ -314,6 +314,8 @@ class CpSatOptimizer:
             soft_violations,
             resolution_hours=scenario.horizon.resolution_minutes / 60,
             context=context,
+            charge_variables=charge_variables,
+            discharge_variables=discharge_variables,
         )
         failure = _failure_result(scenario, status)
         if failure is not None:
@@ -342,6 +344,7 @@ class CpSatOptimizer:
         export_revenue = 0.0
         export_kwh = 0.0
         solar_kwh = 0.0
+        battery_throughput_kwh = 0.0
         resolution_hours = scenario.horizon.resolution_minutes / 60
         for slot in range(horizon_slots):
             load_power = sum(
@@ -371,6 +374,7 @@ class CpSatOptimizer:
                 if slot in comfort_active_variables[comfort_load.id]
                 and solver.Value(comfort_active_variables[comfort_load.id][slot])
             )
+            battery_throughput_kwh += (charge_kw + discharge_kw) * resolution_hours
             energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
             if context.export_tariffs is not None:
                 export_revenue += (
@@ -392,6 +396,11 @@ class CpSatOptimizer:
                     "comfort_power_kw": comfort_power_kw,
                 }
             )
+        battery_degradation_cost = (
+            battery_throughput_kwh * battery.degradation_cost_per_kwh
+            if battery is not None and battery.degradation_cost_per_kwh is not None
+            else 0.0
+        )
 
         solver_evidence = SolverEvidence(
             solver_name="cp-sat",
@@ -409,11 +418,13 @@ class CpSatOptimizer:
             plans=plans,
             objective_values={
                 "start_slot_sum": float(sum(selected_slots.values())),
-                "energy_cost": energy_cost - export_revenue,
+                "energy_cost": energy_cost - export_revenue + battery_degradation_cost,
                 "export_revenue": export_revenue,
                 "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
                 "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
                 "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
+                "battery_throughput_kwh": battery_throughput_kwh,
+                "battery_degradation_cost": battery_degradation_cost,
             },
             constraint_summary={
                 "hard_satisfied": True,
@@ -528,6 +539,8 @@ def _objective_terms(
     grid_import: list[Any],
     grid_export: list[Any],
     peak_import: Any,
+    charge_variables: list[Any] | None = None,
+    discharge_variables: list[Any] | None = None,
 ) -> list[Any]:
     sign = -1 if objective.direction == "maximize" else 1
     weight = objective.weight
@@ -557,6 +570,25 @@ def _objective_terms(
                     * OBJECTIVE_SCALE
                 )
                 terms.append(coefficient * variable)
+        battery = context.battery
+        if (
+            battery is not None
+            and battery.degradation_cost_per_kwh is not None
+            and battery.degradation_cost_per_kwh > 0
+            and charge_variables is not None
+            and discharge_variables is not None
+        ):
+            coefficient = round(
+                sign
+                * weight
+                * battery.degradation_cost_per_kwh
+                * resolution_hours
+                * OBJECTIVE_SCALE
+            )
+            for charge_variable, discharge_variable in zip(
+                charge_variables, discharge_variables, strict=True
+            ):
+                terms.append(coefficient * (charge_variable + discharge_variable))
     elif objective.name == "minimize_peak_import":
         terms.append(round(sign * weight * OBJECTIVE_SCALE) * peak_import)
     elif objective.name == "maximize_solar_self_consumption":
@@ -590,6 +622,8 @@ def _solve_tiers(
     *,
     resolution_hours: float,
     context: Any,
+    charge_variables: list[Any] | None = None,
+    discharge_variables: list[Any] | None = None,
 ) -> tuple[Any, int, list[SolvedTier], float]:
     tiers: list[dict[str, Any]] = []
     if soft_violations:
@@ -613,6 +647,8 @@ def _solve_tiers(
                     grid_import,
                     grid_export,
                     peak_import,
+                    charge_variables,
+                    discharge_variables,
                 )
             )
         if tier_terms:

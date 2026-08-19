@@ -70,6 +70,7 @@ class BatteryProfile(StrictModel):
     max_discharge_kw: float = Field(ge=0)
     charge_efficiency: float = Field(gt=0, le=1)
     discharge_efficiency: float = Field(gt=0, le=1)
+    degradation_cost_per_kwh: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_state_domain(self) -> BatteryProfile:

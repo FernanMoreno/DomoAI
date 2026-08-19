@@ -1535,6 +1535,66 @@ mypy limpios (93 ficheros fuente). `schemas/v1/energy-context.schema.json`,
 diffs puramente aditivos (un `$defs/ConfidenceBand` nuevo y un campo
 opcional `confidence`/`conservative` cada uno).
 
+## Coste de degradación de batería (2026-08-19)
+
+Quinto y último ítem de P3 — con esta spec, P3 queda completo. El
+ciclado de batería era gratis en el objetivo del optimizador
+(verificado: `_objective_terms()` solo precia `grid_import`/
+`grid_export`, sin ningún término de `charge`/`discharge`), pese a que
+toda batería real se desgasta con el throughput acumulado. Alcance
+confirmado con el usuario vía AskUserQuestion — ambas partes
+requeridas en una sola spec, mismo patrón de decisión que las specs
+043/045:
+
+- Reporte de throughput SIEMPRE presente cuando hay batería, sin
+  configuración adicional: `objective_values["battery_throughput_kwh"]`
+  se calcula sumando `(charge_kw + discharge_kw) * resolution_hours`
+  por slot en el mismo bucle post-solve que ya calculaba
+  `energy_cost`/`export_revenue` — sin variables nuevas del solver, las
+  cantidades de carga/descarga ya se extraían para
+  `constraint_summary["slots"]`. `0.0` cuando no hay batería.
+- Nuevo campo opcional `BatteryProfile.degradation_cost_per_kwh`
+  (`ge=0`). Al estar en `BatteryProfile` y no en un nivel superior, el
+  requisito "no se puede configurar coste de desgaste sin batería" es
+  una garantía del sistema de tipos, no una regla de validación en
+  tiempo de ejecución.
+- Cuando está configurado y es mayor que cero, `_objective_terms()`/
+  `_solve_tiers()` reciben `charge_variables`/`discharge_variables`
+  como nuevos parámetros de solo palabra clave (con valor por defecto
+  `[]`, sin afectar ninguna otra rama del objetivo) y añaden un término
+  proporcional al throughput dentro de `minimize_energy_cost` — el
+  solver ahora prefiere ciclar menos la batería cuando ciclar no aporta
+  otro beneficio, y sigue ciclando cuando el beneficio (p. ej. un
+  spread de tarifa grande) supera el coste de desgaste.
+- `objective_values["battery_degradation_cost"]` reportado por
+  separado; `objective_values["energy_cost"]` pasa a netear
+  `import_cost - export_revenue + battery_degradation_cost` (sin
+  cambio cuando `battery_degradation_cost` es `0.0` por defecto),
+  mismo patrón exacto que la spec 044 usó para `export_revenue`.
+- Un coste de desgaste de `0.0` se trata igual que ausente — no se
+  rechaza, y no distorsiona el objetivo (coeficiente cero).
+- Cero regresión verificada explícitamente: ausencia del campo produce
+  plan y coste idénticos a hoy; el reporte de throughput por sí solo no
+  cambia ninguna decisión del solver.
+- **Fuera de alcance, con justificación explícita en el spec**: fade de
+  capacidad o seguimiento de estado de salud entre ejecuciones — dentro
+  de un único horizonte acotado la capacidad se sigue tratando como
+  constante, exactamente igual que hoy; solo se añade el coste
+  económico del ciclado. Throughput de la batería del EV (spec 043) —
+  la economía de desgaste de un vehículo pertenece a su propietario, no
+  al optimizador doméstico. Cómo se deriva la cifra de coste por kWh
+  (datos de fabricante, coste de reemplazo / vida útil en ciclos) — se
+  trata como un valor opaco suministrado por la persona usuaria.
+
+Evidencia: `519 → 526 passed, 8 skipped` (7 tests nuevos). Ruff y mypy
+limpios (93 ficheros fuente). `schemas/v1/battery-profile.schema.json`,
+`schemas/v1/battery-state.schema.json`,
+`schemas/v1/energy-context.schema.json` y
+`schemas/v1/optimization-scenario.schema.json` regenerados — los
+cuatro diffs puramente aditivos (un campo opcional
+`degradation_cost_per_kwh` cada uno). **P3 completo**: Specs 042, 043,
+044, 045 y 046 cerradas.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

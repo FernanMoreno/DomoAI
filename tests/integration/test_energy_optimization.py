@@ -12,6 +12,7 @@ from domoai.domain.models import PlanStatus
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import (
     BaseLoadPoint,
+    BatteryProfile,
     ConfidenceBand,
     EnergyContext,
     SolarForecastPoint,
@@ -1265,3 +1266,208 @@ async def test_conservative_flag_off_or_absent_is_byte_identical_to_baseline() -
             baseline.objective_values["energy_cost"]
         )
         assert result.objective_values["conservative_mode_active"] == 0.0
+
+
+def _degradation_context(
+    *,
+    degradation_cost_per_kwh: float | None,
+    solar_slot0_kw: float = 0.0,
+    tariff_cheap: float = 0.10,
+    tariff_expensive: float = 0.10,
+) -> tuple[EnergyContext, Horizon]:
+    horizon = energy_horizon(slots=4, resolution_minutes=15)
+    return (
+        EnergyContext(
+            horizon=horizon,
+            tariffs=[
+                TariffPoint(slot=0, price_per_kwh=tariff_cheap, currency="EUR"),
+                TariffPoint(slot=1, price_per_kwh=tariff_cheap, currency="EUR"),
+                TariffPoint(slot=2, price_per_kwh=tariff_cheap, currency="EUR"),
+                TariffPoint(slot=3, price_per_kwh=tariff_expensive, currency="EUR"),
+            ],
+            solar_forecast=[
+                SolarForecastPoint(slot=0, power=solar_slot0_kw),
+                SolarForecastPoint(slot=1, power=0.0),
+                SolarForecastPoint(slot=2, power=0.0),
+                SolarForecastPoint(slot=3, power=0.0),
+            ],
+            battery=BatteryProfile(
+                capacity_kwh=6,
+                initial_soc_kwh=0,
+                min_soc_kwh=0,
+                max_soc_kwh=6,
+                max_charge_kw=3,
+                max_discharge_kw=3,
+                charge_efficiency=1.0,
+                discharge_efficiency=1.0,
+                degradation_cost_per_kwh=degradation_cost_per_kwh,
+            ),
+            source_revision="battery-degradation-scenario",
+            observed_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+        ),
+        horizon,
+    )
+
+
+def _degradation_scenario(
+    scenario_id: str, context: EnergyContext, horizon: Horizon, device_id: str
+) -> OptimizationScenario:
+    return OptimizationScenario(
+        id=scenario_id,
+        horizon=horizon,
+        energy_context=context,
+        loads=[flexible_load(device_id, power_kw=0.5, earliest_slot=3, latest_slot=3)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+
+@pytest.mark.asyncio
+async def test_battery_throughput_reported_when_battery_present() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(degradation_cost_per_kwh=None)
+
+    result = service.optimize(
+        _degradation_scenario("throughput-present-1", context, horizon, device_id)
+    )
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    expected = sum(
+        (slot["battery_charge_kw"] + slot["battery_discharge_kw"])
+        * (horizon.resolution_minutes / 60)
+        for slot in result.constraint_summary["slots"]
+    )
+    assert result.objective_values["battery_throughput_kwh"] == pytest.approx(expected)
+    assert result.objective_values["battery_degradation_cost"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_battery_throughput_zero_when_no_battery() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(degradation_cost_per_kwh=None)
+    context = context.model_copy(update={"battery": None})
+
+    result = service.optimize(
+        _degradation_scenario("throughput-absent-1", context, horizon, device_id)
+    )
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.objective_values["battery_throughput_kwh"] == 0.0
+    assert result.objective_values["battery_degradation_cost"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_battery_throughput_reporting_does_not_change_plan() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(degradation_cost_per_kwh=None, solar_slot0_kw=2.0)
+
+    result_a = service.optimize(
+        _degradation_scenario("throughput-noop-a-1", context, horizon, device_id)
+    )
+    result_b = service.optimize(
+        _degradation_scenario("throughput-noop-b-1", context, horizon, device_id)
+    )
+
+    assert result_a.objective_values["energy_cost"] == pytest.approx(
+        result_b.objective_values["energy_cost"]
+    )
+    assert result_a.constraint_summary["slots"] == result_b.constraint_summary["slots"]
+
+
+@pytest.mark.asyncio
+async def test_degradation_cost_discourages_cycling_with_no_net_benefit() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context_no_cost, horizon = _degradation_context(
+        degradation_cost_per_kwh=None, solar_slot0_kw=2.0
+    )
+    context_with_cost, _ = _degradation_context(
+        degradation_cost_per_kwh=1.0, solar_slot0_kw=2.0
+    )
+
+    result_no_cost = service.optimize(
+        _degradation_scenario("no-benefit-without-1", context_no_cost, horizon, device_id)
+    )
+    result_with_cost = service.optimize(
+        _degradation_scenario("no-benefit-with-1", context_with_cost, horizon, device_id)
+    )
+
+    assert result_no_cost.objective_values["battery_throughput_kwh"] > 0
+    assert (
+        result_with_cost.objective_values["battery_throughput_kwh"]
+        < result_no_cost.objective_values["battery_throughput_kwh"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_degradation_cost_still_allows_net_beneficial_cycling() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(
+        degradation_cost_per_kwh=0.05,
+        tariff_cheap=0.05,
+        tariff_expensive=0.50,
+    )
+
+    result = service.optimize(
+        _degradation_scenario("net-beneficial-1", context, horizon, device_id)
+    )
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.objective_values["battery_throughput_kwh"] > 0
+    assert result.objective_values["battery_degradation_cost"] > 0
+
+
+@pytest.mark.asyncio
+async def test_degradation_cost_zero_is_a_no_op() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context_unset, horizon = _degradation_context(
+        degradation_cost_per_kwh=None, solar_slot0_kw=2.0
+    )
+    context_zero, _ = _degradation_context(degradation_cost_per_kwh=0.0, solar_slot0_kw=2.0)
+
+    result_unset = service.optimize(
+        _degradation_scenario("zero-noop-unset-1", context_unset, horizon, device_id)
+    )
+    result_zero = service.optimize(
+        _degradation_scenario("zero-noop-zero-1", context_zero, horizon, device_id)
+    )
+
+    assert result_unset.objective_values["energy_cost"] == pytest.approx(
+        result_zero.objective_values["energy_cost"]
+    )
+    assert result_unset.objective_values["battery_throughput_kwh"] == pytest.approx(
+        result_zero.objective_values["battery_throughput_kwh"]
+    )
+    assert result_zero.objective_values["battery_degradation_cost"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_energy_cost_includes_degradation_charge() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(
+        degradation_cost_per_kwh=0.05,
+        tariff_cheap=0.05,
+        tariff_expensive=0.50,
+    )
+
+    result = service.optimize(
+        _degradation_scenario("net-cost-components-1", context, horizon, device_id)
+    )
+
+    resolution_hours = horizon.resolution_minutes / 60
+    import_cost = sum(
+        slot["grid_import_kw"] * resolution_hours * context.tariffs[slot["slot"]].price_per_kwh
+        for slot in result.constraint_summary["slots"]
+    )
+    assert result.objective_values["energy_cost"] == pytest.approx(
+        import_cost + result.objective_values["battery_degradation_cost"]
+    )

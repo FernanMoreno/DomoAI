@@ -82,6 +82,19 @@
           "maximum": 1,
           "title": "Discharge Efficiency",
           "type": "number"
+        },
+        "degradation_cost_per_kwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degradation Cost Per Kwh"
         }
       },
       "required": [

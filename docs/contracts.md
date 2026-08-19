@@ -1913,6 +1913,58 @@ cuando haya gateway confirmado); ejecución automática en CI por
 defecto (opt-in, mismo criterio que el smoke test de solo-lectura ya
 existente).
 
+## Análisis contrafactual del optimizador (2026-08-19)
+
+Sexto y, según el usuario, último ítem acotado de P4 esta sesión.
+`OptimizationScenario`/`EnergyContext` (Specs 042-046) ya son modelos
+Pydantic inmutables que los propios tests de esta sesión variaban a
+mano vía `model_copy(update=...)` para comparar resultados (las Specs
+044/045/046 lo hicieron cada una por separado, código repetido en cada
+archivo de test) — sin ningún mecanismo reutilizable para correr un
+escenario base más variaciones nombradas y obtener una comparación
+estructurada y determinista.
+
+- Nuevo `CounterfactualAnalyzer`/`CounterfactualResult`/
+  `VariationOutcome` (`src/domoai/optimizer/counterfactual.py`) —
+  vive en `src/domoai/optimizer/`, no en `src/domoai/runtime/` como
+  las Specs 047-051, porque es un concepto del dominio del
+  optimizador, no del runtime: `OptimizerPort.optimize()` es síncrono
+  y puro, sin adapter, sin hardware, sin ningún límite de aislamiento
+  que gestionar (confirmado por grounding antes de escribir el spec).
+- `compare(baseline, variations)` resuelve el baseline y cada
+  variación con el mismo `OptimizerPort` inyectado por quien llama
+  (nunca construye el suyo propio), y calcula el diff por clave SOLO
+  sobre la intersección de claves de `objective_values` presentes en
+  ambos lados — nunca inventa un valor `0.0` para una clave que un
+  lado no reportó, la misma disciplina de honestidad que ya se aplica
+  a resultados infactibles completos, ahora aplicada por-clave.
+- Cuando una variación resulta `INFEASIBLE`/`INVALID`/`TIMEOUT`/
+  `UNKNOWN`, su `diff` es `{}` — nunca una comparación numérica
+  fabricada; cuando el propio baseline no es factible, NINGUNA
+  variación se llega a resolver (`variations == {}` directamente, sin
+  gastar cómputo en escenarios cuya comparación no tendría sentido).
+- Reutiliza `OptimizationResult` completo (no un modelo paralelo
+  recortado) dentro de `VariationOutcome` — mismo patrón "no inventar
+  un segundo modelo" ya aplicado en las Specs 048/049.
+- No hace copia defensiva de los escenarios antes de pasarlos al
+  optimizador (los `StrictModel` de este proyecto ya son
+  efectivamente inmutables por convención, y `CpSatOptimizer.optimize`
+  solo lee) — probado explícitamente con un test de no-mutación en vez
+  de añadir una copia redundante sin necesidad real detrás.
+
+Evidencia: `555 → 563 passed, 9 skipped` (8 tests nuevos, todos
+pasando en el primer intento tras un ajuste de datos de prueba: la
+primera versión de los escenarios "infactibles" resultó factible por
+tener solar suficiente para cubrir la carga incluso con
+`max_grid_import=0`, corregido poniendo `solar_power_kw=0.0` también
+en esos casos — ajuste de fixtures de test, no un hallazgo de diseño
+del propio mecanismo). Ruff y mypy limpios (98 ficheros fuente). Sin
+cambio de schema. Fuera de alcance, con justificación explícita en el
+spec: historial persistido de comparaciones; análisis estadístico o
+causal más allá de la resta simple por-variación; optimización por
+lotes de las N resoluciones del solver. **Cierra P4 acotado para esta
+sesión**: seis ítems (047-052).
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

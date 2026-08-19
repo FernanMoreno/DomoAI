@@ -20,16 +20,45 @@ class TariffPoint(StrictModel):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
 
 
+class ConfidenceBand(StrictModel):
+    low: float = Field(ge=0)
+    high: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> ConfidenceBand:
+        if self.high < self.low:
+            raise ValueError("high must be greater than or equal to low")
+        return self
+
+
 class SolarForecastPoint(StrictModel):
     slot: int = Field(ge=0)
     power: float = Field(ge=0)
     unit: Literal["kW"] = "kW"
+    confidence: ConfidenceBand | None = None
+
+    @model_validator(mode="after")
+    def validate_confidence(self) -> SolarForecastPoint:
+        if self.confidence is not None and not (
+            self.confidence.low <= self.power <= self.confidence.high
+        ):
+            raise ValueError("power must fall within its confidence band")
+        return self
 
 
 class BaseLoadPoint(StrictModel):
     slot: int = Field(ge=0)
     power: float = Field(ge=0)
     unit: Literal["kW"] = "kW"
+    confidence: ConfidenceBand | None = None
+
+    @model_validator(mode="after")
+    def validate_confidence(self) -> BaseLoadPoint:
+        if self.confidence is not None and not (
+            self.confidence.low <= self.power <= self.confidence.high
+        ):
+            raise ValueError("power must fall within its confidence band")
+        return self
 
 
 class BatteryProfile(StrictModel):
@@ -96,6 +125,16 @@ class EnergyContext(StrictModel):
                 if sorted(slots) == expected:
                     raise ValueError(f"{name} slots must be ordered")
                 raise ValueError(f"{name} slots must cover the horizon exactly")
+        if len({point.confidence is not None for point in self.solar_forecast}) > 1:
+            raise ValueError(
+                "solar_forecast confidence bounds must be provided for every slot or none"
+            )
+        if self.base_load_forecast is not None and (
+            len({point.confidence is not None for point in self.base_load_forecast}) > 1
+        ):
+            raise ValueError(
+                "base_load_forecast confidence bounds must be provided for every slot or none"
+            )
         return self
 
 

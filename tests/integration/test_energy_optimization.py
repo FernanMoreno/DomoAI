@@ -10,7 +10,13 @@ from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import PlanStatus
 from domoai.optimizer.cp_sat import CpSatOptimizer
-from domoai.optimizer.energy import BaseLoadPoint, EnergyContext, SolarForecastPoint, TariffPoint
+from domoai.optimizer.energy import (
+    BaseLoadPoint,
+    ConfidenceBand,
+    EnergyContext,
+    SolarForecastPoint,
+    TariffPoint,
+)
 from domoai.optimizer.ports import OptimizationStatus
 from domoai.optimizer.scenario import (
     ComfortLoad,
@@ -1018,3 +1024,244 @@ def test_export_tariff_series_must_cover_the_horizon() -> None:
             source_revision="export-tariff-invalid",
             observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
         )
+
+
+def _confidence_context(
+    *, with_solar_confidence: bool, with_base_load_confidence: bool
+) -> tuple[EnergyContext, Horizon]:
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(
+                slot=slot,
+                power=5.0,
+                confidence=(
+                    ConfidenceBand(low=1.0, high=6.0) if with_solar_confidence else None
+                ),
+            )
+            for slot in range(2)
+        ],
+        base_load_forecast=[
+            BaseLoadPoint(
+                slot=slot,
+                power=1.0,
+                confidence=(
+                    ConfidenceBand(low=0.5, high=3.0) if with_base_load_confidence else None
+                ),
+            )
+            for slot in range(2)
+        ],
+        battery=None,
+        source_revision="forecast-confidence-scenario",
+        observed_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+    )
+    return context, horizon
+
+
+def _confidence_scenario(
+    scenario_id: str,
+    context: EnergyContext,
+    horizon: Horizon,
+    device_id: str,
+    *,
+    conservative: bool = False,
+) -> OptimizationScenario:
+    return OptimizationScenario(
+        id=scenario_id,
+        horizon=horizon,
+        energy_context=context,
+        loads=[flexible_load(device_id, power_kw=0.5, earliest_slot=0, latest_slot=1)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+        conservative=conservative,
+    )
+
+
+@pytest.mark.asyncio
+async def test_confidence_bounds_present_but_conservative_off_matches_no_bounds_plan() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context_with, horizon = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=True
+    )
+    context_without, _ = _confidence_context(
+        with_solar_confidence=False, with_base_load_confidence=False
+    )
+
+    result_with = service.optimize(
+        _confidence_scenario("confidence-present-1", context_with, horizon, device_id)
+    )
+    result_without = service.optimize(
+        _confidence_scenario("confidence-absent-1", context_without, horizon, device_id)
+    )
+
+    assert result_with.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_without.status == result_with.status
+    assert result_with.objective_values["energy_cost"] == pytest.approx(
+        result_without.objective_values["energy_cost"]
+    )
+    assert result_with.constraint_summary["slots"] == result_without.constraint_summary["slots"]
+    assert result_with.objective_values["conservative_mode_active"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_forecast_confidence_reported_in_constraint_summary() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+
+    both_bounded, horizon = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=True
+    )
+    result_both = service.optimize(
+        _confidence_scenario("confidence-both-1", both_bounded, horizon, device_id)
+    )
+    assert result_both.constraint_summary["forecast_confidence"] == {
+        "solar_bounded": True,
+        "base_load_bounded": True,
+    }
+
+    no_base_load_series, _ = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=True
+    )
+    no_base_load_series = no_base_load_series.model_copy(update={"base_load_forecast": None})
+    result_no_series = service.optimize(
+        _confidence_scenario("confidence-no-base-series-1", no_base_load_series, horizon, device_id)
+    )
+    assert result_no_series.constraint_summary["forecast_confidence"] == {
+        "solar_bounded": True,
+        "base_load_bounded": None,
+    }
+
+    neither_bounded, _ = _confidence_context(
+        with_solar_confidence=False, with_base_load_confidence=False
+    )
+    result_neither = service.optimize(
+        _confidence_scenario("confidence-none-1", neither_bounded, horizon, device_id)
+    )
+    assert result_neither.constraint_summary["forecast_confidence"] == {
+        "solar_bounded": False,
+        "base_load_bounded": False,
+    }
+
+
+def test_confidence_partial_coverage_rejected() -> None:
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    with pytest.raises(ValidationError):
+        EnergyContext(
+            horizon=horizon,
+            tariffs=[
+                TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+                TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+            ],
+            solar_forecast=[
+                SolarForecastPoint(slot=0, power=5.0, confidence=ConfidenceBand(low=1.0, high=6.0)),
+                SolarForecastPoint(slot=1, power=5.0),
+            ],
+            battery=None,
+            source_revision="confidence-partial",
+            observed_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+        )
+
+
+def test_confidence_band_inconsistent_with_point_estimate_rejected() -> None:
+    with pytest.raises(ValidationError):
+        SolarForecastPoint(slot=0, power=5.0, confidence=ConfidenceBand(low=6.0, high=7.0))
+    with pytest.raises(ValidationError):
+        BaseLoadPoint(slot=0, power=1.0, confidence=ConfidenceBand(low=0.0, high=0.5))
+
+
+@pytest.mark.asyncio
+async def test_conservative_mode_uses_pessimistic_solar_and_base_load() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=True
+    )
+
+    result_normal = service.optimize(
+        _confidence_scenario("conservative-off-1", context, horizon, device_id, conservative=False)
+    )
+    result_conservative = service.optimize(
+        _confidence_scenario("conservative-on-1", context, horizon, device_id, conservative=True)
+    )
+
+    assert result_normal.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_conservative.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    # Pessimistic solar (low=1.0 vs point 5.0) and pessimistic base load (high=3.0 vs
+    # point 1.0) both push grid import up, so the conservative plan must cost more.
+    assert (
+        result_conservative.objective_values["energy_cost"]
+        > result_normal.objective_values["energy_cost"]
+    )
+    assert result_conservative.objective_values["conservative_mode_active"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_conservative_mode_without_bounds_is_rejected() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=False
+    )
+
+    result = service.optimize(
+        _confidence_scenario(
+            "conservative-missing-bounds-1", context, horizon, device_id, conservative=True
+        )
+    )
+
+    assert result.status == OptimizationStatus.INVALID
+    assert any(
+        diagnostic.code == "conservative_mode_requires_confidence"
+        for diagnostic in result.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_conservative_flag_off_or_absent_is_byte_identical_to_baseline() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context_bounded, horizon = _confidence_context(
+        with_solar_confidence=True, with_base_load_confidence=True
+    )
+    context_unbounded, _ = _confidence_context(
+        with_solar_confidence=False, with_base_load_confidence=False
+    )
+
+    baseline = service.optimize(
+        OptimizationScenario(
+            id="baseline-no-flag-1",
+            horizon=horizon,
+            energy_context=context_unbounded,
+            loads=[flexible_load(device_id, power_kw=0.5, earliest_slot=0, latest_slot=1)],
+            constraints=[
+                Constraint(type="max_grid_import", value=10, unit="kW"),
+                Constraint(type="max_grid_export", value=10, unit="kW"),
+            ],
+            objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+        )
+    )
+    explicit_false_unbounded = service.optimize(
+        _confidence_scenario(
+            "explicit-false-unbounded-1", context_unbounded, horizon, device_id, conservative=False
+        )
+    )
+    explicit_false_bounded = service.optimize(
+        _confidence_scenario(
+            "explicit-false-bounded-1", context_bounded, horizon, device_id, conservative=False
+        )
+    )
+
+    for result in (explicit_false_unbounded, explicit_false_bounded):
+        assert result.objective_values["energy_cost"] == pytest.approx(
+            baseline.objective_values["energy_cost"]
+        )
+        assert result.objective_values["conservative_mode_active"] == 0.0

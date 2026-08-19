@@ -123,12 +123,38 @@ class CpSatOptimizer:
             load.id: _load_power(load, scenario.horizon.resolution_minutes)
             for load in scenario.loads
         }
-        solar_powers = [to_solver_int(point.power, point.unit) for point in context.solar_forecast]
+        solar_powers = [
+            to_solver_int(
+                point.confidence.low
+                if scenario.conservative and point.confidence is not None
+                else point.power,
+                point.unit,
+            )
+            for point in context.solar_forecast
+        ]
         base_load_powers = (
-            [to_solver_int(point.power, point.unit) for point in context.base_load_forecast]
+            [
+                to_solver_int(
+                    point.confidence.high
+                    if scenario.conservative and point.confidence is not None
+                    else point.power,
+                    point.unit,
+                )
+                for point in context.base_load_forecast
+            ]
             if context.base_load_forecast is not None
             else [0] * horizon_slots
         )
+        forecast_confidence = {
+            "solar_bounded": all(
+                point.confidence is not None for point in context.solar_forecast
+            ),
+            "base_load_bounded": (
+                all(point.confidence is not None for point in context.base_load_forecast)
+                if context.base_load_forecast is not None
+                else None
+            ),
+        }
 
         battery = context.battery
         charge_variables: list[Any] = []
@@ -387,12 +413,14 @@ class CpSatOptimizer:
                 "export_revenue": export_revenue,
                 "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
                 "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
+                "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
             },
             constraint_summary={
                 "hard_satisfied": True,
                 "slots": slots,
                 "violations": [],
                 "soft_violations": _reported_soft_violations(solver, soft_violations),
+                "forecast_confidence": forecast_confidence,
             },
             solver_evidence=solver_evidence,
         )

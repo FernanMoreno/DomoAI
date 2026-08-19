@@ -113,6 +113,7 @@ class OptimizationScenario(StrictModel):
     inputs: list[dict[str, Any]] = Field(default_factory=list)
     assumptions: dict[str, Any] = Field(default_factory=dict)
     solver_time_limit_seconds: float = Field(default=5.0, ge=0)
+    conservative: bool = False
 
     @model_validator(mode="after")
     def validate_loads(self) -> OptimizationScenario:
@@ -220,6 +221,26 @@ def validate_scenario(
                 "EV charging and comfort loads require an energy context",
             )
         )
+    if scenario.conservative and scenario.energy_context is not None:
+        if not all(
+            point.confidence is not None for point in scenario.energy_context.solar_forecast
+        ):
+            errors.append(
+                _diagnostic(
+                    "conservative_mode_requires_confidence",
+                    "Conservative mode requires confidence bounds on every solar_forecast slot",
+                )
+            )
+        base_load_forecast = scenario.energy_context.base_load_forecast
+        if base_load_forecast is not None and not all(
+            point.confidence is not None for point in base_load_forecast
+        ):
+            errors.append(
+                _diagnostic(
+                    "conservative_mode_requires_confidence",
+                    "Conservative mode requires confidence bounds on every base_load_forecast slot",
+                )
+            )
     for ev_load in scenario.ev_loads:
         errors.extend(
             _validate_device_capability_command(

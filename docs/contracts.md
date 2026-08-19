@@ -1486,6 +1486,55 @@ mypy limpios (93 ficheros fuente). `schemas/v1/energy-context.schema.json`
 y `schemas/v1/optimization-scenario.schema.json` regenerados — ambos
 cambios puramente aditivos (un campo opcional nuevo cada uno).
 
+## Incertidumbre de pronóstico solar y de carga base (2026-08-19)
+
+`SolarForecastPoint`/`BaseLoadPoint` (`src/domoai/optimizer/energy.py`)
+solo declaraban un valor puntual, sin forma de expresar confianza ni de
+pedirle al solver que se cubra ante error de pronóstico (verificado:
+`solar_powers`/`base_load_powers` en `cp_sat.py:126-131` leían siempre
+`point.power` directamente). Alcance confirmado con el usuario vía
+AskUserQuestion — ambas partes requeridas en una sola spec:
+
+- Nuevo modelo `ConfidenceBand` (`low`, `high`) reutilizado como campo
+  opcional `confidence` en ambos puntos, con cobertura todo-o-nada por
+  serie (igual patrón que las series ya existentes) y validación de
+  que el punto cae dentro de su propia banda. Ausente o parcial: mismo
+  comportamiento de hoy o `ValidationError` en construcción.
+- Nuevo flag `OptimizationScenario.conservative` (`bool`, por defecto
+  `False`). Activo y con bandas presentes: el solver sustituye, en el
+  único punto donde `solar_powers`/`base_load_powers` se construyen,
+  el valor puntual por el extremo pesimista (`confidence.low` para
+  solar, `confidence.high` para carga base) — cero código adicional en
+  cada restricción consumidora, mismo patrón de "un solo punto de
+  sustitución, consumidor genérico" ya usado en la spec 043 para
+  `active_load`. Activo sin bandas en una serie requerida: rechazado en
+  `validate_scenario` con diagnóstico `conservative_mode_requires_confidence`,
+  sin intentar resolver.
+- `objective_values["conservative_mode_active"]` y
+  `constraint_summary["forecast_confidence"]` (`solar_bounded`,
+  `base_load_bounded`) hacen el resultado auto-descriptivo sin releer
+  el escenario de entrada.
+- Cero regresión verificada: banda presente + modo conservador apagado
+  produce plan y coste idénticos a no tener banda; flag ausente o
+  `False` es idéntico a hoy independientemente de las bandas.
+- **Fuera de alcance, con justificación explícita en el spec**: cómo se
+  calculan las bandas (percentiles concretos, calibración estadística)
+  — se tratan como límites opacos suministrados por el proveedor
+  externo. Seguimiento de error de pronóstico en tiempo real o
+  reoptimización disparada por desviación — no solicitado por el ítem
+  de backlog. Tarifas y perfil de batería sin cambios — el ítem acota
+  la incertidumbre a solar y carga base únicamente. Control por-serie
+  o por-slot del modo conservador — un único flag por escenario,
+  suficiente para el alcance pedido.
+
+Evidencia: `512 passed, 8 skipped` (512 → 519, 7 tests nuevos). Ruff y
+mypy limpios (93 ficheros fuente). `schemas/v1/energy-context.schema.json`,
+`schemas/v1/optimization-scenario.schema.json`,
+`schemas/v1/solar-forecast-point.schema.json` y
+`schemas/v1/solar-forecast-series.schema.json` regenerados — los cuatro
+diffs puramente aditivos (un `$defs/ConfidenceBand` nuevo y un campo
+opcional `confidence`/`conservative` cada uno).
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

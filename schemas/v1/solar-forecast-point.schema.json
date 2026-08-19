@@ -1,4 +1,27 @@
 {
+  "$defs": {
+    "ConfidenceBand": {
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "minimum": 0,
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "minimum": 0,
+          "title": "High",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "title": "ConfidenceBand",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "slot": {
@@ -16,6 +39,17 @@
       "default": "kW",
       "title": "Unit",
       "type": "string"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfidenceBand"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

@@ -1789,6 +1789,65 @@ cambio.
 Evidencia: `541 → 547 passed, 8 skipped` (6 tests nuevos). Ruff y mypy
 limpios (96 ficheros fuente). Sin cambio de schema.
 
+## Digital twin para preview de planes (2026-08-19)
+
+Cuarto ítem de P4, elegido por el usuario tras cerrar la Spec 049 — el
+usuario escogió explícitamente la opción más avanzada ("el que sea más
+avanzado y completo") tras advertírsele que requería diseño nuevo, no
+solo reutilizar la Spec 048. La Spec 048 ya probó que la re-ejecución
+aislada funciona, pero su registry siempre se construye vía discovery
+contra el universo propio del fixture `SimulatedHomeAdapter`, nunca
+contra los dispositivos reales — así que previsualizar qué haría un
+plan contra el estado real actual de la casa no era posible.
+
+- Nuevo `DigitalTwin`/`TwinSyncReport` (`src/domoai/runtime/twin.py`):
+  `sync(live_registry, live_state_store)` lee los `Device`s y
+  `StateSnapshot`s actuales del runtime en vivo, construye un
+  `SimulatedHomeAdapter` sembrado con esos datos reales (bajo los
+  mismos `device_id` reales, sin traducción), y reconstruye un
+  registry propio y aislado vía `DiscoveryService.refresh()` — mismo
+  patrón exacto de construcción aislada que `PlanReplayer` (Spec 048),
+  ahora sembrado con datos reales en vez de un fixture enlatado.
+  `validate_and_execute(plan)` valida y ejecuta un plan contra ese
+  registry aislado, reutilizando `ExecutionSummary` sin modelo
+  paralelo.
+- **La pieza genuinamente nueva de esta spec**: el mapeo inverso
+  `Device` + `StateSnapshot`s actuales → diccionario de entidad cruda
+  que `HomeAssistantMapper`/`SimulatedHomeAdapter` puedan consumir —
+  no existía en el repositorio. Alcance acotado honestamente a los
+  tres dominios (`light`, `switch`, `cover`) para los que
+  `SimulatedHomeAdapter._apply_command` ya implementa efectos
+  simulados reales (`turn_on`/`turn_off`/`toggle`→`power`,
+  `set_brightness`→`brightness`, `set_position`/`open`/`close`→
+  `position`) — reflejar un dispositivo `climate`/`sensor` habría
+  producido una entidad que el mapper acepta pero cuyos comandos no
+  tendrían ningún efecto simulado real, un preview que parece
+  funcionar sin hacer nada. La identidad se preserva usando
+  `device.id` explícitamente como `entity_id`/`device_id` de la
+  entidad cruda (no se re-deriva del nombre/área, que podría no
+  reproducir el id original).
+- Todo dispositivo no representable (tipo fuera de
+  `light`/`switch`/`cover`, o con capacidades que no coinciden con la
+  forma esperada) se reporta explícitamente en
+  `TwinSyncReport.not_mirrored` con motivo — nunca se omite en
+  silencio ni rompe el sync completo; el resto de dispositivos
+  representables se sincronizan igual.
+- Aislamiento verificado como propiedad dura, con tests dedicados:
+  cero comandos emitidos al adapter en vivo, registry/state store en
+  vivo sin cambios tras sync+preview; preview contra un twin nunca
+  sincronizado maneja el caso sin fallar (dispositivo no encontrado,
+  camino ya existente y probado de `PlanService`).
+- Fuera de alcance, con justificación explícita en el spec: sync
+  continuo en vivo (el twin es una foto fija por-demanda, no una
+  réplica actualizada automáticamente); predicción de efectos físicos
+  reales más allá de lo que el simulador determinista ya modela;
+  dispositivos `climate`/`sensor`/`energy`/`ev_charger` — no
+  previsualizables con esta pieza.
+
+Evidencia: `547 → 555 passed, 8 skipped` (8 tests nuevos, todos
+pasando en el primer intento). Ruff y mypy limpios (97 ficheros
+fuente). Sin cambio de schema.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

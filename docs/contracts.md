@@ -1848,6 +1848,71 @@ Evidencia: `547 → 555 passed, 8 skipped` (8 tests nuevos, todos
 pasando en el primer intento). Ruff y mypy limpios (97 ficheros
 fuente). Sin cambio de schema.
 
+## Verificación HIL de ejecución de comandos (2026-08-19)
+
+Quinto ítem de P4. Tras descartar "certificación de compatibilidad de
+agentes" por solaparse demasiado con los tests de contrato MCP ya
+existentes desde la Spec 021, el usuario eligió HIL. Verificado antes
+de escribir el spec: no hay hardware real disponible esta sesión
+(`dev/lab/.env` sin `DOMOAI_KNX_GATEWAY_HOST`, el propio README del
+laboratorio declara que no simula KNX/ETS ni validación con hardware
+físico). Pero el laboratorio Home Assistant real (contenedor Docker
+separado, `dev/lab/compose.yaml`) SÍ se pudo levantar en esta sesión —
+`uv run domoai-lab up --services mqtt zigbee2mqtt modbus homeassistant`
+seguido de `curl http://127.0.0.1:8123` devolviendo `200` — y expone
+`switch.virtual_living_room_switch`, un switch virtual sin
+electrodoméstico real detrás, definido específicamente para este tipo
+de prueba en `dev/lab/homeassistant/configuration.yaml`.
+
+Gap real verificado: el smoke test en vivo ya existente
+(`tests/integration/test_home_assistant_provider_smoke.py`) solo
+ejercita discovery y lectura de estado contra el sistema real — nunca
+emite un comando. Nada en el repositorio probaba que el pipeline
+completo (`build_runtime` → `PlanService.validate` →
+`PlanExecutor.execute` → comando real → lectura de estado real →
+confirmación de postcondition) funcionara de extremo a extremo contra
+un sistema real y separado, no un fixture en proceso. El `smoke`
+determinista de `domoai-lab` excluye deliberadamente todas las
+variables `DOMOAI_*` (para quedar local y determinista), así que
+estructuralmente nunca puede cerrar este hueco tampoco.
+
+- Nuevo test opt-in
+  `tests/integration/test_home_assistant_provider_hil_smoke.py` —
+  ningún módulo nuevo en `src/`, ya que `build_runtime`/`PlanService`/
+  `PlanExecutor`/`HomeAssistantProviderAdapter` ya proveen todo lo
+  necesario; esta spec compone piezas ya probadas, no introduce un
+  mecanismo nuevo (a diferencia de las Specs 047-050).
+- Mismo patrón de skip que el smoke test de solo-lectura ya existente:
+  sin `DOMOAI_HOME_ASSISTANT_URL`/`DOMOAI_HOME_ASSISTANT_TOKEN`, se
+  salta con motivo claro — nunca rompe el resto de la suite.
+- Envía `turn_on` a `switch.virtual_living_room_switch` a través del
+  pipeline exacto (`validate_plan`/`execute_plan` de `DomoticsFacade`,
+  sin atajos), confirma `CONFIRMED_SUCCESS` +
+  `after_state.value is True`, y hace una RE-LECTURA independiente
+  (`adapter.read_state`, no reutilizando el `after_state` de la propia
+  ejecución) para confirmar que el cambio es observable de verdad
+  desde el sistema en vivo, no solo aseverado por la contabilidad
+  interna del runtime. Restaura `off` en un bloque `finally`
+  incondicional, sin importar el resultado de las aserciones
+  anteriores — repetible y seguro sin reset manual.
+- **Ejecutado de verdad contra el laboratorio en esta misma sesión**,
+  no solo escrito: `uv run pytest
+  tests/integration/test_home_assistant_provider_hil_smoke.py -v`
+  pasó en vivo (`1 passed in 4.54s`), y se confirmó por separado vía
+  `curl .../api/states/switch.virtual_living_room_switch` que el
+  switch terminó en `off`. También se confirmó el comportamiento de
+  skip corriendo el mismo test sin las variables de entorno.
+
+Evidencia: `555 → 555 passed, 8 → 9 skipped` (sin credenciales en el
+entorno por defecto de la suite completa, el nuevo test se salta —
+correcto y esperado; se ejecutó por separado en vivo con credenciales,
+pasando). Ruff y mypy limpios (97 ficheros fuente, sin cambio en
+`src/`). Fuera de alcance, con justificación explícita en el spec:
+hardware físico/KNX real (no disponible esta sesión, queda para
+cuando haya gateway confirmado); ejecución automática en CI por
+defecto (opt-in, mismo criterio que el smoke test de solo-lectura ya
+existente).
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

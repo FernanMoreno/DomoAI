@@ -1965,6 +1965,71 @@ causal más allá de la resta simple por-variación; optimización por
 lotes de las N resoluciones del solver. **Cierra P4 acotado para esta
 sesión**: seis ítems (047-052).
 
+## Verificación HIL de ejecución de comandos contra KNX real (2026-08-19)
+
+Hermana directa de la Spec 051 (mismo concepto HIL de P4, sistema real
+distinto): tras cerrar P4 con seis ítems, el usuario abrió KNX
+Virtual/ETS en Windows y pidió probar HIL contra hardware real — el
+bloqueo documentado tras la Spec 051 ("sin gateway KNX configurado")
+era un hecho de estado de sesión, no una limitación estructural del
+código: el adapter, transporte y mapping de KNX ya existían y ya
+estaban validados en modo solo-lectura (`dev/lab/knx-virtual.md`,
+entrada del 2026-08-18). El smoke test en vivo ya existente
+(`tests/integration/test_knx_smoke.py`) es explícitamente solo-lectura
+— afirma `transport.writes == []` y solo ejercita `discover()`. Nada
+probaba que un comando real se ejecutara de extremo a extremo contra
+el bus KNX real.
+
+- Verificado primero con un script suelto (no persistido) antes de
+  formalizar: `build_runtime(Settings(knx_gateway_host="172.26.80.1",
+  knx_config_path="dev/lab/configs/knx-virtual.json", ...))`,
+  `turn_on` real sobre `living_room.main_light` vía
+  `DomoticsFacade.validate_plan`/`execute_plan`,
+  `CONFIRMED_SUCCESS` + `after_state.value is True` — escritura real
+  al bus KNX real, confirmada por lectura de postcondition real,
+  restaurado a `off` después. `172.26.80.1` es la misma IP ya validada
+  el 2026-08-18.
+- Formalizado como spec permanente en
+  `tests/integration/test_knx_hil_smoke.py`, mismo patrón exacto que
+  la Spec 051 (`test_home_assistant_provider_hil_smoke.py`) — mismo
+  gate de skip, misma estructura `try`/`finally` de restauración.
+  Ningún módulo nuevo en `src/` — compone piezas ya probadas.
+- **Única decisión de diseño genuinamente nueva** (todo lo demás es
+  reutilización directa de la Spec 051): el objetivo se acota
+  explícitamente a `living_room.main_light`'s capability `power` —
+  NUNCA `brightness` ni `living_room.temperature`, aunque ambos están
+  declarados en el mapping. Motivo verificado durante la propia
+  ejecución en vivo: `GroupValueRead` dio timeout en `1/0/3`
+  (brightness) y `1/1/0` (temperatura) durante discovery, mientras que
+  el round-trip escritura+lectura de `power` (`1/0/0`/`1/0/1`)
+  funcionó limpio — casi seguro porque el proyecto de laboratorio de
+  KNX Virtual solo tiene el on/off de la luz realmente cableado para
+  responder, no un defecto de DomoAI. Acotar a la única capability ya
+  confirmada fiable mantiene la verificación como señal de confianza:
+  un fallo aquí significa una regresión real, no ruido de una entidad
+  de laboratorio nunca completamente cableada.
+- Una segunda verificación de lectura independiente y suelta (fuera
+  del propio test) mostró timeouts intermitentes al reconectar y leer
+  inmediatamente sin una escritura previa en la misma sesión — mismo
+  patrón de flakiness que el smoke test de solo-lectura original ya
+  documentaba para otras entidades. El test formal en sí (que sí
+  incluye su propia relectura independiente inmediatamente después de
+  la escritura, dentro de la misma conexión) pasó limpio dos veces
+  seguidas. Documentado en research.md como una decisión explícita:
+  la relectura independiente reutiliza `device.source_refs` ya
+  resueltos por `build_runtime`, nunca un `SourceRef` construido a
+  mano.
+
+Evidencia: `563 → 563 passed, 9 → 10 skipped` (sin configuración KNX
+en el entorno por defecto de la suite completa, el nuevo test se
+salta — correcto y esperado; ejecutado por separado en vivo contra
+KNX Virtual/ETS real, pasando). Ruff y mypy limpios (98 ficheros
+fuente, sin cambio en `src/`). Fuera de alcance, con justificación
+explícita en el spec: otras entidades declaradas en el mapping
+(`brightness`, `temperature`); hardware KNX físico no virtual (no
+disponible, solo KNX Virtual/ETS esta sesión); ejecución automática en
+CI por defecto.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

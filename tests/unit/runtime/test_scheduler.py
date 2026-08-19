@@ -10,6 +10,7 @@ from domoai.application.plan_service import PlanService
 from domoai.domain.models import Command, Plan, RecurrenceRule, RiskClass
 from domoai.persistence.repositories import RecurringScheduleRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.clock import Clock, FixedClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
@@ -19,15 +20,18 @@ from domoai.runtime.state_store import StateStore
 
 
 async def _build_scheduler(
-    tmp_path, *, grace_window: timedelta = timedelta(minutes=15)
+    tmp_path,
+    *,
+    grace_window: timedelta = timedelta(minutes=15),
+    clock: Clock | None = None,
 ) -> tuple[SimulatedHomeAdapter, PlanService, Scheduler, ScheduledPlanRepository, AuditLog]:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
     audit = AuditLog()
     await DiscoveryService(adapter, registry, state_store, audit).refresh()
-    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
-    executor = PlanExecutor(adapter, plan_service, audit)
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
+    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
     database = SQLiteDatabase(tmp_path / "repo.sqlite3")
     await database.initialize()
     repository = ScheduledPlanRepository(database)
@@ -38,6 +42,7 @@ async def _build_scheduler(
         audit,
         grace_window=grace_window,
         recurring_repository=recurring_repository,
+        clock=clock,
     )
     return adapter, plan_service, scheduler, repository, audit
 
@@ -365,3 +370,29 @@ async def test_cancel_recurring_schedule_stops_future_occurrences(tmp_path) -> N
     results = await scheduler.run_due_recurring(now=datetime.now(UTC) + timedelta(days=2))
     assert results == []
     assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_due_uses_injected_clock_when_no_explicit_now_given(tmp_path) -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    adapter, plan_service, scheduler, repository, audit = await _build_scheduler(
+        tmp_path, clock=clock
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan_id = "clock-due-1"
+    plan = _plan(device_id, plan_id=plan_id, execute_at=initial + timedelta(hours=1))
+    validated = plan_service.validate(plan)
+    await scheduler.schedule(validated)
+
+    results = await scheduler.run_due()
+    assert results == []
+    assert adapter.calls == []
+
+    clock.set(initial + timedelta(hours=1, seconds=1))
+    results = await scheduler.run_due()
+
+    assert results == [{"plan_id": plan_id, "outcome": "executed"}]
+    assert len(adapter.calls) == 1

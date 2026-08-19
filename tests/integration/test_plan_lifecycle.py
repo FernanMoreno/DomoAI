@@ -6,13 +6,15 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import Command, Plan, PlanStatus, Precondition, RiskClass
-from domoai.persistence.repositories import PlanRepository
+from domoai.persistence.repositories import PlanRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
+from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.failure_injection import FailureInjectingAdapter
 
@@ -525,6 +527,45 @@ async def test_past_execute_at_runs_normally() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_at_respects_injected_clock_not_wall_clock() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    await DiscoveryService(adapter, registry, state_store, audit).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-clock-execute-at-1",
+        execute_at=initial + timedelta(hours=1),
+        commands=[
+            Command(
+                id="command-clock-execute-at-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-clock-execute-at-1",
+            )
+        ],
+    )
+    validated = plan_service.validate(plan)
+
+    with pytest.raises(ValueError, match="not_yet_due|not yet due"):
+        await executor.execute(validated)
+    assert adapter.calls == []
+
+    clock.set(initial + timedelta(hours=1, seconds=1))
+    outcomes = await executor.execute(validated)
+
+    assert outcomes.outcomes[0].status.value == "confirmed_success"
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_no_execute_at_behaves_like_immediate_execution() -> None:
     adapter, registry, _, _, plan_service, executor = await build_plan_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
@@ -712,3 +753,76 @@ async def test_failure_injection_only_fails_the_configured_method() -> None:
     assert ack.accepted is True
     with pytest.raises(OSError, match="configured failure"):
         await adapter.discover()
+
+
+@pytest.mark.asyncio
+async def test_single_fixed_clock_drives_every_timing_decision_consistently(tmp_path) -> None:
+    """SC-001: one shared clock, advanced once, observed by expiry, scheduling,
+    execution timing, and staleness together."""
+
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    state_store = StateStore(timedelta(minutes=5), clock=clock)
+    audit = AuditLog()
+    await DiscoveryService(adapter, registry, state_store, audit).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
+    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    scheduled_repository = ScheduledPlanRepository(database)
+    scheduler = Scheduler(executor, scheduled_repository, audit, clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+
+    scheduled_plan = plan_service.validate(
+        Plan(
+            id="sc001-scheduled-1",
+            execute_at=initial + timedelta(hours=1),
+            commands=[
+                Command(
+                    id="sc001-scheduled-1:command",
+                    device_id=device_id,
+                    command="set_brightness",
+                    value=60,
+                    unit="%",
+                    idempotency_key="sc001-scheduled-1:intent",
+                )
+            ],
+        )
+    )
+    await scheduler.schedule(scheduled_plan)
+
+    immediate_plan = plan_service.create_plan(
+        "sc001-immediate-1",
+        [
+            Command(
+                id="sc001-immediate-1:command",
+                device_id=device_id,
+                command="set_brightness",
+                value=40,
+                unit="%",
+                idempotency_key="sc001-immediate-1:intent",
+            )
+        ],
+    )
+    assert immediate_plan.expires_at == initial + PlanService.DEFAULT_PLAN_TTL
+
+    # Before advancing: scheduled plan not yet due, freshly-saved state not stale.
+    assert await scheduler.run_due() == []
+    stale_before = await state_store.mark_stale()
+    assert stale_before == []
+
+    clock.set(initial + timedelta(hours=1, seconds=1))
+
+    # After advancing: scheduled plan executes, immediate plan is now expired,
+    # and state older than stale_after is reported stale — all from one advance.
+    results = await scheduler.run_due()
+    assert results == [{"plan_id": "sc001-scheduled-1", "outcome": "executed"}]
+
+    validated_immediate = plan_service.validate(immediate_plan)
+    with pytest.raises(ValueError, match="expired|stale"):
+        plan_service.assert_executable(validated_immediate)
+
+    stale_after_advance = await state_store.mark_stale()
+    assert len(stale_after_advance) >= 1

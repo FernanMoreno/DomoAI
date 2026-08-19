@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from domoai.domain.models import StateSnapshot, StateStatus
+from domoai.runtime.clock import Clock, SystemClock
 
 
 class StateStore:
-    def __init__(self, stale_after: timedelta = timedelta(minutes=5)) -> None:
+    def __init__(
+        self,
+        stale_after: timedelta = timedelta(minutes=5),
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         self.stale_after = stale_after
+        self.clock = clock or SystemClock()
         self._snapshots: dict[tuple[str, str], StateSnapshot] = {}
         self._revision = 0
         self._state_versions: dict[tuple[str, str], int] = {}
@@ -53,7 +60,7 @@ class StateStore:
         return list(self._snapshots.values())
 
     async def mark_stale(self, now: datetime | None = None) -> list[StateSnapshot]:
-        current_time = now or datetime.now(UTC)
+        current_time = now or self.clock.now()
         stale: list[StateSnapshot] = []
         for key, snapshot in list(self._snapshots.items()):
             if (

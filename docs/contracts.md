@@ -1595,6 +1595,73 @@ cuatro diffs puramente aditivos (un campo opcional
 `degradation_cost_per_kwh` cada uno). **P3 completo**: Specs 042, 043,
 044, 045 y 046 cerradas.
 
+## Reloj virtual del runtime (2026-08-19)
+
+Primer ítem de un nuevo tier **P4** (plataforma/ecosistema), tras
+completar P3 esta misma sesión. El control de tiempo estaba disperso e
+inconsistente: 45 puntos del repositorio leían `datetime.now(UTC)`
+directamente; algunos componentes ya aceptaban un `now` inyectable
+por-llamada (`Scheduler.run_due`/`run_due_recurring`,
+`StateStore.mark_stale`), pero otros con decisiones igual de
+dependientes del tiempo no tenían ningún punto de inyección
+(`PlanService.create_plan`, `PlanService.assert_executable`,
+`PlanExecutor.execute`). Sin una única fuente de tiempo compartida, no
+hay forma de controlar de forma determinista cuándo un plan expira,
+cuándo se ejecuta, o cuándo un estado se considera obsoleto — bloqueo
+duro para los ítems futuros de P4 (replay determinista, digital twin,
+HIL, shadow mode), todos los cuales necesitan correr el runtime contra
+tiempo controlable en vez de solo tiempo real.
+
+- Nuevo puerto `Clock` (`src/domoai/runtime/clock.py`, `Protocol` con
+  un único método `now() -> datetime`, mismo estilo que
+  `AdapterPort`/el resto de puertos en `ports.py`). Dos
+  implementaciones: `SystemClock` (envoltorio directo de
+  `datetime.now(UTC)`, sin lógica añadida) y `FixedClock` (tiempo
+  mutable, con `set()` para avanzarlo).
+- `StateStore`, `PlanService`, `PlanExecutor` y `Scheduler` ganan un
+  parámetro `clock: Clock | None = None` de solo palabra clave,
+  guardado como `self.clock = clock or SystemClock()` — mismo patrón
+  aditivo de inyección de dependencias ya usado repetidamente en esta
+  sesión (`recurring_repository` en la Spec 042,
+  `plan_repository`/`outcome_repository` en `PlanExecutor`). Los
+  `datetime.now(UTC)` de los cinco puntos identificados pasan a
+  `self.clock.now()`.
+- Los parámetros `now: datetime | None` ya existentes en
+  `run_due`/`run_due_recurring`/`mark_stale` se conservan intactos —
+  solo cambia su fallback interno de `now or datetime.now(UTC)` a
+  `now or self.clock.now()`, sin romper ningún caller existente.
+- `build_runtime` (`runtime_factory.py`) construye un único `Clock`
+  (`SystemClock()` por defecto) y lo pasa a los cuatro componentes —
+  wiring centralizado, no configuración por componente.
+- Cero regresión verificada explícitamente: sin configurar un reloj,
+  comportamiento idéntico a hoy en los 533 tests. Un test combinado
+  (`test_single_fixed_clock_drives_every_timing_decision_consistently`)
+  prueba que un único `FixedClock` avanzado una vez es observado
+  consistentemente por expiración de plan, scheduling, timing de
+  ejecución y staleness de estado a la vez — durante su desarrollo se
+  detectó y corrigió un fallo real de wiring: si solo se inyecta el
+  reloj en el `Scheduler` pero no en el `PlanExecutor` que este usa
+  internamente, el executor sigue comparando contra tiempo real,
+  confirmando por qué la spec documenta el wiring correcto como
+  responsabilidad del caller en vez de intentar prevenirlo
+  programáticamente.
+- Fuera de alcance, con justificación explícita en el spec: timestamps
+  de telemetría de adaptador (`received_at`/`observed_at` en
+  `StateSnapshot`, `Measurement`, muestras KNX/Modbus/Matter/
+  Zigbee2MQTT) — representan momentos de observación de eventos
+  reales del mundo externo, no decisiones del runtime, y siguen en
+  tiempo real. El `now: Callable[[], datetime]` ya existente en
+  `ComposedEnergyContextProvider` — vive en el optimizador, tiene su
+  propio punto de inyección, y no se migra en esta spec. Replay
+  determinista, digital twin, HIL y shadow mode en sí mismos — esta
+  spec solo entrega la base de control de tiempo que esos ítems
+  futuros de P4 necesitarán; ninguno se empieza a implementar aquí.
+
+Evidencia: `528 → 533 passed, 8 skipped` (5 tests nuevos, más 2 de
+`test_clock.py` ya contados en el salto previo de 526→528). Ruff y
+mypy limpios (94 ficheros fuente). Sin cambio de schema — dependencia
+interna del runtime, sin contrato público afectado.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from domoai.domain.errors import DomainError, ErrorCode
@@ -25,6 +25,7 @@ from domoai.domain.models import (
 )
 from domoai.domain.transitions import assert_plan_transition
 from domoai.runtime.approval_store import ApprovalGrant
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
@@ -40,11 +41,14 @@ class PlanService:
         state_store: StateStore,
         policy_engine: PolicyEngine,
         audit: AuditLog,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         self.registry = registry
         self.state_store = state_store
         self.policy_engine = policy_engine
         self.audit = audit
+        self.clock = clock or SystemClock()
 
     @property
     def current_revision(self) -> str:
@@ -61,7 +65,7 @@ class PlanService:
         return Plan(
             id=plan_id,
             commands=normalized,
-            expires_at=expires_at or datetime.now(UTC) + self.DEFAULT_PLAN_TTL,
+            expires_at=expires_at or self.clock.now() + self.DEFAULT_PLAN_TTL,
         )
 
     def normalize_command(self, command: Command) -> Command:
@@ -168,7 +172,7 @@ class PlanService:
         )
         validation = ValidationResult(
             status=status,
-            validated_at=datetime.now(UTC),
+            validated_at=self.clock.now(),
             runtime_revision=revision,
             errors=errors,
             digest=digest,
@@ -237,7 +241,7 @@ class PlanService:
     def assert_executable(self, plan: Plan) -> None:
         if plan.status is PlanStatus.CANCELLED:
             raise DomainError(ErrorCode.INVALID_TRANSITION, "Plan is cancelled and cannot execute")
-        if plan.expires_at is not None and plan.expires_at <= datetime.now(UTC):
+        if plan.expires_at is not None and plan.expires_at <= self.clock.now():
             raise DomainError(
                 ErrorCode.STALE_PLAN,
                 "Plan has expired; create and validate a new plan",

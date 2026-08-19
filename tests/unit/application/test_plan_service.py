@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -14,6 +14,7 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
@@ -205,3 +206,39 @@ async def test_validating_unchanged_plan_twice_yields_identical_digest() -> None
     assert first.validation is not None
     assert second.validation is not None
     assert first.validation.digest == second.validation.digest
+
+
+@pytest.mark.asyncio
+async def test_plan_expiry_uses_injected_clock() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(
+        registry, state_store, PolicyEngine([]), AuditLog(), clock=clock
+    )
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+
+    plan = service.create_plan(
+        "plan-clock-expiry-1",
+        [
+            Command(
+                id="command-clock-expiry-1",
+                device_id=device_id,
+                command="turn_on",
+                idempotency_key="intent-clock-expiry-1",
+            )
+        ],
+    )
+    assert plan.expires_at == initial + PlanService.DEFAULT_PLAN_TTL
+
+    validated = service.validate(plan)
+    assert validated.validation is not None
+    assert validated.validation.validated_at == initial
+
+    clock.set(initial + PlanService.DEFAULT_PLAN_TTL + timedelta(seconds=1))
+
+    with pytest.raises(DomainError, match="expired"):
+        service.assert_executable(validated)

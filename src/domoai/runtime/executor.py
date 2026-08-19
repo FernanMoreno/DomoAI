@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
@@ -18,6 +16,7 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort, ExecutionOutcomePort, PlanRecordPort
 
@@ -31,12 +30,14 @@ class PlanExecutor:
         *,
         plan_repository: PlanRecordPort | None = None,
         outcome_repository: ExecutionOutcomePort | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
         self.audit = audit
         self.plan_repository = plan_repository
         self.outcome_repository = outcome_repository
+        self.clock = clock or SystemClock()
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -48,7 +49,7 @@ class PlanExecutor:
     }
 
     async def execute(self, plan: Plan) -> ExecutionSummary:
-        if plan.execute_at is not None and plan.execute_at > datetime.now(UTC):
+        if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
                 ErrorCode.NOT_YET_DUE,
                 "Plan is not yet due; wait until its scheduled execution time",

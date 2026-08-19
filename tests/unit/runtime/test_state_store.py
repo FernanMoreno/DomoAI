@@ -1,8 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from domoai.domain.models import SourceRef, StateSnapshot, StateStatus
+from domoai.runtime.clock import FixedClock
 from domoai.runtime.state_store import StateStore
 
 
@@ -94,3 +95,29 @@ async def test_changed_status_advances_version_even_with_same_value() -> None:
     await store.save(_snapshot(50, status=StateStatus.STALE))
 
     assert store.state_version("light.kitchen", "brightness") > version_after_first_save
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_uses_injected_clock_when_no_explicit_now_given() -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    store = StateStore(timedelta(minutes=5), clock=clock)
+    snapshot = StateSnapshot(
+        device_id="light.kitchen",
+        capability="brightness",
+        value=50,
+        observed_at=initial,
+        received_at=initial,
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.kitchen"),
+    )
+    await store.save(snapshot)
+
+    stale = await store.mark_stale()
+    assert stale == []
+
+    clock.set(initial + timedelta(minutes=6))
+    stale = await store.mark_stale()
+
+    assert len(stale) == 1
+    assert stale[0].status is StateStatus.STALE

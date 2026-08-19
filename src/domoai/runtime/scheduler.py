@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from domoai.domain.models import Command, Plan, PlanStatus, RecurrenceRule
 from domoai.persistence.repositories import RecurringScheduleRepository, ScheduledPlanRepository
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.recurrence import next_occurrence
@@ -25,6 +26,7 @@ class Scheduler:
         grace_window: timedelta = timedelta(seconds=900),
         poll_interval: timedelta = timedelta(seconds=30),
         recurring_repository: RecurringScheduleRepository | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.executor = executor
         self.repository = repository
@@ -32,6 +34,7 @@ class Scheduler:
         self.grace_window = grace_window
         self.poll_interval = poll_interval
         self.recurring_repository = recurring_repository
+        self.clock = clock or SystemClock()
 
     async def schedule(self, plan: Plan) -> None:
         await self.repository.schedule(plan)
@@ -46,7 +49,7 @@ class Scheduler:
         return await self.repository.list_pending()
 
     async def run_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
-        sweep_time = now or datetime.now(UTC)
+        sweep_time = now or self.clock.now()
         results: list[dict[str, Any]] = []
         for plan in await self.repository.list_pending():
             assert plan.execute_at is not None
@@ -77,7 +80,7 @@ class Scheduler:
     ) -> datetime:
         if self.recurring_repository is None:
             raise ValueError("Recurring scheduling is unavailable in this deployment")
-        first_occurrence = next_occurrence(rule, datetime.now(UTC))
+        first_occurrence = next_occurrence(rule, self.clock.now())
         await self.recurring_repository.create(schedule_id, commands, rule, first_occurrence)
         return first_occurrence
 
@@ -94,7 +97,7 @@ class Scheduler:
     async def run_due_recurring(self, now: datetime | None = None) -> list[dict[str, Any]]:
         if self.recurring_repository is None:
             return []
-        sweep_time = now or datetime.now(UTC)
+        sweep_time = now or self.clock.now()
         results: list[dict[str, Any]] = []
         active_schedules = await self.recurring_repository.list_active()
         for schedule_id, commands, rule, execute_at in active_schedules:

@@ -49,6 +49,7 @@ from domoai.persistence.repositories import (
     StateSnapshotRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
@@ -285,8 +286,10 @@ async def build_runtime(
     )
     if isinstance(selected_adapter, CompositeAdapter):
         selected_adapter.bind_registry(registry)
+    clock: Clock = SystemClock()
     state_store = StateStore(
-        stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds)
+        stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds),
+        clock=clock,
     )
     state_store.load_persisted(await state_snapshot_repository.list_all())
     discovery = DiscoveryService(
@@ -324,7 +327,7 @@ async def build_runtime(
     )
     risk_classifier = RiskClassifier(overrides=tuple(risk_overrides))
     policy_engine = PolicyEngine(policies, risk_classifier)
-    plan_service = PlanService(registry, state_store, policy_engine, audit)
+    plan_service = PlanService(registry, state_store, policy_engine, audit, clock=clock)
     plan_repository = PlanRepository(database)
     outcome_repository = ExecutionOutcomeRepository(database)
     executor = PlanExecutor(
@@ -333,6 +336,7 @@ async def build_runtime(
         audit,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
+        clock=clock,
     )
     facade = DomoticsFacade(plan_service, executor)
     event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)
@@ -345,6 +349,7 @@ async def build_runtime(
         grace_window=timedelta(seconds=resolved_settings.scheduler_grace_window_seconds),
         poll_interval=timedelta(seconds=resolved_settings.scheduler_poll_interval_seconds),
         recurring_repository=recurring_schedule_repository,
+        clock=clock,
     )
     return RuntimeComposition(
         settings=resolved_settings,

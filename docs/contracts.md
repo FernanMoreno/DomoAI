@@ -1720,6 +1720,75 @@ Evidencia: `533 → 541 passed, 8 skipped` (8 tests nuevos). Ruff y
 mypy limpios (95 ficheros fuente). Sin cambio de schema — nuevo
 módulo interno del runtime, sin contrato público nuevo.
 
+## Comparación shadow de adapters candidatos (2026-08-19)
+
+Tercer ítem de P4, elegido por el usuario ("comparación de adapters
+candidatos") tras cerrar la Spec 048. Migrar de un adapter en
+producción a un candidato (p. ej. `HomeAssistantAdapter` clásico →
+`HomeAssistantProviderAdapter`, ya existente como switch opt-in
+`DOMOAI_HOME_ASSISTANT_PROVIDER`) exigía confiar en el candidato a
+ciegas, sin forma de comparar qué observa antes de comprometerse al
+cambio.
+
+- Restricción de seguridad real que delimita el alcance:
+  `AdapterPort.discover()` es una llamada de observación pura, sin
+  efectos secundarios; `AdapterPort.execute()` envía comandos reales
+  a dispositivos reales. Ejecutar el candidato en "shadow" junto al
+  adapter de producción habría significado doble-ejecutar cada comando
+  real contra el mismo hardware real — no es un shadow deployment
+  seguro, es uno activamente peligroso. Por eso la comparación cubre
+  SOLO el camino de lectura/discovery, nunca ejecución — límite
+  permanente, no solo alcance de esta iteración.
+- Nuevo `ShadowComparator`/`ShadowComparisonResult`/`EntityComparison`
+  (`src/domoai/runtime/shadow.py`): `compare(production, candidate)`
+  llama `discover()` en ambos y correlaciona entidades por su
+  `entity_id` crudo (el identificador que el sistema real subyacente
+  asigna, presente igual en el snapshot de cualquier adapter que lo
+  observe) — clasifica cada una como `only_production`,
+  `only_candidate`, `matches` o `disagrees` (comparando `semantic_type`
+  entre ambos lados).
+- **Corrección real de diseño encontrada durante la implementación**:
+  el plan original proponía reutilizar
+  `DeviceRegistry.apply_snapshot` (la misma máquina de fusión
+  multi-adapter que usa `CompositeAdapter` en producción) para fusionar
+  ambas observaciones en un `Device` canónico con dos `source_refs`.
+  El primer test escrito reveló que NO fusiona: `SourceIdentity.identity_key`
+  namespacea por `adapter_id` en todos los casos salvo que la entidad
+  cruda declare un `canonical_id` explícito — algo que dos adapters
+  independientes no tienen motivo para acordar de antemano. Confirmado
+  ejecutando el test: la MISMA entidad observada por dos adapter_ids
+  distintos producía dos `Device`s separados con sufijo `-2`, no uno
+  fusionado. Corregido comparando directamente por `entity_id` crudo de
+  cada `AdapterSnapshot.source_entities`, sin pasar por `DeviceRegistry`
+  en absoluto — más simple que el plan original y, según lo
+  investigado, el único enfoque que clasifica correctamente.
+- **Hallazgo colateral, no de esta spec pero corregido en el mismo
+  ciclo de verificación**: el test combinado de la Spec 047
+  (`test_single_fixed_clock_drives_every_timing_decision_consistently`)
+  empezó a fallar durante la verificación de esta spec — no por nada
+  de la Spec 049, sino porque ese test dependía de que
+  `DiscoveryService.refresh()` marcara `received_at` con el reloj
+  inyectado, cuando en realidad `DiscoveryService` usa
+  `datetime.now(UTC)` real (fuera del alcance declarado de la Spec 047,
+  que cubría solo cinco decisiones concretas, no cada timestamp).
+  El test era una bomba de tiempo: pasaba por coincidencia mientras la
+  hora real de sesión quedaba antes del reloj fijo usado en el test, y
+  dejó de pasar cuando la sesión avanzó lo suficiente. Corregido en el
+  propio test guardando un snapshot manualmente con `received_at`
+  anclado al reloj (no vía discovery), sin tocar código de producción.
+- Aislamiento verificado como propiedad dura: cero comandos emitidos a
+  ningún adapter (test dedicado), registry/state store en vivo sin
+  cambios.
+- Fuera de alcance, con justificación explícita en el spec: cualquier
+  comparación de ejecución de comandos entre adapters (inseguro por
+  construcción, no solo fuera de alcance); cutover/migración
+  automatizada (esta feature produce evidencia, el cambio real sigue
+  siendo un paso manual existente); nuevo mecanismo de identidad
+  cross-adapter.
+
+Evidencia: `541 → 547 passed, 8 skipped` (6 tests nuevos). Ruff y mypy
+limpios (96 ficheros fuente). Sin cambio de schema.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

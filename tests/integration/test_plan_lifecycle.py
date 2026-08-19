@@ -5,7 +5,16 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, Plan, PlanStatus, Precondition, RiskClass
+from domoai.domain.models import (
+    Command,
+    Plan,
+    PlanStatus,
+    Precondition,
+    RiskClass,
+    SourceRef,
+    StateSnapshot,
+    StateStatus,
+)
 from domoai.persistence.repositories import PlanRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
@@ -807,6 +816,26 @@ async def test_single_fixed_clock_drives_every_timing_decision_consistently(tmp_
         ],
     )
     assert immediate_plan.expires_at == initial + PlanService.DEFAULT_PLAN_TTL
+
+    # State snapshots are stamped by DiscoveryService using real wall-clock
+    # time (out of spec 047's scope), so staleness here is exercised against
+    # a snapshot saved directly with received_at pinned to the clock's own
+    # initial time, not against discovery-created snapshots. "power" is used
+    # rather than "brightness" because the scheduled plan's set_brightness
+    # command triggers a post-execution readback that would otherwise
+    # overwrite the "brightness" snapshot with a fresh, real-wall-clock
+    # received_at right before the final staleness check.
+    await state_store.save(
+        StateSnapshot(
+            device_id=device_id,
+            capability="power",
+            value=False,
+            observed_at=initial,
+            received_at=initial,
+            status=StateStatus.CURRENT,
+            source_ref=SourceRef(adapter_id="fixture", external_id=device_id),
+        )
+    )
 
     # Before advancing: scheduled plan not yet due, freshly-saved state not stale.
     assert await scheduler.run_due() == []

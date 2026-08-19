@@ -152,7 +152,40 @@ class CpSatOptimizer:
             charge_gain = EFFICIENCY_SCALE
             discharge_cost = EFFICIENCY_SCALE
 
-        load_bound = sum(load_powers.values()) + max(base_load_powers, default=0)
+        ev_soc_variables: dict[str, list[Any]] = {}
+        ev_charge_variables: dict[str, list[Any]] = {}
+        for ev_load in scenario.ev_loads:
+            ev_capacity = to_energy_int(ev_load.capacity_kwh)
+            soc_vars = [
+                model.NewIntVar(0, ev_capacity, f"ev_soc_{ev_load.id}_{slot}")
+                for slot in range(horizon_slots + 1)
+            ]
+            model.Add(soc_vars[0] == to_energy_int(ev_load.initial_soc_kwh))
+            ev_soc_variables[ev_load.id] = soc_vars
+            ev_charge_variables[ev_load.id] = []
+
+        comfort_active_variables: dict[str, dict[int, Any]] = {}
+        for comfort_load in scenario.comfort_loads:
+            variables = {
+                slot: model.NewBoolVar(f"comfort_{comfort_load.id}_{slot}")
+                for slot in range(comfort_load.earliest_slot, comfort_load.deadline_slot)
+            }
+            model.Add(sum(variables.values()) >= comfort_load.min_active_slots)
+            comfort_active_variables[comfort_load.id] = variables
+
+        ev_charge_bound = sum(
+            to_solver_int(ev_load.max_charge_kw, "kW") for ev_load in scenario.ev_loads
+        )
+        comfort_power_bound = sum(
+            to_solver_int(comfort_load.power, comfort_load.power_unit)
+            for comfort_load in scenario.comfort_loads
+        )
+        load_bound = (
+            sum(load_powers.values())
+            + max(base_load_powers, default=0)
+            + ev_charge_bound
+            + comfort_power_bound
+        )
         solar_bound = max(solar_powers, default=0)
         grid_bound = max(1, load_bound + solar_bound + max_charge + max_discharge) * 2
         for constraint in scenario.constraints:
@@ -191,7 +224,37 @@ class CpSatOptimizer:
                 charge = 0
                 discharge = 0
 
-            active_load = sum(_active_load_terms(scenario, start_variables, slot, load_powers))
+            for ev_load in scenario.ev_loads:
+                max_ev_charge = to_solver_int(ev_load.max_charge_kw, "kW")
+                min_ev_charge = to_solver_int(ev_load.min_charge_kw, "kW")
+                ev_charge = model.NewIntVar(0, max_ev_charge, f"ev_charge_{ev_load.id}_{slot}")
+                if min_ev_charge > 0:
+                    ev_charging = model.NewBoolVar(f"ev_charging_{ev_load.id}_{slot}")
+                    model.Add(ev_charge == 0).OnlyEnforceIf(ev_charging.Not())
+                    model.Add(ev_charge >= min_ev_charge).OnlyEnforceIf(ev_charging)
+                ev_charge_variables[ev_load.id].append(ev_charge)
+                soc_vars = ev_soc_variables[ev_load.id]
+                ev_charge_gain = round(ev_load.charge_efficiency * EFFICIENCY_SCALE)
+                model.Add(
+                    soc_vars[slot + 1] * EFFICIENCY_SCALE * 60
+                    == soc_vars[slot] * EFFICIENCY_SCALE * 60
+                    + ev_charge * scenario.horizon.resolution_minutes * ev_charge_gain
+                )
+
+            ev_charge_total = sum(
+                ev_charge_variables[ev_load.id][slot] for ev_load in scenario.ev_loads
+            )
+            comfort_total = sum(
+                to_solver_int(comfort_load.power, comfort_load.power_unit)
+                * comfort_active_variables[comfort_load.id][slot]
+                for comfort_load in scenario.comfort_loads
+                if slot in comfort_active_variables[comfort_load.id]
+            )
+            active_load = (
+                sum(_active_load_terms(scenario, start_variables, slot, load_powers))
+                + ev_charge_total
+                + comfort_total
+            )
             model.Add(
                 active_load + charge + base_load_powers[slot]
                 == solar_powers[slot] + grid_in + discharge - grid_out
@@ -207,6 +270,12 @@ class CpSatOptimizer:
                 soc_variables,
                 grid_bound,
                 soft_violations,
+            )
+
+        for ev_load in scenario.ev_loads:
+            model.Add(
+                ev_soc_variables[ev_load.id][ev_load.deadline_slot]
+                >= to_energy_int(ev_load.target_soc_kwh)
             )
 
         solver, status, solved_tiers, wall_time = _solve_tiers(
@@ -225,7 +294,23 @@ class CpSatOptimizer:
             return failure
 
         selected_slots = _selected_slots(solver, start_variables)
-        plans = _proposal_plan(scenario, selected_slots)
+        ev_charge_slots: dict[str, dict[int, float]] = {
+            ev_load.id: {
+                slot: solver.Value(variable) / POWER_SCALE
+                for slot, variable in enumerate(ev_charge_variables[ev_load.id])
+                if solver.Value(variable) > 0
+            }
+            for ev_load in scenario.ev_loads
+        }
+        comfort_active_slots: dict[str, list[int]] = {
+            comfort_load.id: [
+                slot
+                for slot, variable in comfort_active_variables[comfort_load.id].items()
+                if solver.Value(variable)
+            ]
+            for comfort_load in scenario.comfort_loads
+        }
+        plans = _proposal_plan(scenario, selected_slots, ev_charge_slots, comfort_active_slots)
         slots: list[dict[str, float | int]] = []
         energy_cost = 0.0
         export_kwh = 0.0
@@ -249,6 +334,16 @@ class CpSatOptimizer:
                 solver.Value(discharge_variables[slot]) / POWER_SCALE if battery else 0.0
             )
             soc_kwh = solver.Value(soc_variables[slot]) / SOC_SCALE if battery else 0.0
+            ev_charge_kw = sum(
+                solver.Value(ev_charge_variables[ev_load.id][slot]) / POWER_SCALE
+                for ev_load in scenario.ev_loads
+            )
+            comfort_power_kw = sum(
+                to_solver_int(comfort_load.power, comfort_load.power_unit) / POWER_SCALE
+                for comfort_load in scenario.comfort_loads
+                if slot in comfort_active_variables[comfort_load.id]
+                and solver.Value(comfort_active_variables[comfort_load.id][slot])
+            )
             energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
             export_kwh += export_kw * resolution_hours
             solar_kwh += solar_kw * resolution_hours
@@ -262,6 +357,8 @@ class CpSatOptimizer:
                     "battery_charge_kw": charge_kw,
                     "battery_discharge_kw": discharge_kw,
                     "battery_soc_kwh": soc_kwh,
+                    "ev_charge_kw": ev_charge_kw,
+                    "comfort_power_kw": comfort_power_kw,
                 }
             )
 
@@ -543,14 +640,51 @@ def _selected_slots(solver: Any, variables: dict[str, dict[int, Any]]) -> dict[s
     }
 
 
-def _proposal_plan(scenario: OptimizationScenario, selected_slots: dict[str, int]) -> list[Plan]:
+def _proposal_plan(
+    scenario: OptimizationScenario,
+    selected_slots: dict[str, int],
+    ev_charge_slots: dict[str, dict[int, float]] | None = None,
+    comfort_active_slots: dict[str, list[int]] | None = None,
+) -> list[Plan]:
+    def _slot_execute_at(slot: int) -> datetime:
+        return scenario.horizon.start + timedelta(
+            minutes=slot * scenario.horizon.resolution_minutes
+        )
+
     groups: dict[datetime, list[Any]] = {}
     for load in scenario.loads:
         slot = selected_slots[load.id]
-        execute_at = scenario.horizon.start + timedelta(
-            minutes=slot * scenario.horizon.resolution_minutes
-        )
-        groups.setdefault(execute_at, []).append(load)
+        groups.setdefault(_slot_execute_at(slot), []).append(load)
+    ev_loads_by_id = {ev_load.id: ev_load for ev_load in scenario.ev_loads}
+    for ev_id, slot_charges in (ev_charge_slots or {}).items():
+        ev_load = ev_loads_by_id[ev_id]
+        for slot, charge_kw in slot_charges.items():
+            groups.setdefault(_slot_execute_at(slot), []).append(
+                Command(
+                    id=f"{scenario.id}:{ev_load.id}:{slot}",
+                    device_id=ev_load.device_id,
+                    command=ev_load.command,
+                    value=charge_kw,
+                    unit="kW",
+                    idempotency_key=f"optimization:{scenario.id}:{ev_load.id}:{slot}",
+                    intent=f"scheduled_slot:{slot}",
+                )
+            )
+    comfort_loads_by_id = {comfort_load.id: comfort_load for comfort_load in scenario.comfort_loads}
+    for comfort_id, active_slots in (comfort_active_slots or {}).items():
+        comfort_load = comfort_loads_by_id[comfort_id]
+        for slot in active_slots:
+            groups.setdefault(_slot_execute_at(slot), []).append(
+                Command(
+                    id=f"{scenario.id}:{comfort_load.id}:{slot}",
+                    device_id=comfort_load.device_id,
+                    command=comfort_load.command,
+                    value=comfort_load.value,
+                    unit=comfort_load.unit,
+                    idempotency_key=f"optimization:{scenario.id}:{comfort_load.id}:{slot}",
+                    intent=f"scheduled_slot:{slot}",
+                )
+            )
     ordered_times = sorted(groups)
     single = len(ordered_times) == 1
     plans: list[Plan] = []
@@ -561,16 +695,18 @@ def _proposal_plan(scenario: OptimizationScenario, selected_slots: dict[str, int
                 id=plan_id,
                 execute_at=execute_at,
                 commands=[
-                    Command(
-                        id=f"{scenario.id}:{load.id}",
-                        device_id=load.device_id,
-                        command=load.command,
-                        value=load.value,
-                        unit=load.unit,
-                        idempotency_key=f"optimization:{scenario.id}:{load.id}",
-                        intent=f"scheduled_slot:{selected_slots[load.id]}",
+                    item
+                    if isinstance(item, Command)
+                    else Command(
+                        id=f"{scenario.id}:{item.id}",
+                        device_id=item.device_id,
+                        command=item.command,
+                        value=item.value,
+                        unit=item.unit,
+                        idempotency_key=f"optimization:{scenario.id}:{item.id}",
+                        intent=f"scheduled_slot:{selected_slots[item.id]}",
                     )
-                    for load in groups[execute_at]
+                    for item in groups[execute_at]
                 ],
             )
         )

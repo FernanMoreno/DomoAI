@@ -86,6 +86,92 @@
       "title": "BatteryProfile",
       "type": "object"
     },
+    "ComfortLoad": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "power": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "power_unit": {
+          "default": "W",
+          "minLength": 1,
+          "title": "Power Unit",
+          "type": "string"
+        },
+        "earliest_slot": {
+          "minimum": 0,
+          "title": "Earliest Slot",
+          "type": "integer"
+        },
+        "deadline_slot": {
+          "minimum": 0,
+          "title": "Deadline Slot",
+          "type": "integer"
+        },
+        "min_active_slots": {
+          "exclusiveMinimum": 0,
+          "title": "Min Active Slots",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "device_id",
+        "capability",
+        "command",
+        "earliest_slot",
+        "deadline_slot",
+        "min_active_slots"
+      ],
+      "title": "ComfortLoad",
+      "type": "object"
+    },
     "Constraint": {
       "additionalProperties": false,
       "properties": {
@@ -116,6 +202,94 @@
         "value"
       ],
       "title": "Constraint",
+      "type": "object"
+    },
+    "EVChargingLoad": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "initial_soc_kwh": {
+          "minimum": 0,
+          "title": "Initial Soc Kwh",
+          "type": "number"
+        },
+        "target_soc_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Target Soc Kwh",
+          "type": "number"
+        },
+        "max_charge_kw": {
+          "exclusiveMinimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "min_charge_kw": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Min Charge Kw",
+          "type": "number"
+        },
+        "deadline_slot": {
+          "minimum": 0,
+          "title": "Deadline Slot",
+          "type": "integer"
+        },
+        "charge_efficiency": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Charge Efficiency",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "device_id",
+        "capability",
+        "command",
+        "capacity_kwh",
+        "initial_soc_kwh",
+        "target_soc_kwh",
+        "max_charge_kw",
+        "deadline_slot",
+        "charge_efficiency"
+      ],
+      "title": "EVChargingLoad",
       "type": "object"
     },
     "EnergyContext": {
@@ -466,6 +640,20 @@
         "$ref": "#/$defs/Load"
       },
       "title": "Loads",
+      "type": "array"
+    },
+    "ev_loads": {
+      "items": {
+        "$ref": "#/$defs/EVChargingLoad"
+      },
+      "title": "Ev Loads",
+      "type": "array"
+    },
+    "comfort_loads": {
+      "items": {
+        "$ref": "#/$defs/ComfortLoad"
+      },
+      "title": "Comfort Loads",
       "type": "array"
     },
     "constraints": {

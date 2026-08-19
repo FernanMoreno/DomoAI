@@ -1307,6 +1307,108 @@ entre ambas clases de datos evita que el runtime invente kWp, orientación o
 rendimiento cuando no están disponibles. La fuente JSON es reemplazable por
 una futura fuente de Home Assistant o inversor sin cambiar MCP.
 
+## EV charging y HVAC comfort como conceptos de primera clase (2026-08-19)
+
+Cierra `specs/043-ev-charging-and/`, segundo ítem de P3. Gap
+verificado leyendo `scenario.py`/`cp_sat.py` completos: hasta hoy EV y
+HVAC solo podían expresarse como `Load` genérico — un único bloque
+contiguo de potencia fija elegido por `_start_variables()`/
+`_active_load_terms()` (`cp_sat.py:298-332`). Sin semántica propia
+para ninguna de las dos clases de dispositivo: un cargador EV necesita
+una potencia de carga variable por slot que acumula hacia un estado de
+carga objetivo antes de un deadline — estructuralmente idéntico a
+cómo `BatteryProfile` ya modela el SOC de la batería
+(`cp_sat.py:133-153,176-189`, IntVars de SOC por slot encadenadas por
+una ecuación de balance con eficiencia), no un bloque de potencia
+fija. Un dispositivo climático necesita "estar activo lo suficiente
+dentro de una ventana," no "un único bloque contiguo." Verificado que
+no existe modelado térmico/ambiental en absoluto en el repo
+(`grep -rniE "ambient|thermal|outdoor_temp|comfort" src/domoai` sin
+resultados) — una simulación térmica RC completa sería
+desproporcionada sin ningún andamiaje existente, así que esta spec
+deliberadamente no la añade.
+
+- Nuevo `EVChargingLoad` (`capacity_kwh`, `initial_soc_kwh`,
+  `target_soc_kwh`, `max_charge_kw`, `min_charge_kw` opcional,
+  `deadline_slot`, `charge_efficiency`) en `scenario.py` — valida su
+  dominio SOC igual que `BatteryProfile.validate_state_domain`. Nuevo
+  `ComfortLoad` (`earliest_slot`, `deadline_slot`, `min_active_slots`,
+  `power`/`power_unit`) — valida en construcción que la ventana
+  contiene al menos `min_active_slots` slots (`ValidationError`
+  inmediata si no, antes de llegar siquiera al solver).
+  `OptimizationScenario.ev_loads`/`comfort_loads` (aditivos,
+  default vacío); la comprobación de unicidad de ids de
+  `validate_loads` ahora cubre las tres listas combinadas.
+- `validate_scenario()` extendida con las mismas comprobaciones de
+  dispositivo/capacidad/comando/unidad que ya aplicaban a `Load`
+  (factorizadas en `_validate_device_capability_command`, reutilizada
+  por las tres clases de carga), comprobación de encaje en el
+  horizonte, y `energy_context_required` si `ev_loads`/`comfort_loads`
+  no está vacío — ninguna de las dos clases nuevas tiene sentido sin
+  el contexto energético, porque el SOC y la ecuación de balance de
+  red solo existen dentro de `_optimize_energy()` (`_optimize_legacy()`
+  no se toca en absoluto).
+- `cp_sat.py`, `_optimize_energy()`: cadena de IntVars de SOC por EV
+  (idéntica al patrón de la batería), variable de carga por slot
+  acotada en `[0, max_charge_kw]` (o `{0} ∪ [min_charge_kw,
+  max_charge_kw]` vía el mismo patrón booleano
+  `charging`/`OnlyEnforceIf` que ya usa la batería, si
+  `min_charge_kw > 0`), restricción dura
+  `soc[deadline_slot] >= target_soc_kwh`. Por cada `ComfortLoad`:
+  BoolVars independientes por slot SOLO dentro de su ventana (sin la
+  restricción "exactamente un bloque contiguo" de `Load`),
+  `sum(vars) >= min_active_slots`. El término `active_load` del bucle
+  por slot (que alimenta la ecuación de balance de red Y
+  `_add_energy_constraints`, incluyendo `max_house_power`) se extiende
+  con la suma de cargas EV y potencia de confort activa — ambas
+  restricciones existentes cubren automáticamente las dos clases
+  nuevas sin ningún cambio adicional, porque ya eran genéricas sobre
+  "lo que sea que `active_load` contenga."
+- `_proposal_plan()` gana dos parámetros opcionales
+  (`ev_charge_slots`/`comfort_active_slots`, default `None`) que
+  añaden `Command`s ya construidos al mismo `groups` que agrupa por
+  `execute_at` (reutiliza sin cambios el splitting multi-slot de la
+  Spec 032). El call site de `_optimize_legacy()` no pasa ninguno de
+  los dos — su salida queda comprobadamente idéntica.
+  `constraint_summary["slots"]` gana `ev_charge_kw`/`comfort_power_kw`
+  por slot (antes solo se calculaban internamente, no se exponían) —
+  necesario para que la invariante de balance sea auditable con las
+  dos clases nuevas presentes, no solo internamente correcta.
+- Probado: un EV con objetivo alcanzable llega al SOC objetivo en su
+  deadline; un objetivo físicamente inalcanzable (potencia/tiempo
+  insuficiente) reporta `INFEASIBLE`, nunca un plan que sub-entrega en
+  silencio; un EV ya en su objetivo resuelve trivialmente; un
+  `ComfortLoad` se activa en al menos `min_active_slots` de su
+  ventana, no necesariamente contiguos; una ventana imposible se
+  rechaza en construcción (`ValidationError`); la potencia de confort
+  respeta `max_house_power` igual que cualquier otra carga (probado
+  forzando una infeasibilidad real, no solo verificando aritmética);
+  EV + confort + carga genérica + batería coexisten sin que ninguno
+  se salte `max_house_power`; los 24 tests preexistentes del solver
+  (`test_energy_optimization.py`, `test_optimization_fixtures.py`,
+  `test_energy_optimizer_targets.py`) siguen pasando sin ninguna
+  modificación — cero regresión.
+- **Fuera de alcance, con justificación explícita en el spec**: V2G
+  (descarga vehículo-a-red) — esta spec solo añade carga
+  unidireccional; `BatteryProfile` ya tiene el patrón de descarga para
+  extender si algún día se nombra una necesidad real. Simulación
+  térmica RC completa para HVAC — sin andamiaje existente,
+  desproporcionado. Arbitraje de potencia compartida entre múltiples
+  cargadores EV más allá de `max_house_power` — la restricción
+  genérica ya cubre la potencia agregada de todas las cargas
+  incluyendo EVs. Editar/cancelar un plan de carga EV o confort en
+  curso — mismo tratamiento que cualquier otra carga hoy (un escenario
+  nuevo se resuelve desde cero). Integración a nivel de adapter con un
+  cargador EV o termostato real — fuera de alcance; el plan propuesto
+  ya fluye por el boundary Command/Plan/PlanExecutor existente sin
+  cambios.
+
+Evidencia: `500 passed, 8 skipped` (500 → 507, 7 tests nuevos). Ruff y
+mypy limpios (93 ficheros fuente). `schemas/v1/
+optimization-scenario.schema.json` regenerado — solo cambio aditivo
+(dos nuevas definiciones de modelo, dos nuevos campos opcionales en
+`OptimizationScenario`), ningún campo existente cambia de forma.
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

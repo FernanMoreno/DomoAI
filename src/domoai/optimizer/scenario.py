@@ -12,7 +12,9 @@ from domoai.optimizer.horizon import Horizon
 from domoai.runtime.registry import DeviceRegistry
 
 __all__ = [
+    "ComfortLoad",
     "Constraint",
+    "EVChargingLoad",
     "Horizon",
     "Load",
     "Objective",
@@ -37,6 +39,53 @@ class Load(StrictModel):
     deadline_slot: int | None = Field(default=None, ge=0)
 
 
+class EVChargingLoad(StrictModel):
+    id: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    command: str = Field(min_length=1)
+    unit: str | None = None
+    capacity_kwh: float = Field(gt=0)
+    initial_soc_kwh: float = Field(ge=0)
+    target_soc_kwh: float = Field(gt=0)
+    max_charge_kw: float = Field(gt=0)
+    min_charge_kw: float = Field(default=0, ge=0)
+    deadline_slot: int = Field(ge=0)
+    charge_efficiency: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_state_domain(self) -> EVChargingLoad:
+        if self.initial_soc_kwh > self.capacity_kwh:
+            raise ValueError("initial_soc_kwh must be less than or equal to capacity_kwh")
+        if self.target_soc_kwh > self.capacity_kwh:
+            raise ValueError("target_soc_kwh must be less than or equal to capacity_kwh")
+        if self.min_charge_kw > self.max_charge_kw:
+            raise ValueError("min_charge_kw must be less than or equal to max_charge_kw")
+        return self
+
+
+class ComfortLoad(StrictModel):
+    id: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    command: str = Field(min_length=1)
+    value: ScalarValue | None = None
+    unit: str | None = None
+    power: float = Field(default=0, ge=0)
+    power_unit: str = Field(default="W", min_length=1)
+    earliest_slot: int = Field(ge=0)
+    deadline_slot: int = Field(ge=0)
+    min_active_slots: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> ComfortLoad:
+        if self.deadline_slot <= self.earliest_slot:
+            raise ValueError("deadline_slot must be greater than earliest_slot")
+        if self.min_active_slots > self.deadline_slot - self.earliest_slot:
+            raise ValueError("min_active_slots cannot exceed the window size")
+        return self
+
+
 class Constraint(StrictModel):
     type: str = Field(min_length=1)
     value: float = Field(ge=0)
@@ -56,6 +105,8 @@ class OptimizationScenario(StrictModel):
     id: str = Field(min_length=1)
     horizon: Horizon
     loads: list[Load] = Field(default_factory=list)
+    ev_loads: list[EVChargingLoad] = Field(default_factory=list)
+    comfort_loads: list[ComfortLoad] = Field(default_factory=list)
     constraints: list[Constraint] = Field(default_factory=list)
     objectives: list[Objective] = Field(default_factory=list)
     energy_context: EnergyContext | None = None
@@ -65,7 +116,11 @@ class OptimizationScenario(StrictModel):
 
     @model_validator(mode="after")
     def validate_loads(self) -> OptimizationScenario:
-        load_ids = [load.id for load in self.loads]
+        load_ids = (
+            [load.id for load in self.loads]
+            + [load.id for load in self.ev_loads]
+            + [load.id for load in self.comfort_loads]
+        )
         if len(load_ids) != len(set(load_ids)):
             raise ValueError("load ids must be unique")
         return self
@@ -158,6 +213,49 @@ def validate_scenario(
                     f"Load {load.id!r} cannot fit within the scenario horizon",
                 )
             )
+    if (scenario.ev_loads or scenario.comfort_loads) and scenario.energy_context is None:
+        errors.append(
+            _diagnostic(
+                "energy_context_required",
+                "EV charging and comfort loads require an energy context",
+            )
+        )
+    for ev_load in scenario.ev_loads:
+        errors.extend(
+            _validate_device_capability_command(
+                registry, ev_load.device_id, ev_load.capability, ev_load.command, ev_load.unit
+            )
+        )
+        if ev_load.deadline_slot >= horizon_slots:
+            errors.append(
+                _diagnostic(
+                    "invalid_horizon",
+                    f"EV load {ev_load.id!r} deadline_slot is outside the scenario horizon",
+                )
+            )
+    for comfort_load in scenario.comfort_loads:
+        errors.extend(
+            _validate_device_capability_command(
+                registry,
+                comfort_load.device_id,
+                comfort_load.capability,
+                comfort_load.command,
+                comfort_load.unit,
+            )
+        )
+        if comfort_load.power_unit not in {"W", "kW"}:
+            errors.append(
+                _diagnostic(
+                    "invalid_unit", f"Unsupported power unit {comfort_load.power_unit!r}"
+                )
+            )
+        if comfort_load.deadline_slot > horizon_slots:
+            errors.append(
+                _diagnostic(
+                    "invalid_horizon",
+                    f"Comfort load {comfort_load.id!r} window is outside the scenario horizon",
+                )
+            )
     for constraint in scenario.constraints:
         if constraint.type not in {
             "max_house_power",
@@ -200,6 +298,43 @@ def validate_scenario(
             errors.append(
                 _diagnostic("unsupported_objective", f"Unsupported objective {objective.name!r}")
             )
+    return errors
+
+
+def _validate_device_capability_command(
+    registry: DeviceRegistry,
+    device_id: str,
+    capability_name: str,
+    command: str,
+    unit: str | None,
+) -> list[ErrorDetail]:
+    errors: list[ErrorDetail] = []
+    device = registry.get(device_id)
+    if device is None:
+        errors.append(_diagnostic("missing_device", f"Unknown device {device_id}"))
+        return errors
+    capability = next(
+        (item for item in device.capabilities if item.name == capability_name), None
+    )
+    if capability is None or not capability.writable:
+        errors.append(
+            _diagnostic(
+                "missing_capability",
+                f"Writable capability {capability_name!r} is not available on {device_id}",
+            )
+        )
+        return errors
+    if command not in capability.commands:
+        errors.append(
+            _diagnostic(
+                "unsupported_command",
+                f"Command {command!r} is not supported by {capability_name!r}",
+            )
+        )
+    if unit is not None and unit != capability.unit:
+        errors.append(
+            _diagnostic("invalid_unit", f"Command unit {unit!r} does not match {capability.unit!r}")
+        )
     return errors
 
 

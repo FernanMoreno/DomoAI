@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
@@ -11,7 +12,14 @@ from domoai.domain.models import PlanStatus
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import BaseLoadPoint, EnergyContext, SolarForecastPoint, TariffPoint
 from domoai.optimizer.ports import OptimizationStatus
-from domoai.optimizer.scenario import Constraint, Horizon, Objective, OptimizationScenario
+from domoai.optimizer.scenario import (
+    ComfortLoad,
+    Constraint,
+    EVChargingLoad,
+    Horizon,
+    Objective,
+    OptimizationScenario,
+)
 from domoai.runtime.events import AuditLog
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
@@ -602,3 +610,227 @@ async def test_omitted_base_load_behaves_like_zero() -> None:
     assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
     assert result.constraint_summary["slots"][0]["grid_import_kw"] == pytest.approx(1.0)
     assert result.objective_values["energy_cost"] == pytest.approx(0.025)
+
+
+def _ev_load(device_id: str, **overrides) -> EVChargingLoad:
+    fields = {
+        "id": "ev-1",
+        "device_id": device_id,
+        "capability": "position",
+        "command": "set_position",
+        "capacity_kwh": 10.0,
+        "initial_soc_kwh": 2.0,
+        "target_soc_kwh": 4.0,
+        "max_charge_kw": 4.0,
+        "deadline_slot": 7,
+        "charge_efficiency": 0.95,
+    }
+    fields.update(overrides)
+    return EVChargingLoad(**fields)
+
+
+def _comfort_load(device_id: str, **overrides) -> ComfortLoad:
+    fields = {
+        "id": "comfort-1",
+        "device_id": device_id,
+        "capability": "target_temperature",
+        "command": "set_temperature",
+        "value": 21,
+        "power": 0.5,
+        "power_unit": "kW",
+        "earliest_slot": 0,
+        "deadline_slot": 8,
+        "min_active_slots": 6,
+    }
+    fields.update(overrides)
+    return ComfortLoad(**fields)
+
+
+@pytest.mark.asyncio
+async def test_ev_charging_reaches_target_soc_by_deadline() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="ev-feasible-1",
+        horizon=context.horizon,
+        energy_context=context,
+        ev_loads=[_ev_load(device_id)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.plan is not None
+    resolution_hours = context.horizon.resolution_minutes / 60
+    delivered_kwh = sum(
+        command.value * resolution_hours * 0.95
+        for plan in result.plans
+        for command in plan.commands
+        if command.device_id == device_id
+    )
+    assert delivered_kwh >= (4.0 - 2.0) - 1e-6
+
+
+@pytest.mark.asyncio
+async def test_ev_charging_unreachable_target_reports_infeasible() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="ev-infeasible-1",
+        horizon=context.horizon,
+        energy_context=context,
+        ev_loads=[
+            _ev_load(
+                device_id,
+                capacity_kwh=10.0,
+                initial_soc_kwh=0.0,
+                target_soc_kwh=10.0,
+                max_charge_kw=1.0,
+                deadline_slot=1,
+            )
+        ],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status is OptimizationStatus.INFEASIBLE
+    assert result.plan is None
+
+
+@pytest.mark.asyncio
+async def test_ev_charging_already_at_target_solves_trivially() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="ev-already-charged-1",
+        horizon=context.horizon,
+        energy_context=context,
+        ev_loads=[
+            _ev_load(device_id, initial_soc_kwh=5.0, target_soc_kwh=4.0, deadline_slot=7)
+        ],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+
+
+@pytest.mark.asyncio
+async def test_comfort_load_active_in_at_least_minimum_slots() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="comfort-feasible-1",
+        horizon=context.horizon,
+        energy_context=context,
+        comfort_loads=[_comfort_load(device_id)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    active_slots = {
+        command.intent
+        for plan in result.plans
+        for command in plan.commands
+        if command.device_id == device_id
+    }
+    assert len(active_slots) >= 6
+
+
+def test_comfort_load_window_too_small_is_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        ComfortLoad(
+            id="comfort-impossible",
+            device_id="ha-climate-1",
+            capability="target_temperature",
+            command="set_temperature",
+            value=21,
+            power=0.5,
+            power_unit="kW",
+            earliest_slot=0,
+            deadline_slot=4,
+            min_active_slots=6,
+        )
+
+
+@pytest.mark.asyncio
+async def test_comfort_load_power_is_bound_by_max_house_power() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="comfort-house-power-infeasible-1",
+        horizon=context.horizon,
+        energy_context=context,
+        comfort_loads=[
+            _comfort_load(device_id, min_active_slots=1, power=5.0, power_unit="kW")
+        ],
+        constraints=[
+            Constraint(type="max_house_power", value=1, unit="kW"),
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status is OptimizationStatus.INFEASIBLE
+
+
+@pytest.mark.asyncio
+async def test_ev_and_comfort_coexist_with_generic_load_and_battery() -> None:
+    _, registry, service = await build_context()
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    cover_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    climate_id = next(
+        device.id for device in registry.devices if device.type.value == "climate"
+    )
+    context = energy_context_for()
+    scenario = OptimizationScenario(
+        id="combined-ev-comfort-1",
+        horizon=context.horizon,
+        energy_context=context,
+        loads=[flexible_load(switch_id, power_kw=0.5, latest_slot=5)],
+        ev_loads=[_ev_load(cover_id, max_charge_kw=2.0, deadline_slot=7)],
+        comfort_loads=[
+            _comfort_load(climate_id, min_active_slots=2, power=0.5, power_unit="kW")
+        ],
+        constraints=[
+            Constraint(type="max_house_power", value=6, unit="kW"),
+            Constraint(type="max_grid_import", value=6, unit="kW"),
+            Constraint(type="max_grid_export", value=6, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    for slot in result.constraint_summary["slots"]:
+        total = (
+            slot["load_power_kw"]
+            + slot["battery_charge_kw"]
+            + slot["ev_charge_kw"]
+            + slot["comfort_power_kw"]
+        )
+        assert total <= 6 + 1e-6

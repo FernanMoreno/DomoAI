@@ -2030,6 +2030,62 @@ explícita en el spec: otras entidades declaradas en el mapping
 disponible, solo KNX Virtual/ETS esta sesión); ejecución automática en
 CI por defecto.
 
+## Certificación de compatibilidad de agentes a nivel de protocolo MCP (2026-08-19)
+
+Forma corregida y no redundante del ítem "certificación de agentes"
+descartado durante la selección de P4 de esta sesión por presunto
+solape con los tests MCP existentes — esa premisa era incorrecta: los
+tests MCP existentes (`tests/contract/test_domotics_mcp_contract.py`,
+`test_unified_mcp_contract.py`, `tests/integration/test_mcp_client_parity.py`,
+etc.) llaman a `FastMCP.call_tool(...)` directamente en proceso sobre
+el mismo objeto Python, o como mucho envuelven `ClientSession` sobre
+streams `anyio` en memoria conectados al mismo proceso — nunca prueban
+el protocolo JSON-RPC-sobre-stdio real que un agente externo genuino
+(Claude Desktop, cualquier cliente compatible con el estándar MCP)
+usaría para conectarse. El punto de entrada de producción real
+(`domoai-mcp`, script de consola en `pyproject.toml`, que invoca
+`domoai.mcp.stdio:main` → `run_stdio()`) nunca se ejercitaba de
+extremo a extremo en ningún test.
+
+Nuevo `tests/contract/test_mcp_protocol_certification.py`: lanza el
+script `domoai-mcp` real como subproceso (resuelto vía `shutil.which`,
+no una ruta hardcodeada), con `DOMOAI_DATABASE_PATH` aislado en
+`tmp_path` y sin variables de entorno de integración externa
+(`create_adapter` recae automáticamente en `SimulatedHomeAdapter` al
+no haber ninguna configurada, confirmado leyendo
+`runtime_factory.py` — sin necesidad de opt-in, a diferencia de las
+Specs 051/053), y se conecta usando exclusivamente el SDK cliente
+público de `mcp` (`mcp.client.stdio.stdio_client` +
+`mcp.client.session.ClientSession`, ya dependencia del proyecto,
+`mcp>=1.27,<2`) — nunca importando módulos servidor de
+`domoai.mcp.*` para actuar de cliente. Completa el handshake
+`initialize`, lista el catálogo de herramientas vía `list_tools()`,
+y llama `discover_devices`/`validate_command` (solo validación, sin
+ejecución real) a través del protocolo de cable real.
+
+Sin corrección de diseño necesaria: la firma exacta del SDK cliente
+(`StdioServerParameters`, `ClientSession.initialize/list_tools/call_tool`)
+se confirmó vía `inspect.signature` contra el paquete instalado antes
+de escribir el test, no se asumió. Único ajuste durante la
+implementación: `mcp.client.stdio.stdio_client` fusiona automáticamente
+`get_default_environment()` (solo `HOME`/`LOGNAME`/`PATH`/`SHELL`/`TERM`/`USER`)
+con el `env` explícito pasado — no hace falta reenviar `PATH` a mano.
+
+Evidencia: `563 → 564 passed, 10 skipped` (sin salto — corre
+incondicionalmente, sin gating de opt-in, por no depender de ningún
+sistema externo). Test individual: `1 passed in ~11-16s` (dentro del
+objetivo de <15s del spec, con variación normal de carga de
+máquina). Ruff y mypy limpios (99 ficheros fuente). Sin cambio de
+schema.
+
+Fuera de alcance, con justificación explícita en el spec: certificar
+contra cada producto de agente individualmente (se certifica contra el
+protocolo estándar en sí, vía el SDK de referencia, como proxy
+alcanzable y significativo); re-certificar cada herramienta del
+servidor a nivel de cable (solo se ejercitan `discover_devices`/
+`validate_command` como muestra representativa; el resto ya está
+cubierto a nivel Python por los tests de contrato existentes).
+
 ## Orquestación del skill de energía
 
 El skill portable `optimize-home-energy` declara la secuencia y el rol de la

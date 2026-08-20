@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -142,7 +143,9 @@ async def test_sensitive_command_requires_matching_operator_approval() -> None:
         await executor.execute(validated)
     assert adapter.calls == []
 
-    grant = ApprovalStore().issue(validated, approved_by="local_operator")
+    grant = ApprovalStore(operator_token="test-operator-secret").issue(
+        validated, approved_by="local_operator", operator_token="test-operator-secret"
+    )
     approved = plan_service.approve(validated, grant=grant)
     outcomes = await executor.execute(approved)
 
@@ -480,6 +483,78 @@ async def test_first_time_execution_with_repository_is_unaffected(tmp_path) -> N
     outcomes = await executor.execute(validated)
 
     assert outcomes.outcomes[0].status.value == "confirmed_success"
+    assert len(adapter.calls) == 1
+
+
+class _InterleavingPlanRepository:
+    """Wraps a real ``PlanRepository`` and forces a genuine asyncio
+    scheduler yield (``asyncio.sleep(0)``) before every call.
+
+    The fixture adapter and the ``sqlite3`` driver used throughout this
+    suite are fully synchronous, so two ``execute()`` calls dispatched via
+    ``asyncio.gather`` never naturally interleave — one runs to completion
+    before the other starts, which would make a concurrency test pass
+    "by accident" regardless of whether the claim is actually atomic. This
+    wrapper reproduces the adversarial interleaving a real, network-backed
+    adapter's genuine ``await`` points would produce, so the test exercises
+    the property that matters: whichever caller's claim attempt is
+    evaluated first wins, and every other simultaneous attempt is refused
+    — not merely "whichever attempt started first finishes first."
+    """
+
+    def __init__(self, inner: PlanRepository) -> None:
+        self._inner = inner
+
+    async def get(self, plan_id: str) -> Plan | None:
+        await asyncio.sleep(0)
+        return await self._inner.get(plan_id)
+
+    async def save(self, plan: Plan) -> None:
+        await asyncio.sleep(0)
+        await self._inner.save(plan)
+
+    async def claim_for_execution(
+        self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
+    ) -> bool:
+        await asyncio.sleep(0)
+        return await self._inner.claim_for_execution(plan, allowed_statuses=allowed_statuses)
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_execution_attempts_on_the_same_plan_have_exactly_one_winner(
+    tmp_path,
+) -> None:
+    adapter, registry, _, _, plan_service, executor, plan_repository = (
+        await build_plan_context_with_repository(tmp_path)
+    )
+    executor.plan_repository = _InterleavingPlanRepository(plan_repository)
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-concurrent-execution-1",
+        commands=[
+            Command(
+                id="command-concurrent-execution-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-concurrent-execution-1",
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    results = await asyncio.gather(
+        executor.execute(validated), executor.execute(validated), return_exceptions=True
+    )
+
+    successes = [result for result in results if not isinstance(result, BaseException)]
+    failures = [result for result in results if isinstance(result, BaseException)]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
+    assert "invalid_transition" in str(failures[0]) or "already" in str(failures[0])
     assert len(adapter.calls) == 1
 
 

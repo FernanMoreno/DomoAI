@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
@@ -19,13 +21,19 @@ from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
+from domoai.persistence.repositories import ScheduledPlanRepository
+from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from domoai.skills.workflow import ApprovalDecision
 from tests.fixtures.energy import energy_context_for
+
+FIXTURE_OPERATOR_TOKEN = "fixture-operator-secret"
 
 
 def structured(result: object) -> dict[str, Any]:
@@ -89,9 +97,10 @@ async def build_workflow_fixture(
     confirmation_required: bool = False,
     approval_decisions: list[ApprovalDecision | None] | None = None,
     tool_aliases: dict[tuple[str, str], str] | None = None,
+    horizon: Horizon | None = None,
 ) -> WorkflowFixture:
     domotics_adapter, domotics_context = await _build_domotics_context(
-        confirmation_required=confirmation_required
+        confirmation_required=confirmation_required, horizon=horizon
     )
     ortools_context = OrtoolsMcpContext(
         registry=domotics_context.registry,
@@ -123,8 +132,32 @@ async def build_workflow_fixture(
     )
 
 
+def default_horizon() -> Horizon:
+    return Horizon(
+        start=datetime(2026, 8, 15, tzinfo=UTC),
+        end=datetime(2026, 8, 15, 1, tzinfo=UTC),
+        resolution_minutes=15,
+        timezone="Europe/Madrid",
+    )
+
+
+def future_horizon(*, slots: int = 4, resolution_minutes: int = 15) -> Horizon:
+    """A horizon straddling real "now" — required to genuinely exercise the
+    schedule_plan path, since every fixture using default_horizon() is fixed
+    at 2026-08-15 and would take the execute-now branch unconditionally
+    regardless of whether scheduling is implemented correctly."""
+
+    start = datetime.now(UTC) - timedelta(minutes=resolution_minutes)
+    return Horizon(
+        start=start,
+        end=start + timedelta(minutes=slots * resolution_minutes),
+        resolution_minutes=resolution_minutes,
+        timezone="Europe/Madrid",
+    )
+
+
 async def _build_domotics_context(
-    *, confirmation_required: bool
+    *, confirmation_required: bool, horizon: Horizon | None = None
 ) -> tuple[SimulatedHomeAdapter, DomoticsMcpContext]:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
@@ -138,29 +171,33 @@ async def _build_domotics_context(
                 id="fixture-confirm-brightness",
                 target={"capability": "brightness"},
                 action=PolicyAction.CONFIRM,
-            )
+            ),
+            Policy(
+                id="fixture-confirm-power",
+                target={"capability": "power"},
+                action=PolicyAction.CONFIRM,
+            ),
         ]
         if confirmation_required
         else []
     )
+    database = SQLiteDatabase(Path(tempfile.mkdtemp()) / "scheduler-fixture.sqlite3")
+    await database.initialize()
     plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
-    facade = DomoticsFacade(plan_service, PlanExecutor(adapter, plan_service, audit))
+    executor = PlanExecutor(adapter, plan_service, audit)
+    facade = DomoticsFacade(plan_service, executor)
+    scheduler = Scheduler(executor, ScheduledPlanRepository(database), audit)
     return adapter, DomoticsMcpContext(
         discovery=discovery,
         state_service=StateService(state_store),
         facade=facade,
         registry=registry,
         policies=policies,
+        approval_store=ApprovalStore(operator_token=FIXTURE_OPERATOR_TOKEN),
         energy_context_provider=StaticEnergyContextProvider(
-            energy_context_for(
-                Horizon(
-                    start=datetime(2026, 8, 15, tzinfo=UTC),
-                    end=datetime(2026, 8, 15, 1, tzinfo=UTC),
-                    resolution_minutes=15,
-                    timezone="Europe/Madrid",
-                )
-            )
+            energy_context_for(horizon or default_horizon())
         ),
+        scheduler=scheduler,
     )
 
 
@@ -195,9 +232,68 @@ def scenario_for(
     )
 
 
+def multi_slot_scenario_for(
+    device_id: str,
+    *,
+    horizon: Horizon,
+    slots: tuple[int, ...] = (0, 2),
+    device_ids: tuple[str, ...] | None = None,
+    capability: str = "power",
+    command: str = "turn_on",
+    value: Any = True,
+    max_power: float = 500,
+    solver_time_limit_seconds: float = 5.0,
+    invalid_device_id: str | None = None,
+) -> OptimizationScenario:
+    """A scenario whose loads are pinned (earliest_slot == latest_slot) to
+    distinct slots, so CP-SAT is forced to produce one Plan per slot instead
+    of leaving slot assignment to solver heuristics. `device_ids`, if given,
+    assigns one distinct device per slot (avoiding a same-device dependency
+    conflict between bundle members when an earlier member's execution
+    changes the state a later member's validation depended on) — defaults to
+    repeating `device_id` for every slot when omitted. `invalid_device_id`,
+    if given, replaces the device on the *last* load only — used to engineer
+    a bundle whose later member fails validation."""
+
+    resolved_devices = device_ids or tuple(device_id for _ in slots)
+    return OptimizationScenario(
+        id="fixture-energy-bundle-001",
+        horizon=horizon,
+        loads=[
+            Load(
+                id=f"bundle-load-{index}",
+                device_id=(
+                    invalid_device_id
+                    if invalid_device_id is not None and index == len(slots) - 1
+                    else resolved_devices[index]
+                ),
+                capability=capability,
+                command=command,
+                value=value,
+                power=100,
+                power_unit="W",
+                duration_slots=1,
+                earliest_slot=slot,
+                latest_slot=slot,
+            )
+            for index, slot in enumerate(slots)
+        ],
+        constraints=[Constraint(type="max_house_power", value=max_power, unit="W")],
+        solver_time_limit_seconds=solver_time_limit_seconds,
+    )
+
+
 def light_device_id(fixture: WorkflowFixture) -> str:
     return next(
         device.id
         for device in fixture.domotics_context.registry.devices
         if device.type.value == "light"
+    )
+
+
+def switch_device_id(fixture: WorkflowFixture) -> str:
+    return next(
+        device.id
+        for device in fixture.domotics_context.registry.devices
+        if device.type.value == "switch"
     )

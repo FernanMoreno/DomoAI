@@ -24,8 +24,10 @@ from domoai.optimizer.scenario import (
     Constraint,
     EVChargingLoad,
     Horizon,
+    Load,
     Objective,
     OptimizationScenario,
+    validate_scenario,
 )
 from domoai.runtime.events import AuditLog
 from domoai.runtime.policy_engine import PolicyEngine
@@ -1471,3 +1473,257 @@ async def test_energy_cost_includes_degradation_charge() -> None:
     assert result.objective_values["energy_cost"] == pytest.approx(
         import_cost + result.objective_values["battery_degradation_cost"]
     )
+
+
+@pytest.mark.asyncio
+async def test_ev_stop_at_zero_command_after_last_charging_slot() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    horizon = energy_horizon(slots=8, resolution_minutes=15)
+    context = energy_context_for(horizon, with_battery=False)
+    scenario = OptimizationScenario(
+        id="ev-stop-1",
+        horizon=horizon,
+        energy_context=context,
+        ev_loads=[_ev_load(device_id, target_soc_kwh=2.5, deadline_slot=3)],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    ev_commands = [
+        command
+        for plan in result.plans
+        for command in plan.commands
+        if command.device_id == device_id
+    ]
+    charging_slots = [
+        int(command.intent.removeprefix("scheduled_slot:"))
+        for command in ev_commands
+        if command.value and float(command.value) > 0
+    ]
+    assert charging_slots
+    last_charging_slot = max(charging_slots)
+    stop_commands = [
+        command
+        for command in ev_commands
+        if command.intent == f"scheduled_slot:{last_charging_slot + 1}"
+    ]
+    assert len(stop_commands) == 1
+    assert float(stop_commands[0].value) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_ev_charging_through_horizon_end_has_no_trailing_command() -> None:
+    # Exercises _proposal_plan directly with a charge schedule that reaches
+    # the horizon's last slot: forcing CP-SAT itself to leave the EV's
+    # deadline-constrained SOC check spanning exactly the final slot is not
+    # expressible in the current solver model (the deadline_slot check only
+    # ever counts charging strictly before the horizon's last slot), so this
+    # asserts the actual code under fix against a hand-built, unambiguous
+    # charge schedule instead.
+    from domoai.optimizer.cp_sat import _proposal_plan
+
+    _, registry, _service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    scenario = OptimizationScenario(
+        id="ev-horizon-spanning-1",
+        horizon=horizon,
+        ev_loads=[_ev_load(device_id, deadline_slot=1)],
+        constraints=[Constraint(type="max_grid_import", value=10, unit="kW")],
+    )
+
+    plans = _proposal_plan(
+        scenario,
+        selected_slots={},
+        ev_charge_slots={"ev-1": {0: 2.0, 1: 3.0}},
+        comfort_active_slots={},
+    )
+
+    ev_commands = [
+        command
+        for plan in plans
+        for command in plan.commands
+        if command.device_id == device_id
+    ]
+    assert len(ev_commands) == 2
+    assert all(float(command.value) > 0 for command in ev_commands)
+    del registry
+
+
+@pytest.mark.asyncio
+async def test_missing_deactivation_command_is_rejected() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _single_slot_scenario(base_load_kw=None)
+    load = Load(
+        id="dishwasher-1",
+        device_id=device_id,
+        capability="power",
+        command="turn_on",
+        value=True,
+        power=1.0,
+        power_unit="kW",
+        duration_slots=4,
+        earliest_slot=0,
+        latest_slot=0,
+    )
+    scenario = OptimizationScenario(
+        id="missing-deactivation-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[load],
+        constraints=[Constraint(type="max_grid_import", value=10, unit="kW")],
+    )
+
+    diagnostics = validate_scenario(scenario, registry)
+
+    assert any(item.code == "missing_deactivation_command" for item in diagnostics)
+
+    result = service.optimize(scenario)
+
+    assert result.status is OptimizationStatus.INVALID
+
+
+@pytest.mark.asyncio
+async def test_end_command_is_placed_at_start_plus_duration() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    horizon = energy_horizon(slots=8, resolution_minutes=15)
+    context = energy_context_for(horizon, with_battery=False)
+    load = Load(
+        id="dishwasher-2",
+        device_id=device_id,
+        capability="power",
+        command="turn_on",
+        value=True,
+        power=1.0,
+        power_unit="kW",
+        duration_slots=3,
+        earliest_slot=1,
+        latest_slot=1,
+        end_command="turn_off",
+        end_value=True,
+    )
+    scenario = OptimizationScenario(
+        id="end-command-placement-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[load],
+        constraints=[Constraint(type="max_grid_import", value=10, unit="kW")],
+    )
+
+    diagnostics = validate_scenario(scenario, registry)
+    assert not any(item.code == "missing_deactivation_command" for item in diagnostics)
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    end_commands = [
+        command
+        for plan in result.plans
+        for command in plan.commands
+        if command.device_id == device_id and command.command == "turn_off"
+    ]
+    assert len(end_commands) == 1
+    assert end_commands[0].intent == "scheduled_slot:4"
+    assert end_commands[0].value is True
+
+
+@pytest.mark.asyncio
+async def test_single_slot_load_does_not_require_end_command() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _single_slot_scenario(base_load_kw=None)
+    load = Load(
+        id="light-1",
+        device_id=device_id,
+        capability="power",
+        command="turn_on",
+        value=True,
+        power=0.1,
+        power_unit="kW",
+        duration_slots=1,
+        earliest_slot=0,
+        latest_slot=0,
+    )
+    scenario = OptimizationScenario(
+        id="single-slot-no-end-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[load],
+        constraints=[Constraint(type="max_grid_import", value=10, unit="kW")],
+    )
+
+    diagnostics = validate_scenario(scenario, registry)
+
+    assert not any(item.code == "missing_deactivation_command" for item in diagnostics)
+    del service
+
+
+@pytest.mark.asyncio
+async def test_ev_deadline_hard_constraint_blocks_post_deadline_charging() -> None:
+    # Verified empirically against unmodified code before this fix: this
+    # exact scenario (negative tariffs after the deadline, cost
+    # minimization active, nothing else competing for the discount)
+    # produces 4.0 kW charge commands in slots 2 and 3 today, both after
+    # deadline_slot=1 — a real, not merely theoretical, trigger of P0-F.
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    horizon = energy_horizon(slots=4, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=2, price_per_kwh=-1.0, currency="EUR"),
+            TariffPoint(slot=3, price_per_kwh=-1.0, currency="EUR"),
+        ],
+        solar_forecast=[SolarForecastPoint(slot=slot, power=0.0) for slot in range(4)],
+        battery=None,
+        source_revision="ev-deadline-hard-constraint-fixture",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="ev-deadline-hard-constraint-1",
+        horizon=horizon,
+        energy_context=context,
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+        ev_loads=[
+            _ev_load(
+                device_id,
+                capacity_kwh=10.0,
+                initial_soc_kwh=0.0,
+                target_soc_kwh=0.5,
+                max_charge_kw=4.0,
+                deadline_slot=1,
+            )
+        ],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    ev_commands = [
+        command
+        for plan in result.plans
+        for command in plan.commands
+        if command.device_id == device_id
+    ]
+    post_deadline_positive = [
+        command
+        for command in ev_commands
+        if int(command.intent.removeprefix("scheduled_slot:")) >= 1
+        and command.value
+        and float(command.value) > 0
+    ]
+    assert post_deadline_positive == []

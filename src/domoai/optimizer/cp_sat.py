@@ -254,6 +254,8 @@ class CpSatOptimizer:
                 max_ev_charge = to_solver_int(ev_load.max_charge_kw, "kW")
                 min_ev_charge = to_solver_int(ev_load.min_charge_kw, "kW")
                 ev_charge = model.NewIntVar(0, max_ev_charge, f"ev_charge_{ev_load.id}_{slot}")
+                if slot >= ev_load.deadline_slot:
+                    model.Add(ev_charge == 0)
                 if min_ev_charge > 0:
                     ev_charging = model.NewBoolVar(f"ev_charging_{ev_load.id}_{slot}")
                     model.Add(ev_charge == 0).OnlyEnforceIf(ev_charging.Not())
@@ -735,6 +737,20 @@ def _proposal_plan(
     for load in scenario.loads:
         slot = selected_slots[load.id]
         groups.setdefault(_slot_execute_at(slot), []).append(load)
+        if load.end_command is not None:
+            end_slot = slot + load.duration_slots
+            if end_slot < scenario.horizon.slots:
+                groups.setdefault(_slot_execute_at(end_slot), []).append(
+                    Command(
+                        id=f"{scenario.id}:{load.id}:end",
+                        device_id=load.device_id,
+                        command=load.end_command,
+                        value=load.end_value,
+                        unit=load.unit,
+                        idempotency_key=f"optimization:{scenario.id}:{load.id}:end",
+                        intent=f"scheduled_slot:{end_slot}",
+                    )
+                )
     ev_loads_by_id = {ev_load.id: ev_load for ev_load in scenario.ev_loads}
     for ev_id, slot_charges in (ev_charge_slots or {}).items():
         ev_load = ev_loads_by_id[ev_id]
@@ -750,6 +766,20 @@ def _proposal_plan(
                     intent=f"scheduled_slot:{slot}",
                 )
             )
+        if slot_charges:
+            end_slot = max(slot_charges) + 1
+            if end_slot < scenario.horizon.slots:
+                groups.setdefault(_slot_execute_at(end_slot), []).append(
+                    Command(
+                        id=f"{scenario.id}:{ev_load.id}:end",
+                        device_id=ev_load.device_id,
+                        command=ev_load.command,
+                        value=0.0,
+                        unit="kW",
+                        idempotency_key=f"optimization:{scenario.id}:{ev_load.id}:end",
+                        intent=f"scheduled_slot:{end_slot}",
+                    )
+                )
     comfort_loads_by_id = {comfort_load.id: comfort_load for comfort_load in scenario.comfort_loads}
     for comfort_id, active_slots in (comfort_active_slots or {}).items():
         comfort_load = comfort_loads_by_id[comfort_id]

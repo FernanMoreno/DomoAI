@@ -24,7 +24,8 @@ class OptimizationService:
         return self.optimizer.optimize(scenario)
 
     def validate_proposal(self, result: OptimizationResult) -> OptimizationResult:
-        if result.plan is None:
+        bundle = result.plans or ([result.plan] if result.plan is not None else [])
+        if not bundle:
             return result
-        validated: Plan = self.plan_service.validate(result.plan)
-        return result.model_copy(update={"plan": validated})
+        validated: list[Plan] = [self.plan_service.validate(plan) for plan in bundle]
+        return result.model_copy(update={"plan": validated[0], "plans": validated})

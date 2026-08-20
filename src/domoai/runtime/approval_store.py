@@ -7,6 +7,7 @@ created; callers reference it by an opaque, single-use ``approval_id``.
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,11 +30,20 @@ class ApprovalGrant:
 class ApprovalStore:
     """In-process store of pending and consumed approval grants."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, operator_token: str | None = None) -> None:
         self._grants: dict[str, ApprovalGrant] = {}
         self._consumed: set[str] = set()
+        stripped = operator_token.strip() if operator_token is not None else ""
+        self._operator_token: str | None = stripped or None
 
-    def issue(self, plan: Plan, *, approved_by: str) -> ApprovalGrant:
+    def issue(self, plan: Plan, *, approved_by: str, operator_token: str) -> ApprovalGrant:
+        if self._operator_token is None or not hmac.compare_digest(
+            operator_token, self._operator_token
+        ):
+            raise DomainError(
+                ErrorCode.OPERATOR_AUTHENTICATION_FAILED,
+                "Operator approval is not configured or the supplied token is incorrect",
+            )
         if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,

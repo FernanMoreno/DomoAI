@@ -16,6 +16,7 @@ class Settings(StrictModel):
     risk_overrides_path: Path | None = None
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
+    operator_approval_token: SecretStr | None = None
     home_assistant_provider: bool = False
     home_assistant_mapping_path: Path | None = None
     zigbee2mqtt_url: str | None = None
@@ -165,6 +166,11 @@ class Settings(StrictModel):
             home_assistant_url=os.getenv("DOMOAI_HOME_ASSISTANT_URL"),
             home_assistant_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_HOME_ASSISTANT_TOKEN")) else None
+            ),
+            operator_approval_token=(
+                SecretStr(token)
+                if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN"))
+                else None
             ),
             home_assistant_provider=boolean("DOMOAI_HOME_ASSISTANT_PROVIDER"),
             home_assistant_mapping_path=(

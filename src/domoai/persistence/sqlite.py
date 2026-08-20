@@ -36,7 +36,19 @@ class SQLiteDatabase:
         for migration in sorted((migrations_dir or MIGRATIONS_DIR).glob("*.sql")):
             if migration.name in applied:
                 continue
-            self._connection.executescript(migration.read_text(encoding="utf-8"))
+            try:
+                self._connection.executescript(migration.read_text(encoding="utf-8"))
+            except sqlite3.OperationalError as error:
+                if "duplicate column name" not in str(error):
+                    raise
+                # ALTER TABLE ... ADD COLUMN has no native "IF NOT EXISTS" form
+                # in SQLite; a duplicate-column failure here means this
+                # migration's effect is already present (e.g. the schema was
+                # reconstructed from a snapshot after the ledger lost track of
+                # which migrations had run) — equivalent to the CREATE TABLE
+                # IF NOT EXISTS idempotency every other migration already
+                # relies on, not a real failure.
+                self._connection.rollback()
             self._connection.execute(
                 "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
                 (migration.name, datetime.now(UTC).isoformat()),

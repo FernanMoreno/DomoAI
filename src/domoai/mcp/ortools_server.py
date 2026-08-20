@@ -55,10 +55,24 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
                 f"A {result.status.value} proposal was produced without complete "
                 "hard-constraint evidence."
             )
+        bundle = result.plans or [result.plan]
         proposal = {
             "plan_id": result.plan.id,
             "status": result.plan.status.value,
             "commands": [command.model_dump(mode="json") for command in result.plan.commands],
+            "members": [
+                {
+                    "plan_id": member.id,
+                    "execute_at": member.execute_at.isoformat()
+                    if member.execute_at is not None
+                    else None,
+                    "status": member.status.value,
+                    "commands": [
+                        command.model_dump(mode="json") for command in member.commands
+                    ],
+                }
+                for member in bundle
+            ],
         }
     else:
         summary = f"No proposal was produced because the result is {result.status.value}."

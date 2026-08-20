@@ -15,6 +15,7 @@ class ErrorCode(StrEnum):
     DUPLICATE_COMMAND = "duplicate_command"
     STALE_PLAN = "stale_plan"
     APPROVAL_REQUIRED = "approval_required"
+    OPERATOR_AUTHENTICATION_FAILED = "operator_authentication_failed"
     POLICY_DENIED = "policy_denied"
     CONFIRMATION_REQUIRED = "confirmation_required"
     ADAPTER_UNAVAILABLE = "adapter_unavailable"

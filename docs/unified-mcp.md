@@ -53,6 +53,17 @@ the host. A host may change configuration syntax or presentation, but it may
 not introduce vendor tools, direct adapters, arbitrary solver code or a second
 server role.
 
+The `operator` boundary is enforced by the server, not merely documented:
+`request_approval` requires an `operator_token` argument that must match the
+deployment's `DOMOAI_OPERATOR_APPROVAL_TOKEN` (configured via `Settings`,
+compared in constant time). If the token is unset or blank, or the supplied
+value does not match, the server refuses to issue an approval grant and
+reports `operator_authentication_failed` — an automated agent driving the
+skill has no way to learn or guess this value, so it cannot approve its own
+plan. A compliant host that has already obtained a human decision through its
+own UI carries that value through as `ApprovalDecision.operator_token`; the
+skill/workflow logic only forwards it, it never inspects or chooses it.
+
 ## Validation
 
 ```bash

@@ -21,6 +21,7 @@ from domoai.persistence.repositories import (
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -30,6 +31,8 @@ from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.energy import energy_context_for
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
+
+OPERATOR_TOKEN = "test-operator-secret"
 
 
 def structured(result: object) -> dict[str, Any]:
@@ -363,6 +366,7 @@ async def build_confirmation_required_context() -> DomoticsMcpContext:
         facade=facade,
         registry=registry,
         policies=policies,
+        approval_store=ApprovalStore(operator_token=OPERATOR_TOKEN),
     )
 
 
@@ -419,6 +423,77 @@ async def test_execute_plan_rejects_a_caller_fabricated_approval_object() -> Non
 
 
 @pytest.mark.asyncio
+async def test_request_approval_refuses_when_no_operator_token_configured() -> None:
+    context = await build_confirmation_required_context()
+    context.approval_store = ApprovalStore()
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    for candidate_token in ("", "guess-1", OPERATOR_TOKEN):
+        result = structured(
+            await server.call_tool(
+                "request_approval",
+                {
+                    "plan_id": validated["plan"]["id"],
+                    "validation_digest": validated["validation"]["digest"],
+                    "approved_by": "operator",
+                    "operator_token": candidate_token,
+                },
+            )
+        )
+        assert result["error"]["code"] == "operator_authentication_failed"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_rejects_agent_self_approval_without_operator_token() -> None:
+    context = await build_confirmation_required_context()
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+
+    missing_token = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "an-agent-choosing-its-own-label",
+                "operator_token": "",
+            },
+        )
+    )
+    assert missing_token["error"]["code"] == "operator_authentication_failed"
+
+    wrong_token = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "an-agent-choosing-its-own-label",
+                "operator_token": "guessed-token",
+            },
+        )
+    )
+    assert wrong_token["error"]["code"] == "operator_authentication_failed"
+
+    # Neither attempt produced a usable approval_id, so execute_plan still
+    # has nothing to consume, exactly like a caller-fabricated approval.
+    result = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approval_id": "caller-fabricated-approval",
+            },
+        )
+    )
+    assert result["error"]["code"] == "approval_required"
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_execute_plan_succeeds_after_request_approval() -> None:
     context = await build_confirmation_required_context()
     server = create_domotics_server(context)
@@ -431,6 +506,7 @@ async def test_execute_plan_succeeds_after_request_approval() -> None:
                 "plan_id": validated["plan"]["id"],
                 "validation_digest": validated["validation"]["digest"],
                 "approved_by": "operator",
+                "operator_token": OPERATOR_TOKEN,
             },
         )
     )
@@ -462,6 +538,7 @@ async def test_approval_id_is_rejected_once_already_consumed() -> None:
                 "plan_id": validated["plan"]["id"],
                 "validation_digest": validated["validation"]["digest"],
                 "approved_by": "operator",
+                "operator_token": OPERATOR_TOKEN,
             },
         )
     )

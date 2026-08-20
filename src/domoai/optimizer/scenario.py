@@ -37,6 +37,8 @@ class Load(StrictModel):
     latest_slot: int | None = Field(default=None, ge=0)
     energy_required_kwh: float | None = Field(default=None, ge=0)
     deadline_slot: int | None = Field(default=None, ge=0)
+    end_command: str | None = Field(default=None, min_length=1)
+    end_value: ScalarValue | None = None
 
 
 class EVChargingLoad(StrictModel):
@@ -184,6 +186,25 @@ def validate_scenario(
         if load.power_unit not in {"W", "kW"}:
             errors.append(
                 _diagnostic("invalid_unit", f"Unsupported power unit {load.power_unit!r}")
+            )
+        if load.duration_slots > 1 and load.end_command is None:
+            errors.append(
+                _diagnostic(
+                    "missing_deactivation_command",
+                    f"Load {load.id!r} spans multiple slots but does not specify end_command",
+                )
+            )
+        if (
+            load.end_command is not None
+            and capability is not None
+            and capability.writable
+            and load.end_command not in capability.commands
+        ):
+            errors.append(
+                _diagnostic(
+                    "unsupported_command",
+                    f"Command {load.end_command!r} is not supported by {load.capability!r}",
+                )
             )
         if load.energy_required_kwh is not None and load.power > 0:
             slot_hours = scenario.horizon.resolution_minutes / 60

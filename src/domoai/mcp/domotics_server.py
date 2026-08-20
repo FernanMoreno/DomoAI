@@ -185,8 +185,10 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         name="request_approval",
         description=(
             "Issue a server-authoritative approval grant for a plan requiring "
-            "confirmation. The returned approval_id is single-use and bound to "
-            "the plan's current validation digest."
+            "confirmation. Requires the deployment's operator_token; an "
+            "automated agent that does not hold it cannot self-approve. The "
+            "returned approval_id is single-use and bound to the plan's "
+            "current validation digest."
         ),
         annotations=mutation_annotations,
         structured_output=True,
@@ -195,6 +197,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         plan_id: str,
         validation_digest: str,
         approved_by: str,
+        operator_token: str,
     ) -> dict[str, Any]:
         try:
             plan = context.plans.get(plan_id)
@@ -202,7 +205,9 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 raise ValueError(f"Unknown plan: {plan_id}")
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
-            grant = context.approval_store.issue(plan, approved_by=approved_by)
+            grant = context.approval_store.issue(
+                plan, approved_by=approved_by, operator_token=operator_token
+            )
             return {
                 "schema_version": "v1",
                 "approval_id": grant.approval_id,

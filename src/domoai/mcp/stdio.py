@@ -19,6 +19,7 @@ from domoai.mcp.domotics_server import DomoticsMcpContext
 from domoai.mcp.ortools_server import OrtoolsMcpContext
 from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
+from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
@@ -61,12 +62,18 @@ async def build_configured_server(
     settings: Settings | None = None,
 ) -> tuple[RuntimeComposition, FastMCP]:
     runtime = await build_runtime(settings)
+    operator_token = runtime.settings.operator_approval_token
     context = DomoticsMcpContext(
         discovery=runtime.discovery,
         state_service=StateService(runtime.state_store),
         facade=runtime.facade,
         registry=runtime.registry,
         policies=[],
+        approval_store=ApprovalStore(
+            operator_token=(
+                operator_token.get_secret_value() if operator_token is not None else None
+            )
+        ),
         energy_context_provider=runtime.energy_context_provider,
         scheduler=runtime.scheduler,
         audit_repository=runtime.audit_repository,

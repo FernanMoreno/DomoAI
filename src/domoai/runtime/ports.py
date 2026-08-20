@@ -13,6 +13,7 @@ from domoai.domain.models import (
     Command,
     ExecutionOutcome,
     Plan,
+    PlanStatus,
     SourceEvent,
     SourceRef,
     StateSnapshot,
@@ -65,6 +66,9 @@ class DatabasePort(Protocol):
 class PlanRecordPort(Protocol):
     async def save(self, plan: Plan) -> None: ...
     async def get(self, plan_id: str) -> Plan | None: ...
+    async def claim_for_execution(
+        self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
+    ) -> bool: ...
 
 
 class ExecutionOutcomePort(Protocol):

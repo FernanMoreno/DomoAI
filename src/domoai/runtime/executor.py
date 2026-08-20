@@ -48,6 +48,8 @@ class PlanExecutor:
         PlanStatus.CANCELLED,
     }
 
+    _CLAIMABLE_STATUSES = frozenset(PlanStatus) - _NON_CLAIMABLE_STATUSES
+
     async def execute(self, plan: Plan) -> ExecutionSummary:
         if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
@@ -63,9 +65,15 @@ class PlanExecutor:
                 )
         self.plan_service.assert_executable(plan)
         if self.plan_repository is not None:
-            await self.plan_repository.save(
-                plan.model_copy(update={"status": PlanStatus.EXECUTING})
+            claimed = await self.plan_repository.claim_for_execution(
+                plan.model_copy(update={"status": PlanStatus.EXECUTING}),
+                allowed_statuses=self._CLAIMABLE_STATUSES,
             )
+            if not claimed:
+                raise DomainError(
+                    ErrorCode.INVALID_TRANSITION,
+                    "Plan is already executing or has reached a terminal status",
+                )
         outcomes: list[ExecutionOutcome] = []
         seen_keys: set[str] = set()
         for command in plan.commands:

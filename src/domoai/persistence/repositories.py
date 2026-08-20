@@ -13,6 +13,7 @@ from domoai.domain.models import (
     Device,
     ExecutionOutcome,
     Plan,
+    PlanStatus,
     RecurrenceRule,
     StateSnapshot,
 )
@@ -167,11 +168,46 @@ class PlanRepository:
         self._repository = SQLiteJsonRepository(database, "plans")
 
     async def save(self, plan: Plan) -> None:
-        await self._repository.save(plan.id, plan.model_dump(mode="json"))
+        timestamp = datetime.now(UTC).isoformat()
+        self._repository.database.connection.execute(
+            """INSERT INTO plans (id, payload, status, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               payload=excluded.payload, status=excluded.status, updated_at=excluded.updated_at""",
+            (
+                plan.id,
+                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                plan.status.value,
+                timestamp,
+            ),
+        )
+        self._repository.database.connection.commit()
 
     async def get(self, plan_id: str) -> Plan | None:
         payload = await self._repository.get(plan_id)
         return Plan.model_validate(payload) if payload is not None else None
+
+    async def claim_for_execution(
+        self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
+    ) -> bool:
+        placeholders = ",".join("?" for _ in allowed_statuses)
+        timestamp = datetime.now(UTC).isoformat()
+        cursor = self._repository.database.connection.execute(
+            f"""INSERT INTO plans (id, payload, status, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                payload=excluded.payload, status=excluded.status, updated_at=excluded.updated_at
+                WHERE plans.status IN ({placeholders})""",
+            (
+                plan.id,
+                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                plan.status.value,
+                timestamp,
+                *(status.value for status in allowed_statuses),
+            ),
+        )
+        self._repository.database.connection.commit()
+        return cursor.rowcount > 0
 
 
 class DeviceRepository:

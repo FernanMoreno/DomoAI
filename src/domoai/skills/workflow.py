@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Mapping
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, cast
 
@@ -56,6 +57,7 @@ class ApprovalDecision(StrictModel):
     approved_by: str | None = None
     validation_digest: str | None = None
     reason: str | None = None
+    operator_token: str | None = None
 
 
 class EnergySkillRequest(StrictModel):
@@ -78,6 +80,10 @@ class SkillRunResult(StrictModel):
     runtime_revision: str | None = None
     plan_id: str | None = None
     validation_digest: str | None = None
+    plan_ids: list[str] = Field(default_factory=list)
+    validation_digests: list[str] = Field(default_factory=list)
+    scheduled_plan_ids: list[str] = Field(default_factory=list)
+    bundle: list[dict[str, Any]] = Field(default_factory=list)
     proposal: dict[str, Any] | None = None
     explanation: dict[str, Any] | None = None
     diagnostics: list[WorkflowDiagnostic] = Field(default_factory=list)
@@ -234,28 +240,55 @@ class EnergySkillWorkflow:
             completed.append("optimize_scenario")
             self._transition(history, WorkflowStage.PROPOSAL_READY)
 
-            plan = self._required_plan(proposal)
-            validation_response = await self._call(
-                "validate_plan",
-                {"plan": plan.model_dump(mode="json"), "mode": "preview"},
-                stage=WorkflowStage.PROPOSAL_READY,
-            )
-            validation = self._check_validation(validation_response)
-            validation_revision = self._required_string(
-                validation, "runtime_revision", "plan validation"
-            )
-            if not validation_revision.startswith(f"{discovery_revision}:"):
-                raise _WorkflowFailure(
-                    status=WorkflowStatus.BLOCKED,
-                    stage=WorkflowStage.VALIDATED,
-                    code="runtime_revision_changed",
-                    message="Runtime revision changed between state and plan validation",
+            bundle: list[dict[str, Any]] = []
+            first_confirming_plan_dict: dict[str, Any] | None = None
+            for member_plan in self._required_plans(proposal):
+                validation_response = await self._call(
+                    "validate_plan",
+                    {"plan": member_plan.model_dump(mode="json"), "mode": "preview"},
+                    stage=WorkflowStage.PROPOSAL_READY,
                 )
-            runtime_revision = validation_revision
-            plan_id = self._required_string(validation_response.get("plan"), "id", "validated plan")
-            validation_digest = self._required_string(validation, "digest", "plan validation")
+                validation = self._check_validation(validation_response)
+                validation_revision = self._required_string(
+                    validation, "runtime_revision", "plan validation"
+                )
+                if not validation_revision.startswith(f"{discovery_revision}:"):
+                    raise _WorkflowFailure(
+                        status=WorkflowStatus.BLOCKED,
+                        stage=WorkflowStage.VALIDATED,
+                        code="runtime_revision_changed",
+                        message="Runtime revision changed between state and plan validation",
+                    )
+                runtime_revision = validation_revision
+                member_plan_id = self._required_string(
+                    validation_response.get("plan"), "id", "validated plan"
+                )
+                member_digest = self._required_string(
+                    validation, "digest", "plan validation"
+                )
+                member_requires_confirmation = validation.get(
+                    "status"
+                ) == "requires_confirmation" or (
+                    validation_response.get("plan", {}).get("status")
+                    == "requires_confirmation"
+                )
+                if member_requires_confirmation and first_confirming_plan_dict is None:
+                    first_confirming_plan_dict = validation_response["plan"]
+                bundle.append(
+                    {
+                        "plan_id": member_plan_id,
+                        "validation_digest": member_digest,
+                        "requires_confirmation": member_requires_confirmation,
+                        "execute_at": member_plan.execute_at.isoformat()
+                        if member_plan.execute_at is not None
+                        else None,
+                    }
+                )
             completed.append("validate_plan")
             self._transition(history, WorkflowStage.VALIDATED)
+
+            plan_id = bundle[0]["plan_id"]
+            validation_digest = bundle[0]["validation_digest"]
 
             explanation = await self._call(
                 "explain_solution",
@@ -265,14 +298,12 @@ class EnergySkillWorkflow:
             self._check_explanation(explanation, parsed_request.scenario.id)
             completed.append("explain_solution")
 
-            requires_confirmation = validation.get("status") == "requires_confirmation"
-            requires_confirmation = requires_confirmation or (
-                validation_response.get("plan", {}).get("status") == "requires_confirmation"
-            )
+            requires_confirmation = any(entry["requires_confirmation"] for entry in bundle)
             if requires_confirmation:
                 self._transition(history, WorkflowStage.AWAITING_APPROVAL)
+                assert first_confirming_plan_dict is not None
                 decision = await self.approval.request_approval(
-                    validation_response["plan"], explanation
+                    first_confirming_plan_dict, explanation
                 )
                 completed.append("operator_approval")
                 if decision is None:
@@ -286,6 +317,7 @@ class EnergySkillWorkflow:
                             runtime_revision=runtime_revision,
                             plan_id=plan_id,
                             validation_digest=validation_digest,
+                            bundle=bundle,
                             proposal=proposal,
                             explanation=explanation,
                         )
@@ -301,6 +333,7 @@ class EnergySkillWorkflow:
                             runtime_revision=runtime_revision,
                             plan_id=plan_id,
                             validation_digest=validation_digest,
+                            bundle=bundle,
                             proposal=proposal,
                             explanation=explanation,
                             diagnostics=[
@@ -320,8 +353,7 @@ class EnergySkillWorkflow:
                     history=history,
                     completed=completed,
                     runtime_revision=runtime_revision,
-                    plan_id=plan_id,
-                    validation_digest=validation_digest,
+                    bundle=bundle,
                     proposal=proposal,
                     explanation=explanation,
                     approval=decision,
@@ -332,8 +364,7 @@ class EnergySkillWorkflow:
                 history=history,
                 completed=completed,
                 runtime_revision=runtime_revision,
-                plan_id=plan_id,
-                validation_digest=validation_digest,
+                bundle=bundle,
                 proposal=proposal,
                 explanation=explanation,
                 approval=None,
@@ -419,8 +450,7 @@ class EnergySkillWorkflow:
                 history=list(stored.stage_history),
                 completed=list(stored.completed_operations),
                 runtime_revision=stored.runtime_revision,
-                plan_id=stored.plan_id,
-                validation_digest=stored.validation_digest,
+                bundle=list(stored.bundle),
                 proposal=stored.proposal,
                 explanation=stored.explanation,
                 approval=decision,
@@ -444,13 +474,12 @@ class EnergySkillWorkflow:
         history: list[WorkflowStage],
         completed: list[str],
         runtime_revision: str | None,
-        plan_id: str | None,
-        validation_digest: str | None,
+        bundle: list[dict[str, Any]],
         proposal: dict[str, Any] | None,
         explanation: dict[str, Any] | None,
         approval: ApprovalDecision | None,
     ) -> SkillRunResult:
-        if not plan_id or not validation_digest or not runtime_revision:
+        if not bundle or not runtime_revision:
             return self._store(
                 self._resume_failure(
                     self._result(
@@ -460,13 +489,12 @@ class EnergySkillWorkflow:
                         history=history,
                         completed=completed,
                         runtime_revision=runtime_revision,
-                        plan_id=plan_id,
-                        validation_digest=validation_digest,
+                        bundle=bundle,
                         proposal=proposal,
                         explanation=explanation,
                     ),
                     "missing_execution_boundary",
-                    "Validated plan ID, digest and runtime revision are required",
+                    "A validated plan bundle and runtime revision are required",
                 )
             )
         try:
@@ -486,48 +514,89 @@ class EnergySkillWorkflow:
                     message="Runtime revision changed before execution",
                 )
             self._transition(history, WorkflowStage.EXECUTING)
-            arguments: dict[str, Any] = {
-                "plan_id": plan_id,
-                "validation_digest": validation_digest,
-                "dry_run": False,
-            }
-            if approval is not None:
-                approval_response = await self._call_tool(
-                    "mcp",
-                    "request_approval",
-                    {
-                        "plan_id": plan_id,
-                        "validation_digest": validation_digest,
-                        "approved_by": approval.approved_by or "operator",
-                    },
-                    stage=WorkflowStage.EXECUTING,
-                )
-                arguments["approval_id"] = self._required_string(
-                    approval_response, "approval_id", "approval issuance"
-                )
-            response = await self._call(
-                "execute_plan", arguments, stage=WorkflowStage.EXECUTING
-            )
-            outcomes = response.get("outcomes")
-            if not isinstance(outcomes, list) or not outcomes:
+            now = datetime.now(UTC)
+            scheduled_plan_ids: list[str] = []
+            outcomes: list[Any] = []
+            for entry in bundle:
+                member_plan_id = entry["plan_id"]
+                member_digest = entry["validation_digest"]
+                approval_id: str | None = None
+                if entry["requires_confirmation"]:
+                    if approval is None:
+                        raise _WorkflowFailure(
+                            status=WorkflowStatus.BLOCKED,
+                            stage=WorkflowStage.EXECUTING,
+                            code="approval_required",
+                            message="A bundle member requires confirmation but none was granted",
+                        )
+                    approval_response = await self._call_tool(
+                        "mcp",
+                        "request_approval",
+                        {
+                            "plan_id": member_plan_id,
+                            "validation_digest": member_digest,
+                            "approved_by": approval.approved_by or "operator",
+                            "operator_token": approval.operator_token or "",
+                        },
+                        stage=WorkflowStage.EXECUTING,
+                    )
+                    approval_id = self._required_string(
+                        approval_response, "approval_id", "approval issuance"
+                    )
+                execute_at = entry["execute_at"]
+                member_due_now = execute_at is None or datetime.fromisoformat(execute_at) <= now
+                if member_due_now:
+                    arguments: dict[str, Any] = {
+                        "plan_id": member_plan_id,
+                        "validation_digest": member_digest,
+                        "dry_run": False,
+                    }
+                    if approval_id is not None:
+                        arguments["approval_id"] = approval_id
+                    response = await self._call(
+                        "execute_plan", arguments, stage=WorkflowStage.EXECUTING
+                    )
+                    member_outcomes = response.get("outcomes")
+                    if not isinstance(member_outcomes, list) or not member_outcomes:
+                        raise _WorkflowFailure(
+                            status=WorkflowStatus.FAILED,
+                            stage=WorkflowStage.FAILED,
+                            code="malformed_execution_result",
+                            message="Domotics execution returned no terminal outcomes",
+                        )
+                    if not all(
+                        isinstance(outcome, dict)
+                        and outcome.get("status") == "confirmed_success"
+                        for outcome in member_outcomes
+                    ):
+                        raise _WorkflowFailure(
+                            status=WorkflowStatus.FAILED,
+                            stage=WorkflowStage.FAILED,
+                            code="execution_not_confirmed",
+                            message="Domotics returned a non-confirmed execution outcome",
+                            details={"outcome_count": len(member_outcomes)},
+                        )
+                    outcomes.extend(member_outcomes)
+                    completed.append("execute_plan")
+                else:
+                    schedule_arguments: dict[str, Any] = {
+                        "plan_id": member_plan_id,
+                        "validation_digest": member_digest,
+                        "execute_at": execute_at,
+                    }
+                    if approval_id is not None:
+                        schedule_arguments["approval_id"] = approval_id
+                    await self._call_tool(
+                        "mcp", "schedule_plan", schedule_arguments, stage=WorkflowStage.EXECUTING
+                    )
+                    scheduled_plan_ids.append(member_plan_id)
+                    completed.append("schedule_plan")
+            if not outcomes and not scheduled_plan_ids:
                 raise _WorkflowFailure(
                     status=WorkflowStatus.FAILED,
                     stage=WorkflowStage.FAILED,
                     code="malformed_execution_result",
                     message="Domotics execution returned no terminal outcomes",
-                )
-            completed.append("execute_plan")
-            if not all(
-                isinstance(outcome, dict)
-                and outcome.get("status") == "confirmed_success"
-                for outcome in outcomes
-            ):
-                raise _WorkflowFailure(
-                    status=WorkflowStatus.FAILED,
-                    stage=WorkflowStage.FAILED,
-                    code="execution_not_confirmed",
-                    message="Domotics returned a non-confirmed execution outcome",
-                    details={"outcome_count": len(outcomes)},
                 )
             result = self._result(
                 run_id=run_id,
@@ -536,8 +605,8 @@ class EnergySkillWorkflow:
                 history=self._with_stage(history, WorkflowStage.COMPLETED),
                 completed=completed,
                 runtime_revision=runtime_revision,
-                plan_id=plan_id,
-                validation_digest=validation_digest,
+                bundle=bundle,
+                scheduled_plan_ids=scheduled_plan_ids,
                 proposal=proposal,
                 explanation=explanation,
             )
@@ -550,8 +619,7 @@ class EnergySkillWorkflow:
                 history=self._with_stage(history, failure.stage),
                 completed=completed,
                 runtime_revision=runtime_revision,
-                plan_id=plan_id,
-                validation_digest=validation_digest,
+                bundle=bundle,
                 proposal=proposal,
                 explanation=explanation,
                 diagnostics=[
@@ -780,6 +848,29 @@ class EnergySkillWorkflow:
             ) from error
 
     @staticmethod
+    def _required_plans(response: dict[str, Any]) -> list[Plan]:
+        plans_field = response.get("plans")
+        raw_plans: list[Any]
+        if isinstance(plans_field, list) and plans_field:
+            raw_plans = plans_field
+        else:
+            raw_plans = [response.get("plan")]
+        try:
+            parsed: list[Plan] = []
+            for raw_plan in raw_plans:
+                if not isinstance(raw_plan, Mapping):
+                    raise ValueError("proposal plan is missing")
+                parsed.append(Plan.model_validate(raw_plan))
+            return parsed
+        except (TypeError, ValueError, ValidationError) as error:
+            raise _WorkflowFailure(
+                status=WorkflowStatus.BLOCKED,
+                stage=WorkflowStage.PROPOSAL_READY,
+                code="invalid_proposal",
+                message="Optimizer proposal does not contain a valid plan bundle",
+            ) from error
+
+    @staticmethod
     def _check_validation(response: dict[str, Any]) -> Mapping[str, Any]:
         validation = response.get("validation")
         plan = response.get("plan")
@@ -875,10 +966,19 @@ class EnergySkillWorkflow:
         runtime_revision: str | None = None,
         plan_id: str | None = None,
         validation_digest: str | None = None,
+        bundle: list[dict[str, Any]] | None = None,
+        scheduled_plan_ids: list[str] | None = None,
         proposal: dict[str, Any] | None = None,
         explanation: dict[str, Any] | None = None,
         diagnostics: list[WorkflowDiagnostic] | None = None,
     ) -> SkillRunResult:
+        resolved_bundle = list(bundle or [])
+        resolved_plan_id = plan_id or (
+            resolved_bundle[0]["plan_id"] if resolved_bundle else None
+        )
+        resolved_digest = validation_digest or (
+            resolved_bundle[0]["validation_digest"] if resolved_bundle else None
+        )
         return SkillRunResult(
             run_id=run_id,
             status=status,
@@ -886,8 +986,12 @@ class EnergySkillWorkflow:
             stage_history=EnergySkillWorkflow._with_stage(history, stage),
             completed_operations=list(completed or []),
             runtime_revision=runtime_revision,
-            plan_id=plan_id,
-            validation_digest=validation_digest,
+            plan_id=resolved_plan_id,
+            validation_digest=resolved_digest,
+            plan_ids=[entry["plan_id"] for entry in resolved_bundle],
+            validation_digests=[entry["validation_digest"] for entry in resolved_bundle],
+            scheduled_plan_ids=list(scheduled_plan_ids or []),
+            bundle=resolved_bundle,
             proposal=proposal,
             explanation=explanation,
             diagnostics=list(diagnostics or []),
@@ -921,6 +1025,7 @@ class EnergySkillWorkflow:
             runtime_revision=pending.runtime_revision,
             plan_id=pending.plan_id,
             validation_digest=pending.validation_digest,
+            bundle=list(pending.bundle),
             proposal=pending.proposal,
             explanation=pending.explanation,
             diagnostics=[

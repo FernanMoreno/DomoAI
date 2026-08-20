@@ -24,6 +24,28 @@ def test_zigbee2mqtt_settings_are_loaded_with_secret_safe_defaults(
     assert "secret-token" not in repr(settings)
 
 
+def test_operator_approval_token_defaults_to_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOMOAI_OPERATOR_APPROVAL_TOKEN", raising=False)
+
+    settings = Settings.from_environment()
+
+    assert settings.operator_approval_token is None
+
+
+def test_operator_approval_token_is_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_OPERATOR_APPROVAL_TOKEN", "let-me-in")
+
+    settings = Settings.from_environment()
+
+    assert settings.operator_approval_token is not None
+    assert settings.operator_approval_token.get_secret_value() == "let-me-in"
+    assert "let-me-in" not in repr(settings)
+
+
 def test_settings_allow_multiple_live_sources() -> None:
     settings = Settings(
         home_assistant_url="http://home-assistant.test",

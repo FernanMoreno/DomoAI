@@ -5,6 +5,47 @@ from domoai.runtime.registry import DeviceRegistry
 from tests.fixtures.multi_adapter import entity, power_capability, source_snapshot
 
 
+def test_two_distinct_identities_colliding_on_the_same_generated_id_get_distinct_ids() -> None:
+    registry = DeviceRegistry()
+    colliding_entities = [
+        {
+            "entity_id": "light.first",
+            "device_id": "device-first",
+            "identity_keys": ["fixture:device:device-first"],
+            "connections": [],
+            "name": "Main Light",
+            "area_id": "living_room",
+            "domain": "light",
+            "semantic_type": "light",
+            "capabilities": [power_capability()],
+            "available": True,
+        },
+        {
+            "entity_id": "light.second",
+            "device_id": "device-second",
+            "identity_keys": ["fixture:device:device-second"],
+            "connections": [],
+            "name": "Main Light",
+            "area_id": "living_room",
+            "domain": "light",
+            "semantic_type": "light",
+            "capabilities": [power_capability()],
+            "available": True,
+        },
+    ]
+    snapshot = AdapterSnapshot(source_entities=colliding_entities, source_states=[])
+
+    registry.apply_snapshot(snapshot, "fixture")
+
+    first_id = registry.canonical_id_for_source("fixture", "light.first")
+    second_id = registry.canonical_id_for_source("fixture", "light.second")
+    assert first_id is not None
+    assert second_id is not None
+    assert first_id != second_id
+    assert first_id == "living_room.main-light"
+    assert second_id == "living_room.main-light-2"
+
+
 def test_device_removed_when_no_longer_reported() -> None:
     registry = DeviceRegistry()
     registry.apply_snapshot(source_snapshot(adapter_id="home_assistant"), "home_assistant")

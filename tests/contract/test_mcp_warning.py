@@ -26,6 +26,5 @@ def test_both_mcp_servers_construct_without_incomplete_settings_warning() -> Non
                 registry=cast(Any, None),
                 plan_service=cast(Any, None),
                 optimization_service=cast(Any, None),
-                runtime_revision="test-revision",
             )
         )

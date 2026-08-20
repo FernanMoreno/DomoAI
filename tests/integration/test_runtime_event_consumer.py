@@ -7,11 +7,13 @@ from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.domain.models import AdapterHealth, AdapterSnapshot, SourceEvent, StateStatus
+from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.matter_server import event_message, node_snapshot, server_info
+from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
 
 
 class _StopTest(Exception):
@@ -50,6 +52,37 @@ async def test_source_event_refreshes_canonical_state_and_revision() -> None:
     assert state.status is StateStatus.UNAVAILABLE
     assert state_store.runtime_revision == "rev-2"
     assert audit.events[-1].event_type == "source_event_applied"
+
+
+@pytest.mark.asyncio
+async def test_composite_state_changed_event_from_non_primary_adapter_is_applied() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
+    )
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+
+    for state in modbus.snapshot.source_states:
+        if state["entity_id"] == "sensor.modbus.temperature":
+            state["value"] = 42.0
+
+    await consumer._apply_event(
+        SourceEvent(kind="state_changed", payload={"source_adapter_id": "modbus"})
+    )
+
+    state = await state_store.get("modbus.environment", "temperature")
+    assert state is not None
+    assert state.value == 42.0
 
 
 class DisconnectedAdapter(SimulatedHomeAdapter):

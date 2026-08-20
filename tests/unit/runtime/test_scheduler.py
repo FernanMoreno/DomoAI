@@ -76,6 +76,156 @@ def _plan(device_id: str, *, plan_id: str, execute_at: datetime) -> Plan:
     )
 
 
+class _StopTest(BaseException):
+    """Sentinel used to deterministically end a `run()` loop under test.
+
+    Must be a `BaseException`, not `Exception` — `Scheduler.run()`'s own
+    `except Exception` isolation (this feature) would otherwise swallow it
+    like any other unexpected failure, hanging the test forever.
+    """
+
+
+class _FailingExecutorWrapper:
+    """Delegates to a real PlanExecutor, except raising for one matching plan id."""
+
+    def __init__(self, real_executor: PlanExecutor, failing_plan_prefix: str) -> None:
+        self._real = real_executor
+        self._failing_plan_prefix = failing_plan_prefix
+        self.plan_service = real_executor.plan_service
+
+    async def execute(self, plan: Plan):
+        if plan.id.startswith(self._failing_plan_prefix):
+            raise RuntimeError("simulated unexpected execution failure")
+        return await self._real.execute(plan)
+
+
+@pytest.mark.asyncio
+async def test_one_plan_failure_does_not_abandon_other_due_plans_in_sweep(tmp_path) -> None:
+    adapter, plan_service, scheduler, repository, audit = await _build_scheduler(tmp_path)
+    # Distinct devices per plan — sharing one device would make a later
+    # plan's execution legitimately raise DomainError(STALE_PLAN) once an
+    # earlier plan in the sweep mutates that device's state, which would
+    # confound this test's isolation assertion with an unrelated, already
+    # correct safety mechanism.
+    light_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    switch_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "switch"
+    )
+    climate_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "climate"
+    )
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    plans = {
+        "plan-a": Plan(
+            id="plan-a",
+            execute_at=due_at,
+            commands=[
+                Command(
+                    id="plan-a:command",
+                    device_id=light_id,
+                    command="turn_on",
+                    idempotency_key="plan-a:intent",
+                )
+            ],
+        ),
+        "plan-b": Plan(
+            id="plan-b",
+            execute_at=due_at,
+            commands=[
+                Command(
+                    id="plan-b:command",
+                    device_id=switch_id,
+                    command="turn_on",
+                    idempotency_key="plan-b:intent",
+                )
+            ],
+        ),
+        "plan-c": Plan(
+            id="plan-c",
+            execute_at=due_at,
+            commands=[
+                Command(
+                    id="plan-c:command",
+                    device_id=climate_id,
+                    command="set_temperature",
+                    value=22,
+                    unit="°C",
+                    idempotency_key="plan-c:intent",
+                )
+            ],
+        ),
+    }
+    for plan in plans.values():
+        validated = plan_service.validate(plan)
+        await scheduler.schedule(validated)
+    scheduler.executor = _FailingExecutorWrapper(scheduler.executor, "plan-b")
+
+    results = await scheduler.run_due()
+
+    outcomes = {entry["plan_id"]: entry["outcome"] for entry in results}
+    assert outcomes["plan-a"] == "executed"
+    assert outcomes["plan-b"] == "error"
+    assert outcomes["plan-c"] == "executed"
+    assert len(adapter.calls) == 2
+    assert any(event.event_type == "schedule_execution_error" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_one_recurring_occurrence_failure_does_not_abandon_other_due_schedules(
+    tmp_path,
+) -> None:
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    for schedule_id in ("recurring-a", "recurring-b", "recurring-c"):
+        await scheduler.recurring_repository.create(
+            schedule_id, [_command(device_id, plan_id=schedule_id)], rule, due_at
+        )
+    scheduler.executor = _FailingExecutorWrapper(scheduler.executor, "recurring-b@")
+
+    results = await scheduler.run_due_recurring()
+
+    outcomes = {entry["schedule_id"]: entry["outcome"] for entry in results}
+    assert outcomes["recurring-a"] == "executed"
+    assert outcomes["recurring-b"] == "error"
+    assert outcomes["recurring-c"] == "executed"
+    assert len(adapter.calls) == 2
+    assert any(event.event_type == "recurring_occurrence_error" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_survives_a_sweep_failure_and_reaches_next_poll_cycle(tmp_path) -> None:
+    _adapter, _plan_service, scheduler, _repository, audit = await _build_scheduler(
+        tmp_path, clock=FixedClock(datetime.now(UTC))
+    )
+    scheduler.poll_interval = timedelta(seconds=0)
+
+    call_count = 0
+    original_run_due = scheduler.run_due
+
+    async def flaky_run_due(*args: object, **kwargs: object):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated unexpected sweep failure")
+        if call_count == 2:
+            raise _StopTest
+        return await original_run_due(*args, **kwargs)
+
+    scheduler.run_due = flaky_run_due  # type: ignore[method-assign]
+
+    with pytest.raises(_StopTest):
+        await scheduler.run()
+
+    assert call_count == 2
+    assert any(event.event_type == "schedule_sweep_error" for event in audit.events)
+
+
 @pytest.mark.asyncio
 async def test_due_plan_within_grace_window_executes(tmp_path) -> None:
     adapter, plan_service, scheduler, repository, _ = await _build_scheduler(tmp_path)

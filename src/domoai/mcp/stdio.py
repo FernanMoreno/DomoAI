@@ -51,7 +51,6 @@ async def build_fixture_server() -> FastMCP:
             plan_service,
             CpSatOptimizer(registry),
         ),
-        runtime_revision=plan_service.current_revision,
     )
     return create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
@@ -86,7 +85,6 @@ async def build_configured_server(
             runtime.plan_service,
             CpSatOptimizer(runtime.registry),
         ),
-        runtime_revision=runtime.plan_service.current_revision,
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context)

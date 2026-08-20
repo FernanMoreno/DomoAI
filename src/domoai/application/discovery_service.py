@@ -167,6 +167,7 @@ class DiscoveryService:
                         "retained_value": state.value,
                     },
                 )
+                state = state.model_copy(update={"status": StateStatus.INVALID, "value": None})
             seen_this_cycle[key] = state
             await self.state_store.save(state)
             states.append(state)

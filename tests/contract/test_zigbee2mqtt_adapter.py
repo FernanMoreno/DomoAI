@@ -32,6 +32,32 @@ async def build_adapter() -> tuple[InMemoryMqttTransport, Zigbee2MqttAdapter]:
     return transport, adapter
 
 
+class _IdleOncePersistentTransport(InMemoryMqttTransport):
+    """Forces the first `receive()` call to time out, regardless of queue state."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._idle_returned = False
+
+    async def receive(self, timeout: float | None = None):  # type: ignore[override]
+        if not self._idle_returned:
+            self._idle_returned = True
+            return None
+        return await super().receive(timeout)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_events_survives_idle_poll_and_yields_next_event() -> None:
+    transport = _IdleOncePersistentTransport()
+    adapter = Zigbee2MqttAdapter(transport, discovery_timeout=0.05)
+    await adapter.connect()
+
+    transport.enqueue(state_message("zigbee2mqtt/living_room/main_light", {"state": "ON"}))
+    event = await anext(adapter.subscribe_events())
+
+    assert event.kind == "state_changed"
+
+
 @pytest.mark.asyncio
 async def test_zigbee2mqtt_discovery_returns_canonical_devices_and_capabilities() -> None:
     _transport, adapter = await build_adapter()
@@ -165,7 +191,8 @@ async def test_state_and_malformed_payloads_become_events_or_diagnostics() -> No
         )
     )
 
-    events = [event async for event in adapter.subscribe_events()]
+    subscription = adapter.subscribe_events()
+    events = [await anext(subscription) for _ in range(4)]
 
     assert any(event.kind == "state_changed" for event in events)
     assert any(event.kind == "availability_changed" for event in events)

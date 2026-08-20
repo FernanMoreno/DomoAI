@@ -106,12 +106,13 @@ class RuntimeEventConsumer:
         """Apply state-only events cheaply; fall back to full discovery otherwise."""
 
         if event.kind == _VALUE_ONLY_EVENT_KIND:
-            await self._apply_state_only()
+            await self._apply_state_only(event)
         else:
             await self.discovery.refresh()
 
-    async def _apply_state_only(self) -> None:
-        source_refs = self._known_source_refs(self.adapter.adapter_id)
+    async def _apply_state_only(self, event: SourceEvent) -> None:
+        source_adapter_id = event.payload.get("source_adapter_id", self.adapter.adapter_id)
+        source_refs = self._known_source_refs(source_adapter_id)
         if not source_refs:
             return
         snapshots = await self.adapter.read_state(source_refs)

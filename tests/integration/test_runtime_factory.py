@@ -14,7 +14,7 @@ from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.application.runtime_factory import build_runtime, create_adapter
 from domoai.config.settings import Settings
-from domoai.domain.models import Command, StateStatus
+from domoai.domain.models import Command, Plan, PlanStatus, StateStatus
 from domoai.optimizer.providers import ComposedEnergyContextProvider
 from domoai.persistence.repositories import (
     AuditEventRepository,
@@ -190,6 +190,45 @@ async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_build_runtime_recovers_plans_orphaned_by_a_crash(tmp_path: Path) -> None:
+    database_path = tmp_path / "runtime.sqlite3"
+    database = SQLiteDatabase(database_path)
+    await database.initialize()
+    orphaned_plan = Plan(
+        id="orphaned-crash-plan-1",
+        status=PlanStatus.EXECUTING,
+        commands=[
+            Command(
+                id="orphaned-crash-command-1",
+                device_id="garden.garden-pump",
+                command="turn_on",
+                idempotency_key="orphaned-crash-intent-1",
+            )
+        ],
+    )
+    await PlanRepository(database).save(orphaned_plan)
+    await database.close()
+
+    runtime = await build_runtime(
+        Settings(database_path=database_path),
+        adapter=SimulatedHomeAdapter(),
+    )
+    await runtime.close()
+
+    database = SQLiteDatabase(database_path)
+    await database.initialize()
+    recovered_plan = await PlanRepository(database).get(orphaned_plan.id)
+    audit_events = await AuditEventRepository(database).list_all()
+
+    assert recovered_plan is not None
+    assert recovered_plan.status is PlanStatus.UNKNOWN
+    assert any(
+        event.event_type == "plan_execution_recovered" and event.subject_id == orphaned_plan.id
+        for event in audit_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_build_runtime_threads_configured_sqlite_busy_timeout(tmp_path: Path) -> None:
     runtime = await build_runtime(
         Settings(
@@ -353,6 +392,65 @@ async def test_runtime_factory_audits_default_policy_when_unconfigured(tmp_path:
         assert runtime.plan_service.policy_engine.policies == []
         events = await runtime.audit_repository.list_all()
         assert any(event.event_type == "policy_default_applied" for event in events)
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_wires_configured_safety_limits(tmp_path: Path) -> None:
+    safety_limits_path = tmp_path / "safety-limits.toml"
+    safety_limits_path.write_text(
+        '[[limits]]\n'
+        'device_type = "climate"\n'
+        'capability = "target_temperature"\n'
+        'maximum = 22\n',
+        encoding="utf-8",
+    )
+    runtime = await build_runtime(
+        Settings(
+            database_path=tmp_path / "safety-runtime.sqlite3",
+            safety_limits_path=safety_limits_path,
+        ),
+        adapter=SimulatedHomeAdapter(),
+    )
+    try:
+        device_id = next(
+            device.id for device in runtime.registry.devices if device.type.value == "climate"
+        )
+        plan = runtime.plan_service.create_plan(
+            "safety-runtime-plan-1",
+            [
+                Command(
+                    id="safety-runtime-command-1",
+                    device_id=device_id,
+                    command="set_temperature",
+                    value=25,
+                    unit="°C",
+                    idempotency_key="safety-runtime-intent-1",
+                )
+            ],
+        )
+        validated = runtime.facade.validate_plan(plan)
+        summary = await runtime.facade.execute_plan(validated)
+
+        assert summary.outcomes[0].status.value == "rejected"
+        assert summary.outcomes[0].error is not None
+        assert summary.outcomes[0].error.code == "safety_limit_exceeded"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_audits_default_safety_kernel_when_unconfigured(
+    tmp_path: Path,
+) -> None:
+    runtime = await build_runtime(
+        Settings(database_path=tmp_path / "default-safety-runtime.sqlite3"),
+        adapter=SimulatedHomeAdapter(),
+    )
+    try:
+        events = await runtime.audit_repository.list_all()
+        assert any(event.event_type == "safety_kernel_default_applied" for event in events)
     finally:
         await runtime.close()
 

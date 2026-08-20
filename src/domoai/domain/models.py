@@ -184,6 +184,21 @@ class Precondition(StrictModel):
     expected: ScalarValue | None
 
 
+class SafetyLimit(StrictModel):
+    device_type: DeviceType
+    capability: str = Field(min_length=1)
+    minimum: float | int | None = None
+    maximum: float | int | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> SafetyLimit:
+        if self.minimum is None and self.maximum is None:
+            raise ValueError("safety limit must set minimum, maximum, or both")
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        return self
+
+
 class Command(StrictModel):
     id: str = Field(min_length=1)
     device_id: str = Field(min_length=1)
@@ -271,6 +286,17 @@ class Plan(StrictModel):
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
     approval: Approval | None = None
     execution: ExecutionSummary | None = None
+
+    @model_validator(mode="after")
+    def validate_timestamps(self) -> Plan:
+        for field_name, value in (
+            ("created_at", self.created_at),
+            ("expires_at", self.expires_at),
+            ("execute_at", self.execute_at),
+        ):
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+        return self
 
 
 class RecurrenceRule(StrictModel):

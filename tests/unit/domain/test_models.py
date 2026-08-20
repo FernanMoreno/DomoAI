@@ -86,3 +86,58 @@ def test_plan_rejects_more_than_fifty_commands() -> None:
 
     with pytest.raises(ValidationError, match="50"):
         Plan(id="plan-1", commands=commands)
+
+
+def _single_command() -> list[Command]:
+    return [
+        Command(
+            id="command-1",
+            device_id="living_room.main_light",
+            command="turn_on",
+            idempotency_key="intent-1",
+        )
+    ]
+
+
+def test_plan_rejects_naive_execute_at() -> None:
+    with pytest.raises(ValidationError, match="execute_at"):
+        Plan(
+            id="plan-naive-execute-at",
+            execute_at=datetime(2026, 8, 15, 10, 0, 0),
+            commands=_single_command(),
+        )
+
+
+def test_plan_rejects_naive_expires_at() -> None:
+    with pytest.raises(ValidationError, match="expires_at"):
+        Plan(
+            id="plan-naive-expires-at",
+            expires_at=datetime(2026, 8, 15, 10, 0, 0),
+            commands=_single_command(),
+        )
+
+
+def test_plan_rejects_naive_created_at() -> None:
+    with pytest.raises(ValidationError, match="created_at"):
+        Plan(
+            id="plan-naive-created-at",
+            created_at=datetime(2026, 8, 15, 10, 0, 0),
+            commands=_single_command(),
+        )
+
+
+def test_plan_accepts_aware_timestamps() -> None:
+    plan = Plan(
+        id="plan-aware-timestamps",
+        created_at=datetime(2026, 8, 15, 9, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 15, 11, 0, 0, tzinfo=UTC),
+        execute_at=datetime(2026, 8, 15, 10, 0, 0, tzinfo=UTC),
+        commands=_single_command(),
+    )
+    assert plan.execute_at is not None
+
+
+def test_plan_accepts_omitted_optional_timestamps() -> None:
+    plan = Plan(id="plan-omitted-timestamps", commands=_single_command())
+    assert plan.execute_at is None
+    assert plan.expires_at is None

@@ -69,6 +69,8 @@ class StateStore:
             ):
                 updated = snapshot.model_copy(update={"status": StateStatus.STALE})
                 self._snapshots[key] = updated
+                self._version_counter += 1
+                self._state_versions[key] = self._version_counter
                 stale.append(updated)
         return stale
 
@@ -80,5 +82,7 @@ class StateStore:
             if snapshot.status is StateStatus.CURRENT:
                 updated = snapshot.model_copy(update={"status": StateStatus.STALE})
                 self._snapshots[key] = updated
+                self._version_counter += 1
+                self._state_versions[key] = self._version_counter
                 stale.append(updated)
         return stale

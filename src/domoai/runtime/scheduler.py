@@ -70,8 +70,21 @@ class Scheduler:
                 )
                 results.append({"plan_id": plan.id, "outcome": "missed"})
                 continue
-            await self.executor.execute(plan)
-            await self.repository.mark_executed(plan.id)
+            try:
+                await self.executor.execute(plan)
+                await self.repository.mark_executed(plan.id)
+            except Exception as error:
+                self.audit.append(
+                    event_type="schedule_execution_error",
+                    actor="runtime",
+                    subject_id=plan.id,
+                    payload={
+                        "error": str(error)[:200],
+                        "error_code": getattr(error, "code", None),
+                    },
+                )
+                results.append({"plan_id": plan.id, "outcome": "error"})
+                continue
             results.append({"plan_id": plan.id, "outcome": "executed"})
         return results
 
@@ -107,23 +120,37 @@ class Scheduler:
                 id=f"{schedule_id}@{execute_at.isoformat()}",
                 commands=commands,
             )
-            validated = self.executor.plan_service.validate(plan)
-            if validated.status is PlanStatus.READY:
-                await self.executor.execute(validated)
-                results.append({"schedule_id": schedule_id, "outcome": "executed"})
-            else:
-                reason = (
-                    "requires_confirmation"
-                    if validated.status is PlanStatus.REQUIRES_CONFIRMATION
-                    else "invalid"
-                )
+            try:
+                validated = self.executor.plan_service.validate(plan)
+                if validated.status is PlanStatus.READY:
+                    await self.executor.execute(validated)
+                    results.append({"schedule_id": schedule_id, "outcome": "executed"})
+                else:
+                    reason = (
+                        "requires_confirmation"
+                        if validated.status is PlanStatus.REQUIRES_CONFIRMATION
+                        else "invalid"
+                    )
+                    self.audit.append(
+                        event_type="recurring_occurrence_skipped",
+                        actor="runtime",
+                        subject_id=plan.id,
+                        payload={"schedule_id": schedule_id, "reason": reason},
+                    )
+                    results.append({"schedule_id": schedule_id, "outcome": "skipped"})
+            except Exception as error:
                 self.audit.append(
-                    event_type="recurring_occurrence_skipped",
+                    event_type="recurring_occurrence_error",
                     actor="runtime",
                     subject_id=plan.id,
-                    payload={"schedule_id": schedule_id, "reason": reason},
+                    payload={
+                        "schedule_id": schedule_id,
+                        "error": str(error)[:200],
+                        "error_code": getattr(error, "code", None),
+                    },
                 )
-                results.append({"schedule_id": schedule_id, "outcome": "skipped"})
+                results.append({"schedule_id": schedule_id, "outcome": "error"})
+                continue
             next_time = next_occurrence(rule, execute_at)
             await self.recurring_repository.advance(schedule_id, next_time)
         return results
@@ -131,5 +158,21 @@ class Scheduler:
     async def run(self) -> None:
         while True:
             await asyncio.sleep(self.poll_interval.total_seconds())
-            await self.run_due()
-            await self.run_due_recurring()
+            try:
+                await self.run_due()
+            except Exception as error:
+                self.audit.append(
+                    event_type="schedule_sweep_error",
+                    actor="runtime",
+                    subject_id="scheduler",
+                    payload={"error": str(error)[:200]},
+                )
+            try:
+                await self.run_due_recurring()
+            except Exception as error:
+                self.audit.append(
+                    event_type="recurring_sweep_error",
+                    actor="runtime",
+                    subject_id="scheduler",
+                    payload={"error": str(error)[:200]},
+                )

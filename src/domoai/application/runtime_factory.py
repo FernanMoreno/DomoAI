@@ -29,6 +29,7 @@ from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.config.policy_loader import load_policy_file
 from domoai.config.risk_classification import load_risk_overrides_file
+from domoai.config.safety_kernel_loader import load_safety_limits_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
@@ -57,8 +58,10 @@ from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.provider_sdk import ProviderRegistry
+from domoai.runtime.recovery import PlanRecoveryService
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.risk_classifier import RiskClassifier
+from domoai.runtime.safety_kernel import SafetyKernel
 from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 
@@ -329,7 +332,19 @@ async def build_runtime(
     policy_engine = PolicyEngine(policies, risk_classifier)
     plan_service = PlanService(registry, state_store, policy_engine, audit, clock=clock)
     plan_repository = PlanRepository(database)
+    await PlanRecoveryService(plan_repository, audit).recover_orphaned_plans()
     outcome_repository = ExecutionOutcomeRepository(database)
+    if resolved_settings.safety_limits_path is not None:
+        safety_limits = load_safety_limits_file(resolved_settings.safety_limits_path)
+    else:
+        safety_limits = []
+        audit.append(
+            event_type="safety_kernel_default_applied",
+            actor="runtime",
+            subject_id="build_runtime",
+            payload={"reason": "no safety_limits_path configured"},
+        )
+    safety_kernel = SafetyKernel(safety_limits)
     executor = PlanExecutor(
         selected_adapter,
         plan_service,
@@ -337,6 +352,7 @@ async def build_runtime(
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
         clock=clock,
+        safety_kernel=safety_kernel,
     )
     facade = DomoticsFacade(plan_service, executor)
     event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)

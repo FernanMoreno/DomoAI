@@ -150,7 +150,7 @@ class MatterServerAdapter:
         while True:
             message = await self.transport.receive(1.0)
             if message is None:
-                return
+                continue
             event = self._ingest(message)
             if event is not None:
                 yield event

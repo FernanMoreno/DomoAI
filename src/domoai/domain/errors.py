@@ -26,6 +26,7 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
     PRECONDITION_FAILED = "precondition_failed"
     NOT_YET_DUE = "not_yet_due"
+    SAFETY_LIMIT_EXCEEDED = "safety_limit_exceeded"
 
 
 class DomainError(ValueError):

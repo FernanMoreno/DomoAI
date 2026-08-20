@@ -209,6 +209,16 @@ class PlanRepository:
         self._repository.database.connection.commit()
         return cursor.rowcount > 0
 
+    async def list_by_status(self, statuses: frozenset[PlanStatus]) -> list[Plan]:
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = self._repository.database.connection.execute(
+            f"SELECT payload FROM plans WHERE status IN ({placeholders})",
+            tuple(status.value for status in statuses),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [Plan.model_validate(json.loads(row[0])) for row in rows]
+
 
 class DeviceRepository:
     def __init__(self, database: SQLiteDatabase) -> None:

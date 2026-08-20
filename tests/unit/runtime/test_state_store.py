@@ -121,3 +121,99 @@ async def test_mark_stale_uses_injected_clock_when_no_explicit_now_given() -> No
 
     assert len(stale) == 1
     assert stale[0].status is StateStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_advances_version_for_transitioned_snapshot() -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    store = StateStore(timedelta(minutes=5), clock=clock)
+    snapshot = StateSnapshot(
+        device_id="light.kitchen",
+        capability="brightness",
+        value=50,
+        observed_at=initial,
+        received_at=initial,
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.kitchen"),
+    )
+    await store.save(snapshot)
+    version_before = store.state_version("light.kitchen", "brightness")
+
+    clock.set(initial + timedelta(minutes=6))
+    stale = await store.mark_stale()
+
+    assert len(stale) == 1
+    assert store.state_version("light.kitchen", "brightness") != version_before
+
+
+@pytest.mark.asyncio
+async def test_mark_all_stale_advances_version_for_transitioned_snapshot() -> None:
+    store = StateStore()
+    await store.save(_snapshot(50))
+    version_before = store.state_version("light.kitchen", "brightness")
+
+    stale = await store.mark_all_stale()
+
+    assert len(stale) == 1
+    assert store.state_version("light.kitchen", "brightness") != version_before
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_does_not_advance_version_for_already_stale_snapshot() -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    store = StateStore(timedelta(minutes=5), clock=clock)
+    snapshot = StateSnapshot(
+        device_id="light.kitchen",
+        capability="brightness",
+        value=50,
+        observed_at=initial,
+        received_at=initial,
+        status=StateStatus.STALE,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.kitchen"),
+    )
+    await store.save(snapshot)
+    version_before = store.state_version("light.kitchen", "brightness")
+
+    clock.set(initial + timedelta(minutes=6))
+    stale = await store.mark_stale()
+
+    assert stale == []
+    assert store.state_version("light.kitchen", "brightness") == version_before
+
+
+@pytest.mark.asyncio
+async def test_mark_all_stale_does_not_advance_version_for_already_stale_snapshot() -> None:
+    store = StateStore()
+    await store.save(_snapshot(50, status=StateStatus.STALE))
+    version_before = store.state_version("light.kitchen", "brightness")
+
+    stale = await store.mark_all_stale()
+
+    assert stale == []
+    assert store.state_version("light.kitchen", "brightness") == version_before
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_does_not_advance_version_for_snapshot_not_yet_stale() -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    store = StateStore(timedelta(minutes=5), clock=clock)
+    snapshot = StateSnapshot(
+        device_id="light.kitchen",
+        capability="brightness",
+        value=50,
+        observed_at=initial,
+        received_at=initial,
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.kitchen"),
+    )
+    await store.save(snapshot)
+    version_before = store.state_version("light.kitchen", "brightness")
+
+    clock.set(initial + timedelta(minutes=1))
+    stale = await store.mark_stale()
+
+    assert stale == []
+    assert store.state_version("light.kitchen", "brightness") == version_before

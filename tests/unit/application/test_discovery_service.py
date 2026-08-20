@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from domoai.application.discovery_service import DiscoveryService
-from domoai.domain.models import AdapterSnapshot
+from domoai.domain.models import AdapterSnapshot, StateStatus
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
@@ -70,7 +70,8 @@ async def test_disagreeing_cross_adapter_state_is_audited_as_state_source_confli
 
     cached = await state_store.get("shared.state_conflict_device", "power")
     assert cached is not None
-    assert cached.value == payload["retained_value"]
+    assert cached.status is StateStatus.INVALID
+    assert cached.value is None
 
 
 @pytest.mark.asyncio
@@ -97,6 +98,10 @@ async def test_agreeing_cross_adapter_state_records_no_conflict() -> None:
     await discovery.refresh()
 
     assert not any(event.event_type == "state_source_conflict" for event in audit.events)
+    cached = await state_store.get("shared.state_conflict_device", "power")
+    assert cached is not None
+    assert cached.status is StateStatus.CURRENT
+    assert cached.value is True
 
 
 @pytest.mark.asyncio
@@ -117,3 +122,7 @@ async def test_single_source_capability_records_no_conflict() -> None:
     await discovery.refresh()
 
     assert not any(event.event_type == "state_source_conflict" for event in audit.events)
+    cached = await state_store.get("shared.state_conflict_device", "power")
+    assert cached is not None
+    assert cached.status is StateStatus.CURRENT
+    assert cached.value is True

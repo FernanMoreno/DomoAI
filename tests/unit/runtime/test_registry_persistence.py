@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.domain.models import (
     AvailabilityStatus,
     Capability,
@@ -80,3 +83,50 @@ def test_live_rediscovery_after_load_persisted_makes_device_executable() -> None
 
     resolution = registry.resolve_command_route("living_room.main_light", "turn_on")
     assert resolution.route is not None
+
+
+@pytest.mark.asyncio
+async def test_restart_and_rediscover_does_not_duplicate_devices() -> None:
+    adapter = SimulatedHomeAdapter()
+    await adapter.connect()
+    snapshot = await adapter.discover()
+
+    first_run = DeviceRegistry()
+    first_run.apply_snapshot(snapshot, adapter.adapter_id)
+    original_devices = first_run.devices
+    original_ids = {device.id for device in original_devices}
+
+    restarted = DeviceRegistry()
+    restarted.load_persisted(original_devices)
+    restarted.apply_snapshot(snapshot, adapter.adapter_id)
+
+    restarted_ids = {device.id for device in restarted.devices}
+    assert restarted_ids == original_ids
+
+    sample_device, sample_command = next(
+        (device, command)
+        for device in original_devices
+        for capability in device.capabilities
+        if capability.writable
+        for command in capability.commands
+    )
+    resolution = restarted.resolve_command_route(sample_device.id, sample_command)
+    assert resolution.route is not None
+
+
+@pytest.mark.asyncio
+async def test_repeated_restart_cycles_keep_device_count_stable() -> None:
+    adapter = SimulatedHomeAdapter()
+    await adapter.connect()
+    snapshot = await adapter.discover()
+
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    original_ids = {device.id for device in registry.devices}
+
+    for _ in range(3):
+        devices = registry.devices
+        registry = DeviceRegistry()
+        registry.load_persisted(devices)
+        registry.apply_snapshot(snapshot, adapter.adapter_id)
+        assert {device.id for device in registry.devices} == original_ids

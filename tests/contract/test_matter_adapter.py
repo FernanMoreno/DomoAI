@@ -114,6 +114,33 @@ def test_mapper_converts_attribute_units_and_rejects_invalid_levels() -> None:
     assert invalid_diagnostics == ["brightness must be an integer between 0 and 254"]
 
 
+class _IdleOncePersistentTransport(InMemoryMatterTransport):
+    """Forces the first `receive()` call to time out, regardless of queue state."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._idle_returned = False
+
+    async def receive(self, timeout: float | None = None):  # type: ignore[override]
+        if not self._idle_returned:
+            self._idle_returned = True
+            return None
+        return await super().receive(timeout)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_events_survives_idle_poll_and_yields_next_event() -> None:
+    transport = _IdleOncePersistentTransport(nodes=node_snapshots(1), server_info=server_info())
+    adapter = MatterServerAdapter(transport, discovery_timeout=0.01)
+    await adapter.connect()
+    await adapter.discover()
+
+    transport.enqueue(event_message("attribute_updated", [1001, "1/6/0", False]))
+    event = await anext(adapter.subscribe_events())
+
+    assert event.kind == "state_changed"
+
+
 @pytest.mark.asyncio
 async def test_adapter_emits_typed_state_and_sanitized_diagnostics() -> None:
     transport = InMemoryMatterTransport(nodes=node_snapshots(1), server_info=server_info())

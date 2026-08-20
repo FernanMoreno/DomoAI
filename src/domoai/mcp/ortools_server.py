@@ -37,7 +37,10 @@ class OrtoolsMcpContext:
     registry: DeviceRegistry
     plan_service: PlanService
     optimization_service: OptimizationService
-    runtime_revision: str
+
+    @property
+    def runtime_revision(self) -> str:
+        return self.plan_service.current_revision
 
 
 def explain_result(result: OptimizationResult) -> OptimizationExplanation:

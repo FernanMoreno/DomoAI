@@ -14,6 +14,7 @@ class Settings(StrictModel):
     database_path: Path = Path("data/domoai.sqlite3")
     policy_config_path: Path | None = None
     risk_overrides_path: Path | None = None
+    safety_limits_path: Path | None = None
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
     operator_approval_token: SecretStr | None = None
@@ -161,6 +162,11 @@ class Settings(StrictModel):
             risk_overrides_path=(
                 Path(risk_path)
                 if (risk_path := os.getenv("DOMOAI_RISK_OVERRIDES_PATH"))
+                else None
+            ),
+            safety_limits_path=(
+                Path(safety_path)
+                if (safety_path := os.getenv("DOMOAI_SAFETY_LIMITS_PATH"))
                 else None
             ),
             home_assistant_url=os.getenv("DOMOAI_HOME_ASSISTANT_URL"),

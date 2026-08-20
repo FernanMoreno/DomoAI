@@ -348,12 +348,18 @@ class DeviceRegistry:
         if existing is not None:
             return existing
         canonical_id = identity.explicit_canonical_id or identity.local_canonical_id
-        if canonical_id in self._devices and identity.explicit_canonical_id is None:
-            suffix = 2
-            base = canonical_id
-            while f"{base}-{suffix}" in self._devices:
-                suffix += 1
-            canonical_id = f"{base}-{suffix}"
+        if identity.explicit_canonical_id is None:
+            claimed_ids = {
+                candidate_id
+                for key, candidate_id in self._identity_to_canonical.items()
+                if key != identity.identity_key
+            }
+            if canonical_id in claimed_ids:
+                suffix = 2
+                base = canonical_id
+                while f"{base}-{suffix}" in claimed_ids:
+                    suffix += 1
+                canonical_id = f"{base}-{suffix}"
         self._identity_to_canonical[identity.identity_key] = canonical_id
         return canonical_id
 

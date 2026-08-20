@@ -16,13 +16,27 @@ def next_occurrence(rule: RecurrenceRule, after: datetime) -> datetime:
     Computed entirely in local (zoneinfo) time and converted to UTC only
     as the final step, so a fixed local time (e.g. 22:00) survives a DST
     transition instead of silently drifting by an hour.
+
+    DST transition policy (PEP 495 fold=0, explicit and deliberate):
+    - Spring-forward (nonexistent local time, e.g. 02:30 during a
+      02:00->03:00 jump): resolves to the first valid local instant
+      after the gap (e.g. 03:30) -- the schedule still fires exactly
+      once that day, just shifted forward by the gap size.
+    - Fall-back (ambiguous local time, occurring twice, e.g. 02:30
+      during a 03:00->02:00 step-back): resolves to the earlier
+      (pre-transition) occurrence -- the schedule fires exactly once
+      on the 25-hour day, not twice.
+    Both properties are verified by tests exercising time_of_day values
+    that land exactly inside a transition hour.
     """
     zone = ZoneInfo(rule.timezone)
     local_after = after.astimezone(zone)
     candidate_date = local_after.date()
     for _ in range(_MAX_DAYS_SEARCHED):
         if rule.days_of_week is None or candidate_date.weekday() in rule.days_of_week:
-            candidate = datetime.combine(candidate_date, rule.time_of_day, tzinfo=zone)
+            candidate = datetime.combine(candidate_date, rule.time_of_day, tzinfo=zone).replace(
+                fold=0
+            )
             if candidate > local_after:
                 return candidate.astimezone(UTC)
         candidate_date = candidate_date + timedelta(days=1)

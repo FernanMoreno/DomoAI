@@ -40,7 +40,6 @@ async def build_context() -> OrtoolsMcpContext:
         registry=registry,
         plan_service=plan_service,
         optimization_service=optimization_service,
-        runtime_revision=plan_service.current_revision,
     )
 
 
@@ -110,6 +109,37 @@ async def test_ortools_mcp_validates_and_optimizes_without_adapter_calls() -> No
     assert result["status"] in {"optimal", "feasible"}
     assert result["plan"]["status"] in {"ready", "validated"}
     assert result["constraint_summary"]["hard_satisfied"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_scenario_reports_live_runtime_revision() -> None:
+    context = await build_context()
+    server = create_ortools_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    scenario = scenario_for(device_id)
+
+    first = structured(
+        await server.call_tool(
+            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
+        )
+    )
+    second = structured(
+        await server.call_tool(
+            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
+        )
+    )
+    assert first["runtime_revision"] == second["runtime_revision"]
+
+    context.plan_service.state_store.begin_revision()
+
+    third = structured(
+        await server.call_tool(
+            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
+        )
+    )
+    assert third["runtime_revision"] != second["runtime_revision"]
 
 
 @pytest.mark.asyncio

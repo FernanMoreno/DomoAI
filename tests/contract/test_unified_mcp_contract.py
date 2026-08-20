@@ -52,7 +52,6 @@ async def build_context() -> tuple[SimulatedHomeAdapter, UnifiedMcpContext]:
             plan_service,
             CpSatOptimizer(registry),
         ),
-        runtime_revision=plan_service.current_revision,
     )
     return adapter, UnifiedMcpContext(domotics=domotics, optimizer=optimizer)
 

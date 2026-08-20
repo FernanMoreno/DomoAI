@@ -5,6 +5,7 @@ from __future__ import annotations
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    Capability,
     Command,
     ErrorDetail,
     ExecutionOutcome,
@@ -19,6 +20,7 @@ from domoai.domain.models import (
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort, ExecutionOutcomePort, PlanRecordPort
+from domoai.runtime.safety_kernel import SafetyKernel
 
 
 class PlanExecutor:
@@ -31,6 +33,7 @@ class PlanExecutor:
         plan_repository: PlanRecordPort | None = None,
         outcome_repository: ExecutionOutcomePort | None = None,
         clock: Clock | None = None,
+        safety_kernel: SafetyKernel | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
@@ -38,6 +41,7 @@ class PlanExecutor:
         self.plan_repository = plan_repository
         self.outcome_repository = outcome_repository
         self.clock = clock or SystemClock()
+        self.safety_kernel = safety_kernel
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -106,6 +110,14 @@ class PlanExecutor:
                             ]
                         },
                     ),
+                )
+            elif (safety_error := self._safety_violation(command, capability)) is not None:
+                outcome = ExecutionOutcome(
+                    plan_id=plan.id,
+                    command_id=command.id,
+                    status=ExecutionStatus.REJECTED,
+                    before_state=before_state,
+                    error=safety_error,
                 )
             else:
                 try:
@@ -193,13 +205,29 @@ class PlanExecutor:
         )
         return summary
 
+    def _safety_violation(
+        self, command: Command, capability: Capability | None
+    ) -> ErrorDetail | None:
+        if self.safety_kernel is None or capability is None:
+            return None
+        device = self.plan_service.registry.get(command.device_id)
+        if device is None:
+            return None
+        return self.safety_kernel.check(
+            device_type=device.type, capability=capability.name, value=command.value
+        )
+
     async def _failed_preconditions(self, command: Command) -> list[Precondition]:
         failed: list[Precondition] = []
         for precondition in command.preconditions:
             snapshot = await self.plan_service.state_store.get(
                 precondition.device_id, precondition.capability
             )
-            if snapshot is None or snapshot.value != precondition.expected:
+            if (
+                snapshot is None
+                or snapshot.status is StateStatus.INVALID
+                or snapshot.value != precondition.expected
+            ):
                 failed.append(precondition)
         return failed
 

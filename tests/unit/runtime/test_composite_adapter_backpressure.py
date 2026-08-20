@@ -139,3 +139,83 @@ async def test_event_queue_max_size_is_configurable() -> None:
     delivered = await _drain(composite)
 
     assert len(delivered) == 3
+
+
+@pytest.mark.asyncio
+async def test_availability_changed_survives_a_state_changed_flood() -> None:
+    flooding = _idle_adapter("home_assistant")
+    flooding.events = [SourceEvent(kind="state_changed", payload={"i": i}) for i in range(20)]
+    structural_source = _idle_adapter("modbus")
+    structural_source.events = [
+        SourceEvent(kind="availability_changed", payload={"note": "device offline"})
+    ]
+    composite = CompositeAdapter([flooding, structural_source], event_queue_max_size=5)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    structural = [event for event in delivered if event.kind == "availability_changed"]
+    assert len(structural) == 1
+
+    drops = [
+        entry
+        for entry in composite.diagnostics
+        if entry["event_type"] == "adapter_event_dropped_backpressure"
+    ]
+    assert len(drops) == 15
+    assert all(entry["adapter_id"] == "home_assistant" for entry in drops)
+
+
+@pytest.mark.asyncio
+async def test_device_membership_changed_survives_a_state_changed_flood() -> None:
+    flooding = _idle_adapter("home_assistant")
+    flooding.events = [SourceEvent(kind="state_changed", payload={"i": i}) for i in range(20)]
+    structural_source = _idle_adapter("modbus")
+    structural_source.events = [
+        SourceEvent(kind="device_membership_changed", payload={"note": "device removed"})
+    ]
+    composite = CompositeAdapter([flooding, structural_source], event_queue_max_size=5)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    structural = [event for event in delivered if event.kind == "device_membership_changed"]
+    assert len(structural) == 1
+
+
+@pytest.mark.asyncio
+async def test_metadata_changed_survives_a_state_changed_flood() -> None:
+    flooding = _idle_adapter("home_assistant")
+    flooding.events = [SourceEvent(kind="state_changed", payload={"i": i}) for i in range(20)]
+    structural_source = _idle_adapter("modbus")
+    structural_source.events = [
+        SourceEvent(kind="metadata_changed", payload={"note": "name changed"})
+    ]
+    composite = CompositeAdapter([flooding, structural_source], event_queue_max_size=5)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    structural = [event for event in delivered if event.kind == "metadata_changed"]
+    assert len(structural) == 1
+
+
+@pytest.mark.asyncio
+async def test_structural_event_is_not_starved_until_flood_fully_drains() -> None:
+    flooding = _PacedFloodAdapter("home_assistant", 50)
+    structural_source = _idle_adapter("modbus")
+    structural_source.events = [
+        SourceEvent(kind="availability_changed", payload={"note": "device offline"})
+    ]
+    composite = CompositeAdapter([flooding, structural_source], event_queue_max_size=5)
+    await composite.connect()
+
+    delivered_before_end: list[SourceEvent] = []
+    async for event in composite.subscribe_events():
+        delivered_before_end.append(event)
+        if event.kind == "availability_changed":
+            break
+
+    assert delivered_before_end
+    assert delivered_before_end[-1].kind == "availability_changed"
+    assert len(delivered_before_end) < 50

@@ -19,6 +19,8 @@ from domoai.domain.models import (
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
 
+_BULK_EVENT_KIND = "state_changed"
+
 
 class CompositeAdapter:
     """Coordinate adapters without becoming an agent-facing protocol bus."""
@@ -161,28 +163,58 @@ class CompositeAdapter:
         return self._event_stream()
 
     async def _event_stream(self) -> AsyncIterator[SourceEvent]:
-        queue: asyncio.Queue[tuple[str, SourceEvent | None, BaseException | None]] = (
-            asyncio.Queue(maxsize=self._event_queue_max_size)
-        )
+        # state_changed traffic is high-frequency and self-correcting (the
+        # next reading supersedes a dropped one), so it alone is subject to
+        # the bounded, drop-on-full queue. Structural events (availability,
+        # membership, metadata) are comparatively rare and NOT
+        # self-correcting -- losing one can leave the runtime's topology
+        # understanding silently wrong indefinitely -- so they, along with
+        # stream-error/stream-end signaling, go through an unbounded queue
+        # that is never subject to backpressure and is preferred whenever
+        # both queues have an item ready.
+        Item = tuple[str, SourceEvent | None, BaseException | None]
+        bulk_queue: asyncio.Queue[Item] = asyncio.Queue(maxsize=self._event_queue_max_size)
+        priority_queue: asyncio.Queue[Item] = asyncio.Queue()
         active = [adapter for adapter in self.adapters if adapter.adapter_id in self._connected]
 
         async def pump(adapter: AdapterPort) -> None:
             try:
                 async for event in adapter.subscribe_events():
-                    try:
-                        queue.put_nowait((adapter.adapter_id, event, None))
-                    except asyncio.QueueFull:
-                        self._record_drop(adapter.adapter_id, event)
+                    if event.kind == _BULK_EVENT_KIND:
+                        try:
+                            bulk_queue.put_nowait((adapter.adapter_id, event, None))
+                        except asyncio.QueueFull:
+                            self._record_drop(adapter.adapter_id, event)
+                    else:
+                        await priority_queue.put((adapter.adapter_id, event, None))
             except (ConnectionError, OSError, TimeoutError) as error:
-                await queue.put((adapter.adapter_id, None, error))
+                await priority_queue.put((adapter.adapter_id, None, error))
             finally:
-                await queue.put((adapter.adapter_id, None, None))
+                await priority_queue.put((adapter.adapter_id, None, None))
 
         tasks = [asyncio.create_task(pump(adapter)) for adapter in active]
         remaining = len(tasks)
+        priority_get: asyncio.Task[Item] = asyncio.ensure_future(priority_queue.get())
+        bulk_get: asyncio.Task[Item] = asyncio.ensure_future(bulk_queue.get())
         try:
-            while remaining:
-                adapter_id, event, error = await queue.get()
+            # bulk_get may already hold a resolved item at the moment the
+            # last stream-end sentinel (delivered via priority_queue) drops
+            # `remaining` to 0 -- keep draining until that item (and any
+            # still sitting in the queue) is consumed too, not just until
+            # every producer has signalled it is done.
+            while remaining or bulk_get.done() or not bulk_queue.empty():
+                if priority_get.done():
+                    item = priority_get.result()
+                    priority_get = asyncio.ensure_future(priority_queue.get())
+                elif bulk_get.done():
+                    item = bulk_get.result()
+                    bulk_get = asyncio.ensure_future(bulk_queue.get())
+                else:
+                    await asyncio.wait(
+                        {priority_get, bulk_get}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    continue
+                adapter_id, event, error = item
                 if error is not None:
                     self._record_failure(adapter_id, "adapter_event_stream_failed", error)
                     yield SourceEvent(
@@ -199,6 +231,8 @@ class CompositeAdapter:
                     payload["source_adapter_id"] = adapter_id
                     yield SourceEvent(kind=event.kind, payload=payload)
         finally:
+            priority_get.cancel()
+            bulk_get.cancel()
             for task in tasks:
                 if not task.done():
                     task.cancel()

@@ -6,12 +6,17 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
+from domoai.domain.errors import ErrorCode
 from domoai.domain.models import (
+    AdapterSnapshot,
     Command,
+    DeviceType,
+    ExecutionStatus,
     Plan,
     PlanStatus,
     Precondition,
     RiskClass,
+    SafetyLimit,
     SourceRef,
     StateSnapshot,
     StateStatus,
@@ -20,13 +25,17 @@ from domoai.persistence.repositories import PlanRepository, ScheduledPlanReposit
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.clock import FixedClock
+from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
+from domoai.runtime.recovery import PlanRecoveryService
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.safety_kernel import SafetyKernel
 from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.failure_injection import FailureInjectingAdapter
+from tests.fixtures.multi_adapter import RecordingAdapter, entity, power_capability
 
 
 async def build_plan_context() -> tuple[
@@ -176,6 +185,296 @@ async def test_changed_runtime_revision_requires_revalidation() -> None:
     with pytest.raises(ValueError, match="runtime revision"):
         await executor.execute(validated)
     assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_state_marked_stale_in_background_forces_revalidation() -> None:
+    adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-background-stale-1",
+        commands=[
+            Command(
+                id="command-background-stale-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-background-stale-1",
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    await state_store.mark_all_stale()
+
+    with pytest.raises(ValueError, match="stale"):
+        await executor.execute(validated)
+    assert adapter.calls == []
+
+
+def _shared_device_snapshot(
+    *, entity_id: str, source_device_id: str, value: bool, include_target: bool = False
+) -> AdapterSnapshot:
+    shared_entity = entity(
+        entity_id=entity_id,
+        source_device_id=source_device_id,
+        canonical_id="shared.state_conflict_device",
+        name="Shared Power",
+        capabilities=[power_capability()],
+    )
+    entities = [shared_entity]
+    states = [
+        {
+            "entity_id": entity_id,
+            "capability": "power",
+            "value": value,
+            "unit": None,
+            "available": True,
+        }
+    ]
+    if include_target:
+        target_entity = entity(
+            entity_id="light.target",
+            source_device_id="physical-target-1",
+            canonical_id="light.conflict_precondition_target",
+            name="Target Light",
+            capabilities=[power_capability()],
+        )
+        entities.append(target_entity)
+        states.append(
+            {
+                "entity_id": "light.target",
+                "capability": "power",
+                "value": False,
+                "unit": None,
+                "available": True,
+            }
+        )
+    return AdapterSnapshot(source_entities=entities, source_states=states)
+
+
+@pytest.mark.asyncio
+async def test_precondition_on_conflicted_capability_is_refused_without_adapter_call() -> None:
+    first = RecordingAdapter(
+        "home_assistant",
+        _shared_device_snapshot(
+            entity_id="light.power_a",
+            source_device_id="physical-shared-1",
+            value=True,
+            include_target=True,
+        ),
+    )
+    second = RecordingAdapter(
+        "modbus",
+        _shared_device_snapshot(
+            entity_id="modbus.power_b", source_device_id="modbus-physical-shared-1", value=False
+        ),
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    await composite.connect()
+    await DiscoveryService(composite, registry, state_store, audit).refresh()
+
+    cached = await state_store.get("shared.state_conflict_device", "power")
+    assert cached is not None
+    assert cached.status is StateStatus.INVALID
+
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    executor = PlanExecutor(composite, plan_service, audit)
+    plan = Plan(
+        id="plan-conflict-precondition-1",
+        commands=[
+            Command(
+                id="command-conflict-precondition-1",
+                device_id="light.conflict_precondition_target",
+                command="turn_on",
+                idempotency_key="intent-conflict-precondition-1",
+                preconditions=[
+                    Precondition(
+                        device_id="shared.state_conflict_device",
+                        capability="power",
+                        expected=True,
+                    )
+                ],
+            )
+        ],
+    )
+    validated = plan_service.validate(plan)
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status is ExecutionStatus.REJECTED
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == ErrorCode.PRECONDITION_FAILED
+    assert first.writes == []
+    assert second.writes == []
+
+
+@pytest.mark.asyncio
+async def test_precondition_expecting_none_is_still_unmet_against_invalid_state() -> None:
+    adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    invalid_snapshot = StateSnapshot(
+        device_id="shared.conflicted_device",
+        capability="power",
+        value=None,
+        observed_at=datetime.now(UTC),
+        received_at=datetime.now(UTC),
+        status=StateStatus.INVALID,
+        source_ref=SourceRef(adapter_id="modbus", external_id="modbus.power_b"),
+    )
+    await state_store.save(invalid_snapshot)
+    plan = Plan(
+        id="plan-invalid-precondition-expects-none-1",
+        commands=[
+            Command(
+                id="command-invalid-precondition-expects-none-1",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-invalid-precondition-expects-none-1",
+                preconditions=[
+                    Precondition(
+                        device_id="shared.conflicted_device", capability="power", expected=None
+                    )
+                ],
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status is ExecutionStatus.REJECTED
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == ErrorCode.PRECONDITION_FAILED
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_conflict_resolving_on_later_discovery_restores_current_status() -> None:
+    first = RecordingAdapter(
+        "home_assistant",
+        _shared_device_snapshot(
+            entity_id="light.power_a", source_device_id="physical-shared-1", value=True
+        ),
+    )
+    second = RecordingAdapter(
+        "modbus",
+        _shared_device_snapshot(
+            entity_id="modbus.power_b", source_device_id="modbus-physical-shared-1", value=False
+        ),
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+    await composite.connect()
+    await discovery.refresh()
+
+    cached = await state_store.get("shared.state_conflict_device", "power")
+    assert cached is not None
+    assert cached.status is StateStatus.INVALID
+
+    second.snapshot = _shared_device_snapshot(
+        entity_id="modbus.power_b", source_device_id="modbus-physical-shared-1", value=True
+    )
+    await discovery.refresh()
+
+    resolved = await state_store.get("shared.state_conflict_device", "power")
+    assert resolved is not None
+    assert resolved.status is StateStatus.CURRENT
+    assert resolved.value is True
+
+
+@pytest.mark.asyncio
+async def test_safety_kernel_blocks_command_allowed_by_capability_and_policy() -> None:
+    adapter, registry, _, audit, plan_service, _ = await build_plan_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    plan = Plan(
+        id="plan-safety-kernel-1",
+        commands=[
+            Command(
+                id="command-safety-kernel-1",
+                device_id=device_id,
+                command="set_temperature",
+                value=25,
+                unit="°C",
+                idempotency_key="intent-safety-kernel-1",
+            )
+        ],
+    )
+    validated = plan_service.validate(plan)
+    assert validated.status is PlanStatus.READY
+
+    safety_kernel = SafetyKernel(
+        [
+            SafetyLimit(
+                device_type=DeviceType.CLIMATE, capability="target_temperature", maximum=22
+            )
+        ]
+    )
+    executor = PlanExecutor(adapter, plan_service, audit, safety_kernel=safety_kernel)
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status is ExecutionStatus.REJECTED
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == ErrorCode.SAFETY_LIMIT_EXCEEDED
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_safety_kernel_leaves_execution_unaffected() -> None:
+    adapter, registry, _, audit, plan_service, _ = await build_plan_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    plan = Plan(
+        id="plan-safety-kernel-2",
+        commands=[
+            Command(
+                id="command-safety-kernel-2",
+                device_id=device_id,
+                command="set_temperature",
+                value=25,
+                unit="°C",
+                idempotency_key="intent-safety-kernel-2",
+            )
+        ],
+    )
+    validated = plan_service.validate(plan)
+
+    executor_without_kernel = PlanExecutor(adapter, plan_service, audit)
+    summary = await executor_without_kernel.execute(validated)
+    assert summary.outcomes[0].status is not ExecutionStatus.REJECTED
+
+    non_matching_kernel = SafetyKernel(
+        [SafetyLimit(device_type=DeviceType.COVER, capability="position", maximum=50)]
+    )
+    executor_with_non_matching_kernel = PlanExecutor(
+        adapter, plan_service, audit, safety_kernel=non_matching_kernel
+    )
+    plan2 = plan.model_copy(
+        update={
+            "id": "plan-safety-kernel-3",
+            "commands": [
+                Command(
+                    id="command-safety-kernel-3",
+                    device_id=device_id,
+                    command="set_temperature",
+                    value=25,
+                    unit="°C",
+                    idempotency_key="intent-safety-kernel-3",
+                )
+            ],
+        }
+    )
+    validated2 = plan_service.validate(plan2)
+    summary2 = await executor_with_non_matching_kernel.execute(validated2)
+    assert summary2.outcomes[0].status is not ExecutionStatus.REJECTED
 
 
 @pytest.mark.asyncio
@@ -453,6 +752,38 @@ async def test_double_execution_of_in_progress_plan_is_refused(tmp_path) -> None
 
     validated = plan_service.validate(plan)
     await plan_repository.save(validated.model_copy(update={"status": PlanStatus.EXECUTING}))
+
+    with pytest.raises(ValueError, match="invalid_transition|already"):
+        await executor.execute(validated)
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_recovered_from_crash_can_never_be_claimed_again(tmp_path) -> None:
+    adapter, registry, _, audit, plan_service, executor, plan_repository = (
+        await build_plan_context_with_repository(tmp_path)
+    )
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-crash-recovery-1",
+        commands=[
+            Command(
+                id="command-crash-recovery-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-crash-recovery-1",
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    await plan_repository.save(validated.model_copy(update={"status": PlanStatus.EXECUTING}))
+
+    service = PlanRecoveryService(plan_repository, audit)
+    recovered_ids = await service.recover_orphaned_plans()
+    assert recovered_ids == [plan.id]
 
     with pytest.raises(ValueError, match="invalid_transition|already"):
         await executor.execute(validated)

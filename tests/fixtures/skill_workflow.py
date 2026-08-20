@@ -110,7 +110,6 @@ async def build_workflow_fixture(
             domotics_context.facade.plan_service,
             CpSatOptimizer(domotics_context.registry),
         ),
-        runtime_revision=domotics_context.facade.plan_service.current_revision,
     )
     unified_context = UnifiedMcpContext(
         domotics=domotics_context,

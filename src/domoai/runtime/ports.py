@@ -69,6 +69,7 @@ class PlanRecordPort(Protocol):
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool: ...
+    async def list_by_status(self, statuses: frozenset[PlanStatus]) -> list[Plan]: ...
 
 
 class ExecutionOutcomePort(Protocol):

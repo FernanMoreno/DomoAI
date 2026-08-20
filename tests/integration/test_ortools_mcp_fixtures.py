@@ -100,9 +100,7 @@ async def test_invalid_fixture_returns_diagnostics_before_solver_or_adapter() ->
     scenario = scenario_for("unknown.device")
 
     result = structured(
-        await server.call_tool(
-            "optimize_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("optimize_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
 
     assert result["status"] == "invalid"
@@ -121,18 +119,16 @@ async def test_infeasible_and_timeout_fixtures_are_not_successes() -> None:
     infeasible = structured(
         await server.call_tool(
             "optimize_scenario",
-            {
-                "scenario": scenario_for(device_id, max_power=50).model_dump(mode="json")
-            },
+            {"scenario": scenario_for(device_id, max_power=50).model_dump(mode="json")},
         )
     )
     timeout = structured(
         await server.call_tool(
             "optimize_scenario",
             {
-                "scenario": scenario_for(
-                    device_id, solver_time_limit_seconds=0
-                ).model_dump(mode="json")
+                "scenario": scenario_for(device_id, solver_time_limit_seconds=0).model_dump(
+                    mode="json"
+                )
             },
         )
     )

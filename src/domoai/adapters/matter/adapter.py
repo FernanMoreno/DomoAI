@@ -18,13 +18,17 @@ from domoai.adapters.matter.mapper import (
 )
 from domoai.adapters.matter.transport import MatterTransport, MatterTransportMessage
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
+    AvailabilityChangedEvent,
     Capability,
     Command,
+    DeviceMembershipChangedEvent,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -50,6 +54,10 @@ class MatterServerAdapter:
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
         self._unsupported: list[dict[str, Any]] = []
         self._canonical_by_source: dict[str, str] = {}
+        # Best-effort, process-local duplicate suppression only -- reset on
+        # restart, not shared across processes. The authoritative barrier
+        # against re-executing a command is the persistent execution claim
+        # in PlanRepository.claim_for_execution (Spec 057).
         self._executed_idempotency_keys: set[str] = set()
 
     async def connect(self) -> None:
@@ -119,9 +127,7 @@ class MatterServerAdapter:
             return AdapterExecutionAck(accepted=False, message="Unknown Matter endpoint")
         return await self.execute_source(command, source_entity_id)
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         self._require_connected()
         if command.idempotency_key in self._executed_idempotency_keys:
             return AdapterExecutionAck(accepted=False, message="Duplicate idempotency key")
@@ -162,8 +168,7 @@ class MatterServerAdapter:
     def _snapshot(self) -> AdapterSnapshot:
         return AdapterSnapshot(
             source_entities=[
-                self._source_entities[entity_id]
-                for entity_id in sorted(self._source_entities)
+                self._source_entities[entity_id] for entity_id in sorted(self._source_entities)
             ],
             source_states=list(self._states.values()),
             unsupported_sources=list(self._unsupported),
@@ -185,11 +190,10 @@ class MatterServerAdapter:
             except ValueError:
                 return self._diagnostic(f"{event} data is invalid")
             if previous is not None and previous.get("available") != data.get("available"):
-                return SourceEvent(
-                    kind="availability_changed",
+                return AvailabilityChangedEvent(
                     payload={"node_id": node_id, "available": bool(data.get("available", False))},
                 )
-            return SourceEvent(kind="state_changed", payload={"node_id": node_id})
+            return StateChangedEvent(payload={"node_id": node_id})
         if event == "node_removed":
             if isinstance(data, dict):
                 node_id = data.get("node_id")
@@ -198,12 +202,12 @@ class MatterServerAdapter:
             if isinstance(node_id, bool) or not isinstance(node_id, int):
                 return self._diagnostic("node_removed data must contain an integer node_id")
             self._remove_node(node_id)
-            return SourceEvent(kind="device_membership_changed", payload={"node_id": node_id})
+            return DeviceMembershipChangedEvent(payload={"node_id": node_id})
         if event == "attribute_updated":
             return self._ingest_attribute_update(data)
         if event == "connection_lost":
             self._connected = False
-            return SourceEvent(kind="availability_changed", payload={"available": False})
+            return AvailabilityChangedEvent(payload={"available": False})
         return self._diagnostic(f"unsupported Matter Server event: {event}")
 
     def _ingest_node(self, node: dict[str, Any]) -> None:
@@ -271,8 +275,7 @@ class MatterServerAdapter:
         if target_state is None:
             return self._diagnostic("attribute_updated value is invalid")
         self._ingest_node(candidate)
-        return SourceEvent(
-            kind="state_changed",
+        return StateChangedEvent(
             payload={"node_id": node_id, "path": path},
         )
 
@@ -308,8 +311,7 @@ class MatterServerAdapter:
     @staticmethod
     def _translate_command(entity: dict[str, Any], command: Command) -> dict[str, Any] | None:
         capabilities = [
-            Capability.model_validate(capability)
-            for capability in entity.get("capabilities", [])
+            Capability.model_validate(capability) for capability in entity.get("capabilities", [])
         ]
         if command.command in {"turn_on", "turn_off", "toggle"}:
             power = next(
@@ -379,8 +381,8 @@ class MatterServerAdapter:
         return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "device"
 
     @staticmethod
-    def _diagnostic(reason: str) -> SourceEvent:
-        return SourceEvent(kind="adapter_diagnostic", payload={"reason": reason[:200]})
+    def _diagnostic(reason: str) -> AdapterDiagnosticEvent:
+        return AdapterDiagnosticEvent(payload={"reason": reason[:200]})
 
     def _require_connected(self) -> None:
         if not self._connected:

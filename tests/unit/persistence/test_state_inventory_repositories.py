@@ -97,3 +97,20 @@ async def test_state_snapshot_repository_upserts_by_device_and_capability(
     assert len(stored) == 1
     assert stored[0].value is False
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_state_snapshot_repository_delete_removes_only_that_device(
+    tmp_path: Path,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = StateSnapshotRepository(database)
+    await repository.save(_snapshot("light.kitchen"))
+    await repository.save(_snapshot("light.living_room"))
+
+    await repository.delete("light.kitchen")
+
+    remaining = await repository.list_all()
+    assert [snapshot.device_id for snapshot in remaining] == ["light.living_room"]
+    await database.close()

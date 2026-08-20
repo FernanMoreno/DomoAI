@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
@@ -78,6 +80,17 @@ class PlanExecutor:
                     ErrorCode.INVALID_TRANSITION,
                     "Plan is already executing or has reached a terminal status",
                 )
+        execution_attempt_id = str(uuid4())
+        self.audit.append(
+            event_type="plan_execution_started",
+            actor="runtime",
+            subject_id=plan.id,
+            payload={
+                "plan_id": plan.id,
+                "agent_request_id": plan.agent_request_id,
+                "execution_attempt_id": execution_attempt_id,
+            },
+        )
         outcomes: list[ExecutionOutcome] = []
         seen_keys: set[str] = set()
         for command in plan.commands:
@@ -98,8 +111,10 @@ class PlanExecutor:
                 outcome = ExecutionOutcome(
                     plan_id=plan.id,
                     command_id=command.id,
+                    execution_attempt_id=execution_attempt_id,
                     status=ExecutionStatus.REJECTED,
                     before_state=before_state,
+                    completed_at=self.clock.now(),
                     error=ErrorDetail(
                         code=ErrorCode.PRECONDITION_FAILED,
                         message=f"{len(failed_preconditions)} precondition(s) not satisfied",
@@ -115,11 +130,14 @@ class PlanExecutor:
                 outcome = ExecutionOutcome(
                     plan_id=plan.id,
                     command_id=command.id,
+                    execution_attempt_id=execution_attempt_id,
                     status=ExecutionStatus.REJECTED,
                     before_state=before_state,
+                    completed_at=self.clock.now(),
                     error=safety_error,
                 )
             else:
+                adapter_request_id = str(uuid4())
                 try:
                     acknowledgement = await self.adapter.execute(command)
                     after_state = None
@@ -161,18 +179,24 @@ class PlanExecutor:
                     outcome = ExecutionOutcome(
                         plan_id=plan.id,
                         command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
                         status=status,
                         adapter_ref=acknowledgement.source_ref,
                         before_state=before_state,
                         after_state=after_state,
+                        completed_at=self.clock.now(),
                         error=error,
                     )
                 except (ConnectionError, OSError, TimeoutError) as error:
                     outcome = ExecutionOutcome(
                         plan_id=plan.id,
                         command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
                         status=ExecutionStatus.UNAVAILABLE,
                         before_state=before_state,
+                        completed_at=self.clock.now(),
                         error=ErrorDetail(
                             code=ErrorCode.ADAPTER_UNAVAILABLE,
                             message=str(error),
@@ -186,7 +210,12 @@ class PlanExecutor:
                 event_type="command_execution_outcome",
                 actor="runtime",
                 subject_id=command.id,
-                payload={"plan_id": plan.id, "status": outcome.status.value},
+                payload={
+                    "plan_id": plan.id,
+                    "status": outcome.status.value,
+                    "execution_attempt_id": execution_attempt_id,
+                    "adapter_request_id": outcome.adapter_request_id,
+                },
             )
         summary = ExecutionSummary(outcomes=outcomes)
         if self.plan_repository is not None:
@@ -199,8 +228,10 @@ class PlanExecutor:
             actor="runtime",
             subject_id=plan.id,
             payload={
+                "plan_id": plan.id,
                 "status": self._terminal_plan_status(outcomes).value,
                 "outcome_count": len(outcomes),
+                "execution_attempt_id": execution_attempt_id,
             },
         )
         return summary

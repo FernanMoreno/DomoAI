@@ -100,8 +100,7 @@ class VirtualBridge:
             (self.topic("bridge/devices"), _json(device_definitions()), True),
         ]
         messages.extend(
-            (self.topic(name), _json(payload), True)
-            for name, payload in self.states.items()
+            (self.topic(name), _json(payload), True) for name, payload in self.states.items()
         )
         messages.extend(
             (self.topic(f"{name}/availability"), _json({"state": "online"}), True)

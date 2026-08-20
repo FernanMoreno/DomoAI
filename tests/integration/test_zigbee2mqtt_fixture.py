@@ -4,7 +4,7 @@ from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.adapters.zigbee2mqtt.transport import InMemoryMqttTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, PlanStatus, SourceEvent
+from domoai.domain.models import Command, PlanStatus
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -79,9 +79,7 @@ async def test_runtime_event_consumer_can_refresh_after_zigbee_state_event() -> 
     discovery = DiscoveryService(adapter, registry, state_store, audit)
     await adapter.connect()
     await discovery.refresh()
-    transport.incoming.append(
-        state_message("zigbee2mqtt/living_room/main_light", {"state": "OFF"})
-    )
+    transport.incoming.append(state_message("zigbee2mqtt/living_room/main_light", {"state": "OFF"}))
 
     event = await RuntimeEventConsumer(
         adapter,
@@ -90,7 +88,7 @@ async def test_runtime_event_consumer_can_refresh_after_zigbee_state_event() -> 
         audit,
     ).consume_once()
 
-    assert isinstance(event, SourceEvent)
+    assert event is not None
     assert event.kind == "state_changed"
     assert event.payload["friendly_name"] == "living_room/main_light"
     assert registry.get("unassigned.living-room-main-light") is not None

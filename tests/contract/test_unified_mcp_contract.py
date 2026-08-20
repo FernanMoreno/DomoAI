@@ -118,6 +118,7 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",
+        "domotics://metrics",
     ]
 
 
@@ -149,9 +150,7 @@ async def test_unified_session_optimizes_without_execution_authority() -> None:
             {"scenario": scenario, "validate_proposal": True},
         )
     )
-    explanation = structured(
-        await server.call_tool("explain_solution", {"result": proposal})
-    )
+    explanation = structured(await server.call_tool("explain_solution", {"result": proposal}))
 
     assert discovery["devices"]
     assert validation["valid"] is True

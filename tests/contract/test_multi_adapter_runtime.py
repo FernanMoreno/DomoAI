@@ -13,13 +13,12 @@ def test_registry_groups_entities_and_keeps_capability_routes() -> None:
     device = registry.get("living_room.main_light")
     assert device is not None
     assert {capability.name for capability in device.capabilities} == {"power", "brightness"}
-    assert {
-        ref.external_id for ref in device.source_refs
-    } == {"light.main_power", "light.main_brightness"}
+    assert {ref.external_id for ref in device.source_refs} == {
+        "light.main_power",
+        "light.main_brightness",
+    }
     power_route = registry.resolve_command_route("living_room.main_light", "turn_on")
-    brightness_route = registry.resolve_command_route(
-        "living_room.main_light", "set_brightness"
-    )
+    brightness_route = registry.resolve_command_route("living_room.main_light", "set_brightness")
     assert power_route.route is not None
     assert power_route.route.source_ref == SourceRef(
         adapter_id="home_assistant", external_id="light.main_power", external_type="light"
@@ -46,9 +45,7 @@ def test_ambiguous_capability_route_is_reported_before_write() -> None:
     registry = DeviceRegistry()
 
     registry.apply_snapshot(source_snapshot(adapter_id="home_assistant"), "home_assistant")
-    registry.apply_snapshot(
-        source_snapshot(adapter_id="modbus"), "modbus"
-    )
+    registry.apply_snapshot(source_snapshot(adapter_id="modbus"), "modbus")
 
     resolution = registry.resolve_command_route("living_room.main_light", "set_brightness")
     assert resolution.route is None
@@ -102,6 +99,4 @@ def test_identity_keys_keep_source_device_stable_and_preserve_parent_topology() 
     assert registry.canonical_id_for_source("home_assistant", "light.main_power") == (
         "living_room.main-light"
     )
-    assert registry.parent_source_device_for("home_assistant", "physical-light-1") == (
-        "ha-hub-1"
-    )
+    assert registry.parent_source_device_for("home_assistant", "physical-light-1") == ("ha-hub-1")

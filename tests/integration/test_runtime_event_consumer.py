@@ -1,12 +1,20 @@
+import asyncio
 from collections.abc import AsyncIterator
 
+import pydantic
 import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
-from domoai.domain.models import AdapterHealth, AdapterSnapshot, SourceEvent, StateStatus
+from domoai.domain.models import (
+    AdapterHealth,
+    AdapterSnapshot,
+    SourceEvent,
+    StateChangedEvent,
+    StateStatus,
+)
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
@@ -76,9 +84,7 @@ async def test_composite_state_changed_event_from_non_primary_adapter_is_applied
         if state["entity_id"] == "sensor.modbus.temperature":
             state["value"] = 42.0
 
-    await consumer._apply_event(
-        SourceEvent(kind="state_changed", payload={"source_adapter_id": "modbus"})
-    )
+    await consumer._apply_event(StateChangedEvent(payload={"source_adapter_id": "modbus"}))
 
     state = await state_store.get("modbus.environment", "temperature")
     assert state is not None
@@ -88,7 +94,7 @@ async def test_composite_state_changed_event_from_non_primary_adapter_is_applied
 class DisconnectedAdapter(SimulatedHomeAdapter):
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         raise ConnectionError("Home Assistant event stream disconnected")
-        yield SourceEvent(kind="unreachable")
+        yield  # pragma: no cover
 
 
 @pytest.mark.asyncio
@@ -147,12 +153,10 @@ async def test_burst_of_state_only_events_does_not_repeat_full_discovery() -> No
     assert adapter.discover_calls == 1
     consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
 
-    light_id = next(
-        device.id for device in registry.devices if device.type.value == "light"
-    )
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
     for index in range(1000):
         adapter._find_for_device(light_id)["state"]["brightness"] = index % 100
-        await consumer._apply_event(SourceEvent(kind="state_changed"))
+        await consumer._apply_event(StateChangedEvent())
 
     assert adapter.discover_calls == 1
     state = await state_store.get(light_id, "brightness")
@@ -160,20 +164,12 @@ async def test_burst_of_state_only_events_does_not_repeat_full_discovery() -> No
     assert state.value == 999 % 100
 
 
-@pytest.mark.asyncio
-async def test_unrecognized_event_kind_falls_back_to_full_discovery() -> None:
-    adapter = DiscoveryCountingAdapter()
-    registry = DeviceRegistry()
-    state_store = StateStore()
-    audit = AuditLog()
-    discovery = DiscoveryService(adapter, registry, state_store, audit)
-    await discovery.refresh()
-    assert adapter.discover_calls == 1
-    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
-
-    await consumer._apply_event(SourceEvent(kind="some_future_event_kind"))
-
-    assert adapter.discover_calls == 2
+def test_unrecognized_event_kind_is_rejected_at_construction() -> None:
+    # Superseded by the closed, type-checked SourceEvent union: an
+    # unrecognized kind can no longer be constructed at all, so the old
+    # graceful-fallback-to-discovery behavior no longer applies.
+    with pytest.raises(pydantic.ValidationError):
+        StateChangedEvent(kind="some_future_event_kind")
 
 
 @pytest.mark.asyncio
@@ -186,13 +182,11 @@ async def test_repeated_identical_state_only_value_does_not_advance_version() ->
     await discovery.refresh()
     consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
 
-    light_id = next(
-        device.id for device in registry.devices if device.type.value == "light"
-    )
-    await consumer._apply_event(SourceEvent(kind="state_changed"))
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    await consumer._apply_event(StateChangedEvent())
     version_after_first = state_store.state_version(light_id, "brightness")
 
-    await consumer._apply_event(SourceEvent(kind="state_changed"))
+    await consumer._apply_event(StateChangedEvent())
 
     assert state_store.state_version(light_id, "brightness") == version_after_first
 
@@ -382,9 +376,7 @@ class _PartiallyDegradedCompositeAdapter(SimulatedHomeAdapter):
             connected=True,
             components=[
                 AdapterHealth(adapter_id="home_assistant", connected=True),
-                AdapterHealth(
-                    adapter_id="modbus", connected=not self._component_down
-                ),
+                AdapterHealth(adapter_id="modbus", connected=not self._component_down),
             ],
         )
 
@@ -421,3 +413,35 @@ async def test_run_does_not_reconnect_when_every_composite_component_is_healthy(
         await consumer.run(reconnect_delay=0.001)
 
     assert adapter.connect_calls == 0
+
+
+class _NeverEndingAdapter(SimulatedHomeAdapter):
+    """Reports connected and blocks forever waiting for the next event."""
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(adapter_id=self.adapter_id, connected=True)
+
+    async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+        return
+
+
+@pytest.mark.asyncio
+async def test_alive_is_false_before_run_true_while_running_false_after_cancel() -> None:
+    adapter = _NeverEndingAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+    assert consumer.alive is False
+
+    task = asyncio.create_task(consumer.run())
+    await asyncio.sleep(0)
+    assert consumer.alive is True
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert consumer.alive is False

@@ -150,9 +150,7 @@ def _expected_periods_for_date(session_date: date) -> int:
     timezone = OMIE_TIMEZONE
     start = datetime.combine(session_date, time.min, tzinfo=timezone)
     end = datetime.combine(session_date + timedelta(days=1), time.min, tzinfo=timezone)
-    elapsed_seconds = (
-        end.astimezone(UTC) - start.astimezone(UTC)
-    ).total_seconds()
+    elapsed_seconds = (end.astimezone(UTC) - start.astimezone(UTC)).total_seconds()
     periods = int(elapsed_seconds // (15 * 60))
     if periods not in {92, 96, 100}:
         raise ValueError("OMIE session date does not have 92, 96 or 100 periods")
@@ -208,15 +206,11 @@ class OmieTariffProvider:
             ) from error
 
         if not isinstance(downloaded, OmieDayAheadFile):
-            raise _provider_error(
-                "provider_invalid", "OMIE tariff client returned an invalid file"
-            )
+            raise _provider_error("provider_invalid", "OMIE tariff client returned an invalid file")
         if not isinstance(downloaded.source_revision, str) or not _SAFE_REVISION.fullmatch(
             downloaded.source_revision
         ):
-            raise _provider_error(
-                "provider_invalid", "OMIE tariff source revision is invalid"
-            )
+            raise _provider_error("provider_invalid", "OMIE tariff source revision is invalid")
         if downloaded.observed_at.tzinfo is None:
             raise _provider_error(
                 "provider_invalid", "OMIE tariff observation is not timezone-aware"
@@ -229,9 +223,7 @@ class OmieTariffProvider:
                 zone="ES",
             )
             if len(prices) != horizon.slots:
-                raise ValueError(
-                    "OMIE file does not contain the expected number of periods"
-                )
+                raise ValueError("OMIE file does not contain the expected number of periods")
             points = [
                 TariffPoint(
                     slot=slot,

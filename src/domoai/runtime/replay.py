@@ -51,7 +51,8 @@ class PlanReplayer:
         state_store = StateStore()
         audit = AuditLog()
         adapter = SimulatedHomeAdapter()
-        await DiscoveryService(adapter, registry, state_store, audit).refresh()
+        clock = FixedClock(plan.execute_at or plan.created_at)
+        await DiscoveryService(adapter, registry, state_store, audit, clock=clock).refresh()
 
         notes = [
             f"device {command.device_id!r} not available in the replay fixture"
@@ -59,7 +60,6 @@ class PlanReplayer:
             if registry.get(command.device_id) is None
         ]
 
-        clock = FixedClock(plan.execute_at or plan.created_at)
         policy_engine = PolicyEngine([])
         plan_service = PlanService(registry, state_store, policy_engine, audit, clock=clock)
         executor = PlanExecutor(adapter, plan_service, audit, clock=clock)

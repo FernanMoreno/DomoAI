@@ -14,6 +14,7 @@ def _outcome(*, status: ExecutionStatus, message: str) -> ExecutionOutcome:
     return ExecutionOutcome(
         plan_id="plan-attempts-1",
         command_id="command-attempts-1",
+        execution_attempt_id="attempt-1",
         status=status,
         completed_at=datetime.now(UTC),
         error=ErrorDetail(code="execution_failed", message=message, retryable=True),
@@ -137,6 +138,7 @@ async def test_connection_remains_usable_after_a_rolled_back_save(tmp_path) -> N
     other_outcome = ExecutionOutcome(
         plan_id="plan-attempts-2",
         command_id="command-attempts-2",
+        execution_attempt_id="attempt-2",
         status=ExecutionStatus.CONFIRMED_SUCCESS,
         completed_at=datetime.now(UTC),
     )

@@ -67,9 +67,7 @@ class FixtureToolRouter:
     calls: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
     tool_aliases: dict[tuple[str, str], str] = field(default_factory=dict)
 
-    async def call(
-        self, provider: str, tool: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def call(self, provider: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((provider, tool, arguments))
         actual_tool = self.tool_aliases.get((provider, tool), tool)
         if provider != "mcp":

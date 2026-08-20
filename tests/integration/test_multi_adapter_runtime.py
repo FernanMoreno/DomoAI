@@ -75,9 +75,7 @@ async def test_composite_runtime_aggregates_two_sources_and_routes_exact_entity(
 @pytest.mark.asyncio
 async def test_composite_runtime_isolates_discovery_failure() -> None:
     healthy = RecordingAdapter("healthy", source_snapshot(adapter_id="healthy"))
-    failing = RecordingAdapter(
-        "failing", source_snapshot(adapter_id="failing"), fail_discover=True
-    )
+    failing = RecordingAdapter("failing", source_snapshot(adapter_id="failing"), fail_discover=True)
     registry = DeviceRegistry()
     composite = CompositeAdapter([healthy, failing], registry=registry)
     state_store = StateStore()
@@ -97,9 +95,7 @@ async def test_ambiguous_composite_route_issues_zero_writes() -> None:
     home_assistant = RecordingAdapter(
         "home_assistant", source_snapshot(adapter_id="home_assistant")
     )
-    modbus = RecordingAdapter(
-        "modbus", source_snapshot(adapter_id="modbus")
-    )
+    modbus = RecordingAdapter("modbus", source_snapshot(adapter_id="modbus"))
     registry = DeviceRegistry()
     composite = CompositeAdapter([home_assistant, modbus], registry=registry)
     state_store = StateStore()
@@ -193,9 +189,7 @@ async def test_cross_adapter_type_conflict_is_audited_not_silently_dropped() -> 
         capabilities=[power_capability()],
     )
     conflicting_entity["semantic_type"] = "sensor"
-    second = RecordingAdapter(
-        "modbus", AdapterSnapshot(source_entities=[conflicting_entity])
-    )
+    second = RecordingAdapter("modbus", AdapterSnapshot(source_entities=[conflicting_entity]))
     registry = DeviceRegistry()
     composite = CompositeAdapter([first, second], registry=registry)
     state_store = StateStore()
@@ -241,9 +235,7 @@ async def test_cross_adapter_capability_metadata_conflict_is_audited() -> None:
         name="Brightness B",
         capabilities=[conflicting_capability],
     )
-    second = RecordingAdapter(
-        "modbus", AdapterSnapshot(source_entities=[conflicting_entity])
-    )
+    second = RecordingAdapter("modbus", AdapterSnapshot(source_entities=[conflicting_entity]))
     registry = DeviceRegistry()
     composite = CompositeAdapter([first, second], registry=registry)
     state_store = StateStore()

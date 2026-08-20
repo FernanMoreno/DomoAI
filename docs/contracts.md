@@ -1172,12 +1172,15 @@ entidades por `device_id`, consulta el registro de entidades por WebSocket
 cuando el payload de estados no trae ese dato, conserva metadatos de identidad
 y traduce únicamente comandos declarados.
 
-El runtime puede activar este provider de forma opt-in con
-`DOMOAI_HOME_ASSISTANT_PROVIDER=1`. En ese modo registra el mismo objeto en
-`ProviderRegistry` y lo envuelve en `HomeAssistantProviderAdapter`, que satisface
-`AdapterPort` y alimenta el `DeviceRegistry`, `StateStore`, ejecución y MCP
-existentes. Así se mantiene una única conexión y una única ruta semántica. Sin
-el switch, el factory conserva el `HomeAssistantAdapter` clásico.
+El runtime registra este provider en `ProviderRegistry` y lo envuelve en
+`HomeAssistantProviderAdapter`, que satisface `AdapterPort` y alimenta el
+`DeviceRegistry`, `StateStore`, ejecución y MCP existentes. Así se
+mantiene una única conexión y una única ruta semántica — es la única
+integración de Home Assistant del runtime (Spec 081 retiró el
+`HomeAssistantAdapter` clásico y el switch `DOMOAI_HOME_ASSISTANT_PROVIDER`
+que seleccionaba entre ambos, cerrando P2 #9 del re-audit 2026-08-19:
+las dos implementaciones traducían comandos de forma independiente y ya
+habían empezado a divergir).
 
 La [documentación del registro de dispositivos de Home Assistant](https://developers.home-assistant.io/docs/device_registry_index/)
 sirve como referencia para preservar identificadores, conexiones,

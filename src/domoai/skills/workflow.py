@@ -182,9 +182,7 @@ class EnergySkillWorkflow:
                 {"refresh": False},
                 stage=WorkflowStage.STARTED,
             )
-            discovery_revision = self._required_string(
-                discovery, "runtime_revision", "discovery"
-            )
+            discovery_revision = self._required_string(discovery, "runtime_revision", "discovery")
             runtime_revision = discovery_revision
             self._check_devices(discovery, parsed_request)
             completed.append("discover_devices")
@@ -263,14 +261,11 @@ class EnergySkillWorkflow:
                 member_plan_id = self._required_string(
                     validation_response.get("plan"), "id", "validated plan"
                 )
-                member_digest = self._required_string(
-                    validation, "digest", "plan validation"
-                )
+                member_digest = self._required_string(validation, "digest", "plan validation")
                 member_requires_confirmation = validation.get(
                     "status"
                 ) == "requires_confirmation" or (
-                    validation_response.get("plan", {}).get("status")
-                    == "requires_confirmation"
+                    validation_response.get("plan", {}).get("status") == "requires_confirmation"
                 )
                 if member_requires_confirmation and first_confirming_plan_dict is None:
                     first_confirming_plan_dict = validation_response["plan"]
@@ -565,8 +560,7 @@ class EnergySkillWorkflow:
                             message="Domotics execution returned no terminal outcomes",
                         )
                     if not all(
-                        isinstance(outcome, dict)
-                        and outcome.get("status") == "confirmed_success"
+                        isinstance(outcome, dict) and outcome.get("status") == "confirmed_success"
                         for outcome in member_outcomes
                     ):
                         raise _WorkflowFailure(
@@ -808,7 +802,7 @@ class EnergySkillWorkflow:
     @staticmethod
     def _check_proposal(response: dict[str, Any], scenario: OptimizationScenario) -> None:
         status = response.get("status")
-        if status not in {"optimal", "feasible"}:
+        if status not in {"optimal", "feasible", "optimal_hierarchy", "feasible_hierarchy"}:
             safe_status = str(status) if isinstance(status, str) else "unknown"
             raise _WorkflowFailure(
                 status=WorkflowStatus.BLOCKED,
@@ -973,9 +967,7 @@ class EnergySkillWorkflow:
         diagnostics: list[WorkflowDiagnostic] | None = None,
     ) -> SkillRunResult:
         resolved_bundle = list(bundle or [])
-        resolved_plan_id = plan_id or (
-            resolved_bundle[0]["plan_id"] if resolved_bundle else None
-        )
+        resolved_plan_id = plan_id or (resolved_bundle[0]["plan_id"] if resolved_bundle else None)
         resolved_digest = validation_digest or (
             resolved_bundle[0]["validation_digest"] if resolved_bundle else None
         )

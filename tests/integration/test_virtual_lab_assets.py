@@ -30,9 +30,7 @@ def test_lab_mappings_are_valid_and_use_explicit_addresses() -> None:
     assert len(modbus.entities) >= 3
     assert len(knx.entities) >= 2
     assert all(
-        binding.state.address >= 0
-        for entity in modbus.entities
-        for binding in entity.capabilities
+        binding.state.address >= 0 for entity in modbus.entities for binding in entity.capabilities
     )
     assert all(
         "/" in binding.state_group_address
@@ -47,9 +45,7 @@ def test_lab_compose_references_only_local_secret_free_profiles() -> None:
 
     for service in ("mqtt:", "zigbee2mqtt:", "modbus:", "homeassistant:", "matter-server:"):
         assert service in compose
-    assert "allow_anonymous true" in (LAB / "mqtt" / "mosquitto.conf").read_text(
-        encoding="utf-8"
-    )
+    assert "allow_anonymous true" in (LAB / "mqtt" / "mosquitto.conf").read_text(encoding="utf-8")
     assert "<secret>" not in compose
     assert "<token>" not in compose
     assert "\nDOMOAI_MQTT_PASSWORD=" not in example

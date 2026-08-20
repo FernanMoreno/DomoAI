@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from typing import Any
+from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -29,6 +30,7 @@ from domoai.optimizer.horizon import Horizon
 from domoai.optimizer.ports import EnergyContextProvider
 from domoai.persistence.repositories import AuditEventRepository
 from domoai.runtime.approval_store import ApprovalStore
+from domoai.runtime.metrics import RuntimeMetricsCollector
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.scheduler import Scheduler
 
@@ -46,6 +48,7 @@ class DomoticsMcpContext:
     last_refreshed_at: datetime | None = None
     scheduler: Scheduler | None = None
     audit_repository: AuditEventRepository | None = None
+    metrics: RuntimeMetricsCollector | None = None
 
 
 def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> FastMCP:
@@ -136,10 +139,16 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         annotations=read_annotations,
         structured_output=True,
     )
-    async def validate_command(command: dict[str, Any]) -> dict[str, Any]:
+    async def validate_command(
+        command: dict[str, Any], agent_request_id: str | None = None
+    ) -> dict[str, Any]:
         try:
             parsed_command = Command.model_validate(command)
-            plan = Plan(id=f"command-validation-{parsed_command.id}", commands=[parsed_command])
+            plan = Plan(
+                id=f"command-validation-{parsed_command.id}",
+                commands=[parsed_command],
+                agent_request_id=agent_request_id or str(uuid4()),
+            )
             validated = context.facade.validate_plan(plan)
             context.plans[validated.id] = validated
             return {
@@ -166,6 +175,8 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         del mode
         try:
             parsed_plan = Plan.model_validate(plan)
+            if parsed_plan.agent_request_id is None:
+                parsed_plan = parsed_plan.model_copy(update={"agent_request_id": str(uuid4())})
             validated = context.facade.validate_plan(parsed_plan)
             context.plans[validated.id] = validated
             return {
@@ -510,6 +521,13 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 context.discovery.state_store.runtime_revision,
             )
         )
+
+    @server.resource("domotics://metrics", mime_type="application/json")
+    async def metrics_resource() -> str:
+        if context.metrics is None:
+            return as_json({"schema_version": "v1", "available": False})
+        snapshot = await context.metrics.snapshot()
+        return as_json({**snapshot, "available": True})
 
     return server
 

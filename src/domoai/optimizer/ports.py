@@ -16,6 +16,8 @@ from domoai.optimizer.scenario import OptimizationScenario
 class OptimizationStatus(StrEnum):
     OPTIMAL = "optimal"
     FEASIBLE = "feasible"
+    OPTIMAL_HIERARCHY = "optimal_hierarchy"
+    FEASIBLE_HIERARCHY = "feasible_hierarchy"
     INFEASIBLE = "infeasible"
     INVALID = "invalid"
     TIMEOUT = "timeout"

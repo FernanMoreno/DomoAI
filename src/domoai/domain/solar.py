@@ -16,9 +16,7 @@ class SolarInstallationProfile(StrictModel):
     """Versioned, credential-free metadata for one photovoltaic installation."""
 
     schema_version: Literal["v1"] = "v1"
-    profile_id: str = Field(
-        default="home", pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64
-    )
+    profile_id: str = Field(default="home", pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     installed_kwp: float = Field(gt=0)
@@ -30,9 +28,7 @@ class SolarInstallationProfile(StrictModel):
     source_id: str = Field(
         default="operator_config", pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64
     )
-    source_revision: str = Field(
-        default="v1", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-    )
+    source_revision: str = Field(default="v1", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
     captured_at: datetime | None = None
 
     @model_validator(mode="after")

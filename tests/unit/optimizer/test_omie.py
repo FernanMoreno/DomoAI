@@ -77,9 +77,7 @@ def test_provider_sanitizes_client_failures() -> None:
 def test_provider_accepts_dst_period_counts(session_date, expected_slots) -> None:
     horizon = omie_horizon(session_date=session_date)
     provider = OmieTariffProvider(
-        FixtureOmieClient(
-            omie_file_payload(session_date=session_date, rows=expected_slots)
-        )
+        FixtureOmieClient(omie_file_payload(session_date=session_date, rows=expected_slots))
     )
 
     series = provider.get_tariffs(horizon)

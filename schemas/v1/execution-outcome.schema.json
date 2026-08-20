@@ -228,6 +228,23 @@
       "title": "Command Id",
       "type": "string"
     },
+    "execution_attempt_id": {
+      "minLength": 1,
+      "title": "Execution Attempt Id",
+      "type": "string"
+    },
+    "adapter_request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adapter Request Id"
+    },
     "status": {
       "$ref": "#/$defs/ExecutionStatus"
     },
@@ -284,6 +301,7 @@
   "required": [
     "plan_id",
     "command_id",
+    "execution_attempt_id",
     "status"
   ],
   "title": "ExecutionOutcome",

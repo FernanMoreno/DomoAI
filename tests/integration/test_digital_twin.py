@@ -115,9 +115,7 @@ async def test_twin_preview_uses_real_device_id_unmodified() -> None:
 @pytest.mark.asyncio
 async def test_twin_reports_non_representable_device_types() -> None:
     _, registry, state_store = await _live_context()
-    climate_id = next(
-        device.id for device in registry.devices if device.type.value == "climate"
-    )
+    climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
 
     twin = DigitalTwin()
     report = await twin.sync(registry, state_store)
@@ -137,9 +135,7 @@ async def test_twin_preview_reports_missing_device_when_targeting_non_representa
     None
 ):
     _, registry, state_store = await _live_context()
-    climate_id = next(
-        device.id for device in registry.devices if device.type.value == "climate"
-    )
+    climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
 
     twin = DigitalTwin()
     await twin.sync(registry, state_store)

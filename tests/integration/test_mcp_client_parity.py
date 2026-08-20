@@ -69,18 +69,22 @@ async def test_two_mcp_clients_have_equivalent_read_and_safe_execution_results()
         assert validation_a["validation"][key] == validation_b["validation"][key]
     assert validation_a["validation"]["status"] == "valid"
 
-    plan = structured(await client_a.call_tool(
-        "validate_plan",
-        {"plan": {"id": "mcp-plan-1", "commands": [command]}},
-    ))
-    execution = structured(await client_b.call_tool(
-        "execute_plan",
-        {
-            "plan_id": "mcp-plan-1",
-            "validation_digest": plan["validation"]["digest"],
-            "dry_run": False,
-        },
-    ))
+    plan = structured(
+        await client_a.call_tool(
+            "validate_plan",
+            {"plan": {"id": "mcp-plan-1", "commands": [command]}},
+        )
+    )
+    execution = structured(
+        await client_b.call_tool(
+            "execute_plan",
+            {
+                "plan_id": "mcp-plan-1",
+                "validation_digest": plan["validation"]["digest"],
+                "dry_run": False,
+            },
+        )
+    )
 
     assert execution["outcomes"][0]["status"] == "confirmed_success"
     assert [call.id for call in adapter.calls] == ["mcp-command-1"]

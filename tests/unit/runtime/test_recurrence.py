@@ -36,9 +36,7 @@ def test_next_occurrence_survives_fall_back() -> None:
 
 def test_days_of_week_restriction_is_honored() -> None:
     # 2026-08-19 is a Wednesday (weekday()==2). Restrict to Mon/Fri (0, 4).
-    rule = RecurrenceRule(
-        time_of_day=time(9, 0), timezone="UTC", days_of_week=[0, 4]
-    )
+    rule = RecurrenceRule(time_of_day=time(9, 0), timezone="UTC", days_of_week=[0, 4])
     after = datetime(2026, 8, 19, 0, 0, tzinfo=UTC)
 
     occurrence = next_occurrence(rule, after)

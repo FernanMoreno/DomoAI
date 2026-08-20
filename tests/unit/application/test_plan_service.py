@@ -216,9 +216,7 @@ async def test_plan_expiry_uses_injected_clock() -> None:
     await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
     initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
     clock = FixedClock(initial)
-    service = PlanService(
-        registry, state_store, PolicyEngine([]), AuditLog(), clock=clock
-    )
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
 
     plan = service.create_plan(

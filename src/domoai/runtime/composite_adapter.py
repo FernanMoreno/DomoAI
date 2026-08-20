@@ -8,18 +8,18 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, cast
 
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
     Command,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
 )
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
-
-_BULK_EVENT_KIND = "state_changed"
 
 
 class CompositeAdapter:
@@ -45,6 +45,20 @@ class CompositeAdapter:
         self._connected: set[str] = set()
         self._diagnostics: list[dict[str, Any]] = []
         self._event_queue_max_size = event_queue_max_size
+        self._dropped_events_total = 0
+        self._bulk_queue: asyncio.Queue[Any] | None = None
+        self._priority_queue: asyncio.Queue[Any] | None = None
+
+    @property
+    def dropped_events_total(self) -> int:
+        return self._dropped_events_total
+
+    @property
+    def event_queue_depth(self) -> dict[str, int]:
+        return {
+            "bulk": self._bulk_queue.qsize() if self._bulk_queue is not None else 0,
+            "priority": self._priority_queue.qsize() if self._priority_queue is not None else 0,
+        }
 
     def bind_registry(self, registry: DeviceRegistry) -> None:
         self.registry = registry
@@ -101,9 +115,7 @@ class CompositeAdapter:
                 area_id = str(area.get("id", ""))
                 if area_id:
                     areas.setdefault(area_id, dict(area))
-            unsupported.extend(
-                self._annotate_items(result.unsupported_sources, adapter.adapter_id)
-            )
+            unsupported.extend(self._annotate_items(result.unsupported_sources, adapter.adapter_id))
         if successful == 0:
             raise ConnectionError("All configured source adapters failed discovery")
         return AdapterSnapshot(
@@ -175,12 +187,14 @@ class CompositeAdapter:
         Item = tuple[str, SourceEvent | None, BaseException | None]
         bulk_queue: asyncio.Queue[Item] = asyncio.Queue(maxsize=self._event_queue_max_size)
         priority_queue: asyncio.Queue[Item] = asyncio.Queue()
+        self._bulk_queue = bulk_queue
+        self._priority_queue = priority_queue
         active = [adapter for adapter in self.adapters if adapter.adapter_id in self._connected]
 
         async def pump(adapter: AdapterPort) -> None:
             try:
                 async for event in adapter.subscribe_events():
-                    if event.kind == _BULK_EVENT_KIND:
+                    if isinstance(event, StateChangedEvent):
                         try:
                             bulk_queue.put_nowait((adapter.adapter_id, event, None))
                         except asyncio.QueueFull:
@@ -217,8 +231,7 @@ class CompositeAdapter:
                 adapter_id, event, error = item
                 if error is not None:
                     self._record_failure(adapter_id, "adapter_event_stream_failed", error)
-                    yield SourceEvent(
-                        kind="adapter_diagnostic",
+                    yield AdapterDiagnosticEvent(
                         payload={
                             "source_adapter_id": adapter_id,
                             "reason": str(error)[:200],
@@ -229,7 +242,7 @@ class CompositeAdapter:
                 else:
                     payload = dict(event.payload)
                     payload["source_adapter_id"] = adapter_id
-                    yield SourceEvent(kind=event.kind, payload=payload)
+                    yield type(event)(payload=payload)
         finally:
             priority_get.cancel()
             bulk_get.cancel()
@@ -243,13 +256,9 @@ class CompositeAdapter:
         health = await asyncio.gather(
             *(adapter.health() for adapter in self.adapters), return_exceptions=True
         )
-        connected = any(
-            isinstance(item, AdapterHealth) and item.connected for item in health
-        )
+        connected = any(isinstance(item, AdapterHealth) and item.connected for item in health)
         messages = [
-            item.message
-            for item in health
-            if isinstance(item, AdapterHealth) and item.message
+            item.message for item in health if isinstance(item, AdapterHealth) and item.message
         ]
         components = [item for item in health if isinstance(item, AdapterHealth)]
         return AdapterHealth(
@@ -260,6 +269,7 @@ class CompositeAdapter:
         )
 
     def _record_drop(self, adapter_id: str, event: SourceEvent) -> None:
+        self._dropped_events_total += 1
         self._diagnostics.append(
             {
                 "event_type": "adapter_event_dropped_backpressure",

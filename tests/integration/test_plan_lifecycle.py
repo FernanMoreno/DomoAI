@@ -51,7 +51,9 @@ async def build_plan_context() -> tuple[
     return adapter, registry, state_store, audit, plan_service, executor
 
 
-async def build_plan_context_with_repository(tmp_path) -> tuple[
+async def build_plan_context_with_repository(
+    tmp_path,
+) -> tuple[
     SimulatedHomeAdapter,
     DeviceRegistry,
     StateStore,
@@ -412,11 +414,7 @@ async def test_safety_kernel_blocks_command_allowed_by_capability_and_policy() -
     assert validated.status is PlanStatus.READY
 
     safety_kernel = SafetyKernel(
-        [
-            SafetyLimit(
-                device_type=DeviceType.CLIMATE, capability="target_temperature", maximum=22
-            )
-        ]
+        [SafetyLimit(device_type=DeviceType.CLIMATE, capability="target_temperature", maximum=22)]
     )
     executor = PlanExecutor(adapter, plan_service, audit, safety_kernel=safety_kernel)
 
@@ -703,8 +701,8 @@ async def test_precondition_sequencing_sees_earlier_command_confirmed_effect() -
 
 @pytest.mark.asyncio
 async def test_double_execution_of_terminal_plan_is_refused(tmp_path) -> None:
-    adapter, registry, _, _, plan_service, executor, _ = (
-        await build_plan_context_with_repository(tmp_path)
+    adapter, registry, _, _, plan_service, executor, _ = await build_plan_context_with_repository(
+        tmp_path
     )
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
@@ -732,9 +730,15 @@ async def test_double_execution_of_terminal_plan_is_refused(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_double_execution_of_in_progress_plan_is_refused(tmp_path) -> None:
-    adapter, registry, _, _, plan_service, executor, plan_repository = (
-        await build_plan_context_with_repository(tmp_path)
-    )
+    (
+        adapter,
+        registry,
+        _,
+        _,
+        plan_service,
+        executor,
+        plan_repository,
+    ) = await build_plan_context_with_repository(tmp_path)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
         id="plan-double-execution-2",
@@ -760,9 +764,15 @@ async def test_double_execution_of_in_progress_plan_is_refused(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_plan_recovered_from_crash_can_never_be_claimed_again(tmp_path) -> None:
-    adapter, registry, _, audit, plan_service, executor, plan_repository = (
-        await build_plan_context_with_repository(tmp_path)
-    )
+    (
+        adapter,
+        registry,
+        _,
+        audit,
+        plan_service,
+        executor,
+        plan_repository,
+    ) = await build_plan_context_with_repository(tmp_path)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
         id="plan-crash-recovery-1",
@@ -792,8 +802,8 @@ async def test_plan_recovered_from_crash_can_never_be_claimed_again(tmp_path) ->
 
 @pytest.mark.asyncio
 async def test_first_time_execution_with_repository_is_unaffected(tmp_path) -> None:
-    adapter, registry, _, _, plan_service, executor, _ = (
-        await build_plan_context_with_repository(tmp_path)
+    adapter, registry, _, _, plan_service, executor, _ = await build_plan_context_with_repository(
+        tmp_path
     )
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
@@ -855,9 +865,15 @@ class _InterleavingPlanRepository:
 async def test_two_concurrent_execution_attempts_on_the_same_plan_have_exactly_one_winner(
     tmp_path,
 ) -> None:
-    adapter, registry, _, _, plan_service, executor, plan_repository = (
-        await build_plan_context_with_repository(tmp_path)
-    )
+    (
+        adapter,
+        registry,
+        _,
+        _,
+        plan_service,
+        executor,
+        plan_repository,
+    ) = await build_plan_context_with_repository(tmp_path)
     executor.plan_repository = _InterleavingPlanRepository(plan_repository)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
@@ -1042,9 +1058,7 @@ async def _build_context_with_failing_adapter(
     await database.initialize()
     plan_repository = PlanRepository(database)
     failing_adapter = FailureInjectingAdapter(fail=fail)
-    executor = PlanExecutor(
-        failing_adapter, plan_service, audit, plan_repository=plan_repository
-    )
+    executor = PlanExecutor(failing_adapter, plan_service, audit, plan_repository=plan_repository)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
     plan = Plan(
         id="plan-failure-injection-1",

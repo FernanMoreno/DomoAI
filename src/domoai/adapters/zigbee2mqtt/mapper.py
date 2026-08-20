@@ -20,9 +20,7 @@ def flatten_exposes(exposes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         flattened.append(expose)
         features = expose.get("features")
         if isinstance(features, list):
-            flattened.extend(
-                item for item in features if isinstance(item, dict)
-            )
+            flattened.extend(item for item in features if isinstance(item, dict))
     return flattened
 
 

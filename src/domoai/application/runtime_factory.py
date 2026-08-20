@@ -9,7 +9,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
-from domoai.adapters.home_assistant.adapter import HomeAssistantAdapter
 from domoai.adapters.home_assistant.client import HomeAssistantClient
 from domoai.adapters.home_assistant.config import load_metric_mappings
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
@@ -102,27 +101,17 @@ def _create_configured_adapters(
             if settings.home_assistant_mapping_path is not None
             else None
         )
-        if settings.home_assistant_provider:
-            client = HomeAssistantClient(
-                settings.home_assistant_url,
-                settings.home_assistant_token.get_secret_value(),
-            )
-            provider = HomeAssistantProvider(
-                client,
-                metric_mappings=metric_mappings,
-            )
-            if provider_registry is not None:
-                provider_registry.register(provider)
-            adapters.append(HomeAssistantProviderAdapter(provider))
-        else:
-            adapters.append(
-                HomeAssistantAdapter(
-                    HomeAssistantClient(
-                        settings.home_assistant_url,
-                        settings.home_assistant_token.get_secret_value(),
-                    )
-                )
-            )
+        client = HomeAssistantClient(
+            settings.home_assistant_url,
+            settings.home_assistant_token.get_secret_value(),
+        )
+        provider = HomeAssistantProvider(
+            client,
+            metric_mappings=metric_mappings,
+        )
+        if provider_registry is not None:
+            provider_registry.register(provider)
+        adapters.append(HomeAssistantProviderAdapter(provider))
     if settings.zigbee2mqtt_url is not None:
         parsed = urlparse(settings.zigbee2mqtt_url)
         if parsed.scheme not in {"mqtt", "mqtts"} or parsed.hostname is None:
@@ -154,9 +143,7 @@ def _create_configured_adapters(
     if settings.matter_server_url is not None:
         parsed = urlparse(settings.matter_server_url)
         if parsed.scheme not in {"ws", "wss"} or parsed.hostname is None:
-            raise ValueError(
-                "DOMOAI_MATTER_SERVER_URL must be a valid ws:// or wss:// URL"
-            )
+            raise ValueError("DOMOAI_MATTER_SERVER_URL must be a valid ws:// or wss:// URL")
         adapters.append(
             MatterServerAdapter(
                 MatterServerWebSocketTransport(
@@ -275,9 +262,10 @@ async def build_runtime(
         busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
     )
     await database.initialize()
+    clock: Clock = SystemClock()
     audit_repository = AuditEventRepository(database)
-    audit = AuditLog(sink=audit_repository)
-    device_repository = DeviceRepository(database)
+    audit = AuditLog(sink=audit_repository, clock=clock)
+    device_repository = DeviceRepository(database, clock=clock)
     state_snapshot_repository = StateSnapshotRepository(database)
     registry = DeviceRegistry()
     registry.load_persisted(await device_repository.list_all())
@@ -289,7 +277,6 @@ async def build_runtime(
     )
     if isinstance(selected_adapter, CompositeAdapter):
         selected_adapter.bind_registry(registry)
-    clock: Clock = SystemClock()
     state_store = StateStore(
         stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds),
         clock=clock,
@@ -302,6 +289,7 @@ async def build_runtime(
         audit,
         device_repository=device_repository,
         state_snapshot_repository=state_snapshot_repository,
+        clock=clock,
     )
     try:
         await selected_adapter.connect()
@@ -331,7 +319,7 @@ async def build_runtime(
     risk_classifier = RiskClassifier(overrides=tuple(risk_overrides))
     policy_engine = PolicyEngine(policies, risk_classifier)
     plan_service = PlanService(registry, state_store, policy_engine, audit, clock=clock)
-    plan_repository = PlanRepository(database)
+    plan_repository = PlanRepository(database, clock=clock)
     await PlanRecoveryService(plan_repository, audit).recover_orphaned_plans()
     outcome_repository = ExecutionOutcomeRepository(database)
     if resolved_settings.safety_limits_path is not None:
@@ -356,8 +344,8 @@ async def build_runtime(
     )
     facade = DomoticsFacade(plan_service, executor)
     event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)
-    scheduled_plan_repository = ScheduledPlanRepository(database)
-    recurring_schedule_repository = RecurringScheduleRepository(database)
+    scheduled_plan_repository = ScheduledPlanRepository(database, clock=clock)
+    recurring_schedule_repository = RecurringScheduleRepository(database, clock=clock)
     scheduler = Scheduler(
         executor,
         scheduled_plan_repository,

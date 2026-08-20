@@ -114,9 +114,7 @@ def test_reappearance_recovers_same_canonical_id() -> None:
     assert original_id is not None
     assert registry.get(original_id) is not None
 
-    registry.apply_snapshot(
-        snapshot_without_canonical_id(include_shared_device=False), "fixture"
-    )
+    registry.apply_snapshot(snapshot_without_canonical_id(include_shared_device=False), "fixture")
     assert registry.get(original_id) is None
 
     registry.apply_snapshot(snapshot_without_canonical_id(), "fixture")

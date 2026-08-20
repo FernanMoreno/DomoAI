@@ -5,7 +5,6 @@ import pytest
 from pydantic import SecretStr
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
-from domoai.adapters.home_assistant.adapter import HomeAssistantAdapter
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.adapters.knx.adapter import KnxAdapter
@@ -40,21 +39,9 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
                 home_assistant_token=SecretStr("fixture-token"),
             )
         ),
-        HomeAssistantAdapter,
-    )
-    assert isinstance(
-        create_adapter(
-            Settings(
-                home_assistant_url="http://home-assistant.test",
-                home_assistant_token=SecretStr("fixture-token"),
-                home_assistant_provider=True,
-            )
-        ),
         HomeAssistantProviderAdapter,
     )
-    plaintext_adapter = create_adapter(
-        Settings(zigbee2mqtt_url="mqtt://broker.test:1884")
-    )
+    plaintext_adapter = create_adapter(Settings(zigbee2mqtt_url="mqtt://broker.test:1884"))
     assert isinstance(plaintext_adapter, Zigbee2MqttAdapter)
     assert plaintext_adapter.transport.port == 1884
     assert plaintext_adapter.transport.tls is False
@@ -79,9 +66,7 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         KnxAdapter,
     )
     modbus_mapping_path = tmp_path / "modbus.json"
-    modbus_mapping_path.write_text(
-        json.dumps(modbus_mapping_payload()), encoding="utf-8"
-    )
+    modbus_mapping_path.write_text(json.dumps(modbus_mapping_payload()), encoding="utf-8")
     assert isinstance(
         create_adapter(
             Settings(
@@ -123,7 +108,6 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         Settings(
             home_assistant_url="http://home-assistant.test",
             home_assistant_token=SecretStr("fixture-token"),
-            home_assistant_provider=True,
             modbus_host="192.0.2.20",
             modbus_config_path=modbus_mapping_path,
         ),
@@ -353,20 +337,49 @@ async def test_runtime_factory_reconciled_away_device_does_not_reappear_after_re
     database = SQLiteDatabase(database_path)
     await database.initialize()
     persisted_devices = await DeviceRepository(database).list_all()
+    persisted_states = await StateSnapshotRepository(database).list_all()
     await database.close()
 
     assert light_id not in {device.id for device in persisted_devices}
+    assert light_id not in {state.device_id for state in persisted_states}
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_removed_device_state_does_not_reappear_after_restart(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "reconciled-restart-runtime.sqlite3"
+    adapter = SimulatedHomeAdapter()
+    runtime = await build_runtime(Settings(database_path=database_path), adapter=adapter)
+    light_id = next(
+        device.id for device in runtime.registry.devices if device.type.value == "light"
+    )
+    other_id = next(device.id for device in runtime.registry.devices if device.id != light_id)
+
+    adapter._entities[:] = [
+        item for item in adapter._entities if item["entity_id"] != "light.living_room_main"
+    ]
+    await runtime.discovery.refresh()
+    await runtime.close()
+
+    restarted = await build_runtime(Settings(database_path=database_path), adapter=adapter)
+    try:
+        restarted_state_ids = {state.device_id for state in await restarted.state_store.all()}
+        assert light_id not in restarted_state_ids
+        assert other_id in restarted_state_ids
+    finally:
+        await restarted.close()
 
 
 @pytest.mark.asyncio
 async def test_runtime_factory_loads_configured_policies(tmp_path: Path) -> None:
     policy_path = tmp_path / "policies.toml"
     policy_path.write_text(
-        '[[policies]]\n'
+        "[[policies]]\n"
         'id = "deny-vacation-mode"\n'
         'action = "deny"\n'
-        'priority = 100\n'
-        '[policies.target]\n'
+        "priority = 100\n"
+        "[policies.target]\n"
         'device_id = "cover.garage_main"\n',
         encoding="utf-8",
     )
@@ -400,10 +413,7 @@ async def test_runtime_factory_audits_default_policy_when_unconfigured(tmp_path:
 async def test_runtime_factory_wires_configured_safety_limits(tmp_path: Path) -> None:
     safety_limits_path = tmp_path / "safety-limits.toml"
     safety_limits_path.write_text(
-        '[[limits]]\n'
-        'device_type = "climate"\n'
-        'capability = "target_temperature"\n'
-        'maximum = 22\n',
+        '[[limits]]\ndevice_type = "climate"\ncapability = "target_temperature"\nmaximum = 22\n',
         encoding="utf-8",
     )
     runtime = await build_runtime(
@@ -526,9 +536,7 @@ async def test_runtime_factory_builds_live_energy_provider_from_persisted_profil
 async def test_build_runtime_starts_degraded_when_adapter_connect_fails(
     tmp_path: Path,
 ) -> None:
-    adapter = RecordingAdapter(
-        "flaky", source_snapshot(adapter_id="flaky"), fail_connect=True
-    )
+    adapter = RecordingAdapter("flaky", source_snapshot(adapter_id="flaky"), fail_connect=True)
     runtime = await build_runtime(
         Settings(database_path=tmp_path / "degraded-connect.sqlite3"), adapter=adapter
     )
@@ -541,9 +549,7 @@ async def test_build_runtime_starts_degraded_when_adapter_connect_fails(
 
 @pytest.mark.asyncio
 async def test_build_runtime_starts_degraded_when_discovery_fails(tmp_path: Path) -> None:
-    adapter = RecordingAdapter(
-        "flaky", source_snapshot(adapter_id="flaky"), fail_discover=True
-    )
+    adapter = RecordingAdapter("flaky", source_snapshot(adapter_id="flaky"), fail_discover=True)
     runtime = await build_runtime(
         Settings(database_path=tmp_path / "degraded-discover.sqlite3"), adapter=adapter
     )

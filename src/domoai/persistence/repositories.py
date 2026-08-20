@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from domoai.domain.models import (
@@ -18,20 +18,22 @@ from domoai.domain.models import (
     StateSnapshot,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import redact_payload
 
 _TABLES = {"devices", "policies", "plans"}
 
 
 class SQLiteJsonRepository:
-    def __init__(self, database: SQLiteDatabase, table: str) -> None:
+    def __init__(self, database: SQLiteDatabase, table: str, *, clock: Clock | None = None) -> None:
         if table not in _TABLES:
             raise ValueError(f"Unsupported repository table: {table}")
         self.database = database
         self.table = table
+        self.clock = clock or SystemClock()
 
     async def save(self, identifier: str, payload: dict[str, Any]) -> None:
-        timestamp = datetime.now(UTC).isoformat()
+        timestamp = self.clock.now().isoformat()
         self.database.connection.execute(
             f"""INSERT INTO {self.table} (id, payload, updated_at)
                 VALUES (?, ?, ?)
@@ -164,11 +166,12 @@ class AuditEventRepository:
 
 
 class PlanRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
         self._repository = SQLiteJsonRepository(database, "plans")
+        self.clock = clock or SystemClock()
 
     async def save(self, plan: Plan) -> None:
-        timestamp = datetime.now(UTC).isoformat()
+        timestamp = self.clock.now().isoformat()
         self._repository.database.connection.execute(
             """INSERT INTO plans (id, payload, status, updated_at)
                VALUES (?, ?, ?, ?)
@@ -191,7 +194,7 @@ class PlanRepository:
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool:
         placeholders = ",".join("?" for _ in allowed_statuses)
-        timestamp = datetime.now(UTC).isoformat()
+        timestamp = self.clock.now().isoformat()
         cursor = self._repository.database.connection.execute(
             f"""INSERT INTO plans (id, payload, status, updated_at)
                 VALUES (?, ?, ?, ?)
@@ -221,8 +224,8 @@ class PlanRepository:
 
 
 class DeviceRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
-        self._repository = SQLiteJsonRepository(database, "devices")
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+        self._repository = SQLiteJsonRepository(database, "devices", clock=clock)
 
     async def save(self, device: Device) -> None:
         await self._repository.save(device.id, device.model_dump(mode="json"))
@@ -266,6 +269,12 @@ class StateSnapshotRepository:
         rows = cursor.fetchall()
         cursor.close()
         return [StateSnapshot.model_validate(json.loads(row[0])) for row in rows]
+
+    async def delete(self, device_id: str) -> None:
+        self.database.connection.execute(
+            "DELETE FROM state_snapshots WHERE device_id = ?", (device_id,)
+        )
+        self.database.connection.commit()
 
 
 class ExecutionOutcomeRepository:
@@ -316,13 +325,14 @@ class ExecutionOutcomeRepository:
 
 
 class ScheduledPlanRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
         self.database = database
+        self.clock = clock or SystemClock()
 
     async def schedule(self, plan: Plan) -> None:
         if plan.execute_at is None:
             raise ValueError("plan.execute_at is required to schedule a plan")
-        now = datetime.now(UTC).isoformat()
+        now = self.clock.now().isoformat()
         self.database.connection.execute(
             """INSERT INTO scheduled_plans
                (plan_id, execute_at, status, payload, updated_at)
@@ -377,7 +387,7 @@ class ScheduledPlanRepository:
             (
                 execute_at.isoformat(),
                 json.dumps(updated_plan.model_dump(mode="json"), sort_keys=True),
-                datetime.now(UTC).isoformat(),
+                self.clock.now().isoformat(),
                 plan_id,
             ),
         )
@@ -388,15 +398,16 @@ class ScheduledPlanRepository:
         cursor = self.database.connection.execute(
             """UPDATE scheduled_plans SET status = ?, updated_at = ?
                WHERE plan_id = ? AND status = 'pending'""",
-            (status, datetime.now(UTC).isoformat(), plan_id),
+            (status, self.clock.now().isoformat(), plan_id),
         )
         self.database.connection.commit()
         return cursor.rowcount > 0
 
 
 class RecurringScheduleRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
         self.database = database
+        self.clock = clock or SystemClock()
 
     async def create(
         self,
@@ -405,7 +416,7 @@ class RecurringScheduleRepository:
         rule: RecurrenceRule,
         next_execute_at: datetime,
     ) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = self.clock.now().isoformat()
         self.database.connection.execute(
             """INSERT INTO recurring_schedules
                (schedule_id, template_payload, recurrence_payload, next_execute_at,
@@ -462,7 +473,7 @@ class RecurringScheduleRepository:
         self.database.connection.execute(
             """UPDATE recurring_schedules SET next_execute_at = ?, updated_at = ?
                WHERE schedule_id = ? AND status = 'active'""",
-            (next_execute_at.isoformat(), datetime.now(UTC).isoformat(), schedule_id),
+            (next_execute_at.isoformat(), self.clock.now().isoformat(), schedule_id),
         )
         self.database.connection.commit()
 
@@ -470,7 +481,7 @@ class RecurringScheduleRepository:
         cursor = self.database.connection.execute(
             """UPDATE recurring_schedules SET status = 'cancelled', updated_at = ?
                WHERE schedule_id = ? AND status = 'active'""",
-            (datetime.now(UTC).isoformat(), schedule_id),
+            (self.clock.now().isoformat(), schedule_id),
         )
         self.database.connection.commit()
         return cursor.rowcount > 0

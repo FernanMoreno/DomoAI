@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -262,6 +262,8 @@ class Approval(StrictModel):
 class ExecutionOutcome(StrictModel):
     plan_id: str = Field(min_length=1)
     command_id: str = Field(min_length=1)
+    execution_attempt_id: str = Field(min_length=1)
+    adapter_request_id: str | None = None
     status: ExecutionStatus
     adapter_ref: SourceRef | None = None
     before_state: StateSnapshot | None = None
@@ -286,6 +288,7 @@ class Plan(StrictModel):
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
     approval: Approval | None = None
     execution: ExecutionSummary | None = None
+    agent_request_id: str | None = None
 
     @model_validator(mode="after")
     def validate_timestamps(self) -> Plan:
@@ -343,6 +346,35 @@ class AdapterExecutionAck(StrictModel):
     message: str | None = None
 
 
-class SourceEvent(StrictModel):
-    kind: str = Field(min_length=1)
+class StateChangedEvent(StrictModel):
+    kind: Literal["state_changed"] = "state_changed"
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AvailabilityChangedEvent(StrictModel):
+    kind: Literal["availability_changed"] = "availability_changed"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeviceMembershipChangedEvent(StrictModel):
+    kind: Literal["device_membership_changed"] = "device_membership_changed"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class MetadataChangedEvent(StrictModel):
+    kind: Literal["metadata_changed"] = "metadata_changed"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdapterDiagnosticEvent(StrictModel):
+    kind: Literal["adapter_diagnostic"] = "adapter_diagnostic"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+type SourceEvent = (
+    StateChangedEvent
+    | AvailabilityChangedEvent
+    | DeviceMembershipChangedEvent
+    | MetadataChangedEvent
+    | AdapterDiagnosticEvent
+)

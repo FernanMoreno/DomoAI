@@ -65,6 +65,7 @@ class PlanService:
         return Plan(
             id=plan_id,
             commands=normalized,
+            created_at=self.clock.now(),
             expires_at=expires_at or self.clock.now() + self.DEFAULT_PLAN_TTL,
         )
 
@@ -87,9 +88,7 @@ class PlanService:
                 ErrorCode.INVALID_CAPABILITY,
                 f"Command unit {command.unit!r} does not match capability unit {capability.unit!r}",
             )
-        return command.model_copy(
-            update={"unit": command.unit or capability.unit}
-        )
+        return command.model_copy(update={"unit": command.unit or capability.unit})
 
     def capability_for_command(self, command: Command) -> Capability | None:
         device = self.registry.get(command.device_id)
@@ -112,9 +111,7 @@ class PlanService:
             seen_idempotency_keys.add(command.idempotency_key)
             device = self.registry.get(command.device_id)
             if device is None:
-                errors.append(
-                    self._error(ErrorCode.DEVICE_NOT_FOUND, "Unknown device", command)
-                )
+                errors.append(self._error(ErrorCode.DEVICE_NOT_FOUND, "Unknown device", command))
                 continue
             capability = self._find_capability(device, command.command)
             if capability is None:
@@ -148,9 +145,7 @@ class PlanService:
             decision = self.policy_engine.evaluate(command, device, capability.name)
             decisions.append(decision)
             if decision.action is PolicyAction.DENY:
-                errors.append(
-                    self._error(ErrorCode.POLICY_DENIED, decision.reason, command)
-                )
+                errors.append(self._error(ErrorCode.POLICY_DENIED, decision.reason, command))
 
         revision = self.current_revision
         dependencies = PlanDependencies(
@@ -162,13 +157,19 @@ class PlanService:
         requires_confirmation = any(
             decision.action is PolicyAction.CONFIRM for decision in decisions
         )
-        status = ValidationStatus.INVALID if errors else (
-            ValidationStatus.REQUIRES_CONFIRMATION
-            if requires_confirmation
-            else ValidationStatus.VALID
+        status = (
+            ValidationStatus.INVALID
+            if errors
+            else (
+                ValidationStatus.REQUIRES_CONFIRMATION
+                if requires_confirmation
+                else ValidationStatus.VALID
+            )
         )
-        plan_status = PlanStatus.VALIDATED if errors else (
-            PlanStatus.REQUIRES_CONFIRMATION if requires_confirmation else PlanStatus.READY
+        plan_status = (
+            PlanStatus.VALIDATED
+            if errors
+            else (PlanStatus.REQUIRES_CONFIRMATION if requires_confirmation else PlanStatus.READY)
         )
         validation = ValidationResult(
             status=status,
@@ -296,11 +297,15 @@ class PlanService:
     def _validate_value(command: Command, capability: Capability) -> list[ErrorDetail]:
         if command.value is None:
             return []
-        if capability.minimum is not None and capability.maximum is not None and (
-            not isinstance(command.value, (int, float))
-            or isinstance(command.value, bool)
-            or command.value < capability.minimum
-            or command.value > capability.maximum
+        if (
+            capability.minimum is not None
+            and capability.maximum is not None
+            and (
+                not isinstance(command.value, (int, float))
+                or isinstance(command.value, bool)
+                or command.value < capability.minimum
+                or command.value > capability.maximum
+            )
         ):
             return [
                 PlanService._make_error(

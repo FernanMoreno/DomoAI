@@ -45,9 +45,7 @@ class DeviceRegistry:
         for device in devices:
             self._devices[device.id] = device
             for source_ref in device.source_refs:
-                self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = (
-                    device.id
-                )
+                self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = device.id
 
     def apply_snapshot(
         self, snapshot: AdapterSnapshot, adapter_id: str
@@ -151,8 +149,7 @@ class DeviceRegistry:
             stale_refs = [
                 ref
                 for ref in device.source_refs
-                if ref.adapter_id in authoritative
-                and ref.external_id not in seen[ref.adapter_id]
+                if ref.adapter_id in authoritative and ref.external_id not in seen[ref.adapter_id]
             ]
             if stale_refs:
                 self._remove_source_refs(canonical_id, stale_refs)
@@ -178,14 +175,10 @@ class DeviceRegistry:
         if device is None:
             return
         remaining_refs = [
-            ref
-            for ref in device.source_refs
-            if (ref.adapter_id, ref.external_id) not in stale_keys
+            ref for ref in device.source_refs if (ref.adapter_id, ref.external_id) not in stale_keys
         ]
         if remaining_refs:
-            self._devices[canonical_id] = device.model_copy(
-                update={"source_refs": remaining_refs}
-            )
+            self._devices[canonical_id] = device.model_copy(update={"source_refs": remaining_refs})
             self._refresh_device_availability(canonical_id)
             return
 
@@ -258,14 +251,14 @@ class DeviceRegistry:
             id=canonical_id,
             type=semantic_type,
             name=(
-                existing.name
-                if existing is not None
-                else str(entity.get("name") or canonical_id)
+                existing.name if existing is not None else str(entity.get("name") or canonical_id)
             ),
             area_id=(
                 existing.area_id
                 if existing is not None and existing.area_id is not None
-                else str(entity.get("area_id")) if entity.get("area_id") else None
+                else str(entity.get("area_id"))
+                if entity.get("area_id")
+                else None
             ),
             manufacturer=(
                 existing.manufacturer
@@ -277,19 +270,12 @@ class DeviceRegistry:
                 if existing is not None and existing.model is not None
                 else entity.get("model")
             ),
-            protocol=(
-                next(iter(source_protocols))
-                if len(source_protocols) == 1
-                else "composite"
-            ),
+            protocol=(next(iter(source_protocols)) if len(source_protocols) == 1 else "composite"),
             capabilities=merged_capabilities,
             availability=(
                 AvailabilityStatus.AVAILABLE
                 if available
-                or (
-                    existing is not None
-                    and existing.availability is AvailabilityStatus.AVAILABLE
-                )
+                or (existing is not None and existing.availability is AvailabilityStatus.AVAILABLE)
                 else AvailabilityStatus.UNAVAILABLE
             ),
             source_refs=source_refs,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -16,11 +18,43 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+@dataclass
+class DbOperationMetrics:
+    operation_count: int = 0
+    busy_count: int = 0
+
+
+class _InstrumentedConnection:
+    """Thin proxy counting `execute()` calls and busy/locked errors.
+
+    Transparently forwards everything else to the wrapped connection so
+    every existing `database.connection.execute(...)`/`.commit()` call site
+    is instrumented without any repository-level change (Spec 079).
+    """
+
+    def __init__(self, real: Any, metrics: DbOperationMetrics) -> None:
+        self._real = real
+        self._metrics = metrics
+
+    def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+        self._metrics.operation_count += 1
+        try:
+            return cast(sqlite3.Cursor, self._real.execute(sql, *args))
+        except sqlite3.OperationalError as error:
+            if "database is locked" in str(error):
+                self._metrics.busy_count += 1
+            raise
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
 class SQLiteDatabase:
     def __init__(self, path: Path, *, busy_timeout_ms: int = 5000) -> None:
         self.path = path
         self._busy_timeout_ms = busy_timeout_ms
         self._connection: sqlite3.Connection | None = None
+        self._metrics = DbOperationMetrics()
 
     async def initialize(self, *, migrations_dir: Path | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -30,36 +64,54 @@ class SQLiteDatabase:
         self._connection.executescript(_BOOTSTRAP_LEDGER)
         self._connection.commit()
         applied = {
-            row[0]
-            for row in self._connection.execute("SELECT filename FROM schema_migrations")
+            row[0] for row in self._connection.execute("SELECT filename FROM schema_migrations")
         }
-        for migration in sorted((migrations_dir or MIGRATIONS_DIR).glob("*.sql")):
-            if migration.name in applied:
-                continue
-            try:
-                self._connection.executescript(migration.read_text(encoding="utf-8"))
-            except sqlite3.OperationalError as error:
-                if "duplicate column name" not in str(error):
-                    raise
-                # ALTER TABLE ... ADD COLUMN has no native "IF NOT EXISTS" form
-                # in SQLite; a duplicate-column failure here means this
-                # migration's effect is already present (e.g. the schema was
-                # reconstructed from a snapshot after the ledger lost track of
-                # which migrations had run) — equivalent to the CREATE TABLE
-                # IF NOT EXISTS idempotency every other migration already
-                # relies on, not a real failure.
-                self._connection.rollback()
-            self._connection.execute(
-                "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
-                (migration.name, datetime.now(UTC).isoformat()),
-            )
-            self._connection.commit()
+        # sqlite3's default (legacy) transaction control implicitly commits
+        # DDL/DML executed via executescript() regardless of any surrounding
+        # transaction, so a crash between a migration's SQL and its ledger
+        # entry could durably apply the migration with no ledger record —
+        # for a script combining a non-idempotent step (e.g. ALTER TABLE)
+        # with a following step (e.g. an UPDATE backfill), a crash between
+        # those two statements silently strands the backfill forever, since
+        # a retry's ALTER alone then looks like the harmless "already
+        # applied" case below. Manual transaction control makes the whole
+        # script and its ledger entry commit or roll back together.
+        self._connection.autocommit = False
+        try:
+            for migration in sorted((migrations_dir or MIGRATIONS_DIR).glob("*.sql")):
+                if migration.name in applied:
+                    continue
+                try:
+                    self._connection.executescript(migration.read_text(encoding="utf-8"))
+                except sqlite3.OperationalError as error:
+                    self._connection.rollback()
+                    if "duplicate column name" not in str(error):
+                        raise
+                    # ALTER TABLE ... ADD COLUMN has no native "IF NOT EXISTS"
+                    # form in SQLite; a duplicate-column failure here means
+                    # this migration's effect is already present (e.g. the
+                    # schema was reconstructed from a snapshot after the
+                    # ledger lost track of which migrations had run) —
+                    # equivalent to the CREATE TABLE IF NOT EXISTS
+                    # idempotency every other migration already relies on,
+                    # not a real failure.
+                self._connection.execute(
+                    "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
+                    (migration.name, datetime.now(UTC).isoformat()),
+                )
+                self._connection.commit()
+        finally:
+            self._connection.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL
 
     @property
     def connection(self) -> sqlite3.Connection:
         if self._connection is None:
             raise RuntimeError("SQLiteDatabase.initialize() must be called first")
-        return self._connection
+        return cast(sqlite3.Connection, _InstrumentedConnection(self._connection, self._metrics))
+
+    @property
+    def metrics(self) -> DbOperationMetrics:
+        return replace(self._metrics)
 
     async def close(self) -> None:
         if self._connection is not None:

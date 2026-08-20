@@ -17,7 +17,7 @@ from domoai.lab.runner import (
 def test_parse_env_file_accepts_export_and_does_not_expand_values(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "# comment\nTOKEN=secret-value\nexport URL=\"http://localhost:8123\"\n"
+        '# comment\nTOKEN=secret-value\nexport URL="http://localhost:8123"\n'
         "LITERAL=$NOT_EXPANDED\n",
         encoding="utf-8",
     )

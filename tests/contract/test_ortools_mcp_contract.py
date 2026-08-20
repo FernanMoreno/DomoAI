@@ -94,9 +94,7 @@ async def test_ortools_mcp_validates_and_optimizes_without_adapter_calls() -> No
     scenario = scenario_for(device_id)
 
     validation = structured(
-        await server.call_tool(
-            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("validate_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     result = structured(
         await server.call_tool(
@@ -121,23 +119,17 @@ async def test_validate_scenario_reports_live_runtime_revision() -> None:
     scenario = scenario_for(device_id)
 
     first = structured(
-        await server.call_tool(
-            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("validate_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     second = structured(
-        await server.call_tool(
-            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("validate_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     assert first["runtime_revision"] == second["runtime_revision"]
 
     context.plan_service.state_store.begin_revision()
 
     third = structured(
-        await server.call_tool(
-            "validate_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("validate_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     assert third["runtime_revision"] != second["runtime_revision"]
 
@@ -152,9 +144,7 @@ async def test_explain_solution_returns_versioned_proposal_projection() -> None:
     scenario = scenario_for(device_id)
 
     result = structured(
-        await server.call_tool(
-            "optimize_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("optimize_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     explanation = structured(await server.call_tool("explain_solution", {"result": result}))
 

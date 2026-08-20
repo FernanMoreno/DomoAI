@@ -8,7 +8,12 @@ from domoai.domain.models import StrictModel
 from domoai.optimizer.ports import OptimizationResult, OptimizationStatus, OptimizerPort
 from domoai.optimizer.scenario import OptimizationScenario
 
-_SUCCESS_STATUSES = {OptimizationStatus.OPTIMAL, OptimizationStatus.FEASIBLE}
+_SUCCESS_STATUSES = {
+    OptimizationStatus.OPTIMAL,
+    OptimizationStatus.FEASIBLE,
+    OptimizationStatus.OPTIMAL_HIERARCHY,
+    OptimizationStatus.FEASIBLE_HIERARCHY,
+}
 
 
 class VariationOutcome(StrictModel):
@@ -26,8 +31,7 @@ def _diff(variation: OptimizationResult, baseline: OptimizationResult) -> dict[s
         return {}
     shared_keys = variation.objective_values.keys() & baseline.objective_values.keys()
     return {
-        key: variation.objective_values[key] - baseline.objective_values[key]
-        for key in shared_keys
+        key: variation.objective_values[key] - baseline.objective_values[key] for key in shared_keys
     }
 
 

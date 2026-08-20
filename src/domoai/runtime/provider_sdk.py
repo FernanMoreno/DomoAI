@@ -123,9 +123,7 @@ class ProviderRegistry:
                 diagnostics.append(_diagnostic(manifest.provider_id, "collection_failed", error))
         return ProviderCollectionResult(measurements=measurements, diagnostics=diagnostics)
 
-    async def execute(
-        self, provider_id: str, command: ProviderCommand
-    ) -> ProviderExecutionResult:
+    async def execute(self, provider_id: str, command: ProviderCommand) -> ProviderExecutionResult:
         provider = self._providers.get(provider_id)
         if provider is None:
             raise ProviderRegistryError(f"unknown provider id {provider_id!r}")
@@ -183,9 +181,7 @@ def _validate_role_methods(provider: object, manifest: ProviderManifest) -> None
                 f"telemetry provider {manifest.provider_id!r} is missing required methods: "
                 + ", ".join(missing)
             )
-    if ProviderRole.COMMANDS in manifest.roles and not callable(
-        getattr(provider, "execute", None)
-    ):
+    if ProviderRole.COMMANDS in manifest.roles and not callable(getattr(provider, "execute", None)):
         raise TypeError(f"command provider {manifest.provider_id!r} is missing execute")
 
 

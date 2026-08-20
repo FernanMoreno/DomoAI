@@ -18,12 +18,15 @@ from domoai.adapters.knx.config import (
 from domoai.adapters.knx.mapper import KnxMapper
 from domoai.adapters.knx.transport import KnxGroupValue, KnxScalar, KnxTransport
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
+    AvailabilityChangedEvent,
     Command,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -52,7 +55,8 @@ class KnxAdapter:
             entity.entity_id: canonical_device_id(entity) for entity in self.mapping.entities
         }
         self._entity_by_canonical = {
-            canonical: entity for entity, canonical in zip(
+            canonical: entity
+            for entity, canonical in zip(
                 self.mapping.entities, self._canonical_by_source.values(), strict=True
             )
         }
@@ -68,6 +72,10 @@ class KnxAdapter:
                 self._bindings_by_state_address.setdefault(binding.state_group_address, []).append(
                     (entity, binding)
                 )
+        # Best-effort, process-local duplicate suppression only -- reset on
+        # restart, not shared across processes. The authoritative barrier
+        # against re-executing a command is the persistent execution claim
+        # in PlanRepository.claim_for_execution (Spec 057).
         self._executed_idempotency_keys: set[str] = set()
 
     async def connect(self) -> None:
@@ -141,9 +149,7 @@ class KnxAdapter:
                     unit=state["unit"],
                     observed_at=observed_at,
                     received_at=received_at,
-                    status=(
-                        StateStatus.CURRENT if self._available else StateStatus.UNAVAILABLE
-                    ),
+                    status=(StateStatus.CURRENT if self._available else StateStatus.UNAVAILABLE),
                     source_ref=SourceRef(adapter_id=self.adapter_id, external_id=entity_id),
                 )
             )
@@ -156,9 +162,7 @@ class KnxAdapter:
             return AdapterExecutionAck(accepted=False, message="Unknown KNX device")
         return await self.execute_source(command, entity.entity_id)
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         self._require_connected()
         entity = next(
             (item for item in self.mapping.entities if item.entity_id == source_entity_id),
@@ -201,12 +205,12 @@ class KnxAdapter:
             if value is None:
                 if not await self.transport.health() and self._available:
                     self._available = False
-                    yield SourceEvent(
-                        kind="availability_changed",
+                    yield AvailabilityChangedEvent(
                         payload={"available": False},
                     )
                 return
             self._available = True
+            event: SourceEvent | None
             try:
                 event = self._ingest_value(value)
             except ValueError as error:
@@ -239,7 +243,7 @@ class KnxAdapter:
             available=self._available,
         )
 
-    def _ingest_value(self, value: KnxGroupValue) -> SourceEvent | None:
+    def _ingest_value(self, value: KnxGroupValue) -> StateChangedEvent | None:
         decoded = self.mapper.decode_many(self.mapping, value)
         received_at = datetime.now(UTC)
         entity_ids: list[str] = []
@@ -253,8 +257,7 @@ class KnxAdapter:
             }
             entity_ids.append(state["entity_id"])
             capabilities.append(state["capability"])
-        return SourceEvent(
-            kind="state_changed",
+        return StateChangedEvent(
             payload={
                 "entity_ids": sorted(set(entity_ids)),
                 "capabilities": sorted(set(capabilities)),
@@ -295,9 +298,8 @@ class KnxAdapter:
         return None
 
     @staticmethod
-    def _diagnostic(group_address: str, reason: str) -> SourceEvent:
-        return SourceEvent(
-            kind="adapter_diagnostic",
+    def _diagnostic(group_address: str, reason: str) -> AdapterDiagnosticEvent:
+        return AdapterDiagnosticEvent(
             payload={"group_address": group_address, "reason": reason[:200]},
         )
 

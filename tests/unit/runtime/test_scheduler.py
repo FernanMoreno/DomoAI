@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -546,3 +548,20 @@ async def test_run_due_uses_injected_clock_when_no_explicit_now_given(tmp_path) 
 
     assert results == [{"plan_id": plan_id, "outcome": "executed"}]
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_alive_is_false_before_run_true_while_running_false_after_cancel(
+    tmp_path: Path,
+) -> None:
+    _, _, scheduler, _, _ = await _build_scheduler(tmp_path)
+    assert scheduler.alive is False
+
+    task = asyncio.create_task(scheduler.run())
+    await asyncio.sleep(0)
+    assert scheduler.alive is True
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert scheduler.alive is False

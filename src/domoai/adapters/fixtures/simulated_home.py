@@ -13,7 +13,9 @@ from domoai.domain.models import (
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
+    AvailabilityChangedEvent,
     Command,
+    MetadataChangedEvent,
     SourceEvent,
     SourceRef,
     StateSnapshot,
@@ -137,9 +139,7 @@ class SimulatedHomeAdapter:
                 observed_at=now,
                 received_at=now,
                 status=(
-                    StateStatus.CURRENT
-                    if state.get("available", True)
-                    else StateStatus.UNAVAILABLE
+                    StateStatus.CURRENT if state.get("available", True) else StateStatus.UNAVAILABLE
                 ),
                 source_ref=SourceRef(
                     adapter_id=self.adapter_id,
@@ -153,9 +153,7 @@ class SimulatedHomeAdapter:
         entity = self._find_for_device(command.device_id)
         return await self.execute_source(command, entity["entity_id"])
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         if command.idempotency_key in self._executed_idempotency_keys:
             return AdapterExecutionAck(accepted=False, message="Duplicate idempotency key")
         try:
@@ -178,8 +176,7 @@ class SimulatedHomeAdapter:
         entity = self._find(entity_id)
         entity["available"] = available
         self._events.append(
-            SourceEvent(
-                kind="availability_changed",
+            AvailabilityChangedEvent(
                 payload={"entity_id": entity_id, "available": available},
             )
         )
@@ -187,9 +184,7 @@ class SimulatedHomeAdapter:
     def rename(self, entity_id: str, name: str) -> None:
         entity = self._find(entity_id)
         entity["name"] = name
-        self._events.append(
-            SourceEvent(kind="metadata_changed", payload={"entity_id": entity_id, "name": name})
-        )
+        self._events.append(MetadataChangedEvent(payload={"entity_id": entity_id, "name": name}))
 
     def _find(self, entity_id: str) -> dict[str, Any]:
         for entity in self._entities:

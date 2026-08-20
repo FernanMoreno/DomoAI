@@ -81,9 +81,7 @@ def fixture_manifest(adapter_id: str = "fixture") -> AdapterManifest:
 
 @pytest.mark.asyncio
 async def test_simulated_home_passes_sdk_conformance() -> None:
-    registration = AdapterRegistration(
-        manifest=fixture_manifest(), factory=SimulatedHomeAdapter
-    )
+    registration = AdapterRegistration(manifest=fixture_manifest(), factory=SimulatedHomeAdapter)
 
     result = await ConformanceHarness(registration).run()
 

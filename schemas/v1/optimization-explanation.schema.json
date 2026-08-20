@@ -71,6 +71,8 @@
       "enum": [
         "optimal",
         "feasible",
+        "optimal_hierarchy",
+        "feasible_hierarchy",
         "infeasible",
         "invalid",
         "timeout",

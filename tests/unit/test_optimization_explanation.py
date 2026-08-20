@@ -37,9 +37,7 @@ def test_explanation_preserves_diagnostics_without_inventing_a_proposal() -> Non
     result = build_result(
         scenario_id="energy-002",
         status=OptimizationStatus.INFEASIBLE,
-        diagnostics=[
-            {"code": "infeasible", "message": "Power limit cannot fit the load"}
-        ],
+        diagnostics=[{"code": "infeasible", "message": "Power limit cannot fit the load"}],
     )
 
     explanation = explain_result(result)

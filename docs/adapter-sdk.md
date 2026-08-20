@@ -77,14 +77,13 @@ El mapper de Home Assistant es la referencia actual para `light`, `switch`,
 vendor-specific en la superficie MCP; si una capacidad no tiene equivalente
 canónico, debe quedar explícitamente sin soporte.
 
-### Integración opt-in del Home Assistant Provider
+### Integración Home Assistant (Provider)
 
-`HomeAssistantProvider` puede entrar en el runtime mediante
-`HomeAssistantProviderAdapter`, que implementa el mismo `AdapterPort` que los
-adapters clásicos. Se activa únicamente con:
+`HomeAssistantProvider` es la única integración de Home Assistant del
+runtime, expuesta mediante `HomeAssistantProviderAdapter`, que implementa
+el mismo `AdapterPort` que el resto de adapters. Se activa configurando:
 
 ```bash
-export DOMOAI_HOME_ASSISTANT_PROVIDER=1
 export DOMOAI_HOME_ASSISTANT_URL="http://home-assistant.local:8123"
 export DOMOAI_HOME_ASSISTANT_TOKEN="<long-lived-access-token>"
 ```
@@ -92,8 +91,16 @@ export DOMOAI_HOME_ASSISTANT_TOKEN="<long-lived-access-token>"
 El factory crea un único objeto provider, lo registra en `ProviderRegistry` y
 lo entrega al bridge. El bridge reutiliza el `AdapterSnapshot` normalizado del
 provider, de modo que `DeviceRegistry`, `StateStore`, `PlanExecutor` y MCP no
-conocen la API de Home Assistant ni abren una segunda conexión. Sin el switch,
-se conserva `HomeAssistantAdapter`.
+conocen la API de Home Assistant ni abren una segunda conexión.
+
+> Un adapter previo (`HomeAssistantAdapter`, implementación directa de
+> `AdapterPort` sin pasar por la capa Provider SDK) coexistió como default
+> reversible durante el rollout de Provider (Spec 018) hasta ser retirado
+> por convergencia deliberada (Spec 081, P2 #9 del re-audit
+> 2026-08-19) — su lógica de traducción de comandos y routing era un
+> superconjunto exacto duplicado de forma independiente, riesgo de drift
+> semántico que ya se había materializado (Provider ganó capacidades de
+> energía/batería que el adapter clásico nunca tuvo).
 
 Las métricas energéticas requieren mapping explícito en un documento local v1
 seleccionado por `DOMOAI_HOME_ASSISTANT_MAPPING_PATH`; no se infieren por nombre.
@@ -102,7 +109,7 @@ varias entidades conserve comandos y `SourceRef` exactos.
 
 ### Perfil de escritura Home Assistant
 
-`HomeAssistantAdapter` traduce comandos canónicos a servicios REST de Home
+`HomeAssistantProvider` traduce comandos canónicos a servicios REST de Home
 Assistant:
 
 | Comando semántico | Servicio |
@@ -135,6 +142,17 @@ la repetición de esa clave como una operación ya procesada o rechazarla de
 forma determinista. El `PlanExecutor` comprueba el estado posterior antes de
 emitir `confirmed_success` y audita cada resultado.
 
+El set `_executed_idempotency_keys` que usan los adapters incluidos
+(Home Assistant, Matter, Zigbee2MQTT, Modbus, KNX) es supresión de
+duplicados **best-effort y local al proceso**: vive en memoria, se
+reinicia en cada restart y no se comparte entre procesos. No es la
+barrera de seguridad autoritativa. Esa barrera es el claim de ejecución
+atómico y persistente en `PlanRepository.claim_for_execution` (ver
+Spec 057), que garantiza que un plan sólo puede reclamarse una vez
+incluso ante ejecutores concurrentes o un restart. El set del adapter
+es una optimización adicional para detectar duplicados rápido dentro
+de la misma sesión de proceso, no un sustituto de esa garantía.
+
 Errores de conexión deben expresarse como `ConnectionError` para que el
 runtime produzca `adapter_unavailable` y permita reintento. Un rechazo del
 proveedor se devuelve como `AdapterExecutionAck(accepted=False, message=...)`;
@@ -152,7 +170,7 @@ Un adapter nuevo debe incluir, como mínimo:
 - smoke test opt-in que solo use descubrimiento, lectura y una orden inocua.
 
 La implementación de referencia es
-[`HomeAssistantAdapter`](../src/domoai/adapters/home_assistant/adapter.py),
+[`HomeAssistantProviderAdapter`](../src/domoai/adapters/home_assistant/provider_adapter.py),
 y el fixture local es
 [`SimulatedHomeAdapter`](../src/domoai/adapters/fixtures/simulated_home.py).
 El [runtime event consumer](../src/domoai/runtime/event_consumer.py) refresca

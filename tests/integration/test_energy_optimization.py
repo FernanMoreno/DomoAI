@@ -1,4 +1,3 @@
-
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -69,7 +68,10 @@ async def test_energy_optimizer_returns_balanced_proposal_with_storage_evidence(
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.plan is not None
     assert result.plan.status is PlanStatus.DRAFT
     assert adapter.calls == []
@@ -78,7 +80,8 @@ async def test_energy_optimizer_returns_balanced_proposal_with_storage_evidence(
     assert result.objective_values["energy_cost"] >= 0
     assert all(
         abs(
-            slot["load_power_kw"] + slot["battery_charge_kw"]
+            slot["load_power_kw"]
+            + slot["battery_charge_kw"]
             - slot["solar_power_kw"]
             - slot["grid_import_kw"]
             - slot["battery_discharge_kw"]
@@ -146,7 +149,10 @@ async def test_maximize_solar_self_consumption_shifts_load_into_solar_slot() -> 
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.plan is not None
     command = next(cmd for cmd in result.plan.commands if cmd.device_id == device_id)
     assert command.intent == "scheduled_slot:1"
@@ -198,7 +204,10 @@ async def test_higher_priority_objective_is_never_traded_away() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.objective_values["peak_import_kw"] == pytest.approx(2.0)
     assert result.objective_values["energy_cost"] == pytest.approx(0.10)
 
@@ -227,7 +236,10 @@ async def test_same_priority_objectives_remain_a_single_weighted_tier() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     # A heavily cost-weighted blend within the SAME tier sacrifices peak
     # (both loads land in the cheap slot) instead of respecting a strict
     # peak-first priority order.
@@ -270,7 +282,10 @@ async def test_soft_constraint_violation_is_reported_when_exceeded() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     violations = result.constraint_summary["soft_violations"]
     assert len(violations) == 1
     assert violations[0]["type"] == "max_house_power"
@@ -293,7 +308,10 @@ async def test_soft_constraint_respected_when_free_reports_no_violation() -> Non
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.constraint_summary["soft_violations"] == []
 
 
@@ -312,7 +330,10 @@ async def test_base_load_forecast_is_reflected_in_import_and_cost() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.constraint_summary["slots"][0]["grid_import_kw"] == pytest.approx(2.0)
     assert result.objective_values["energy_cost"] == pytest.approx(0.05)
 
@@ -350,7 +371,10 @@ async def test_reproducibility_two_independent_solves_produce_identical_evidence
     result_a = service_a.optimize(scenario_a)
     result_b = service_b.optimize(scenario_b)
 
-    assert result_a.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_a.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result_a.plan is not None
     assert result_b.plan is not None
     # Plan.created_at is a wall-clock timestamp, not part of the
@@ -403,6 +427,36 @@ async def test_fingerprint_changes_when_a_scenario_field_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_is_stable_across_assumptions_key_order() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _single_slot_scenario(base_load_kw=None)
+    scenario_a = OptimizationScenario(
+        id="fingerprint-key-order-a",
+        horizon=horizon,
+        energy_context=context,
+        loads=[flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=0)],
+        constraints=[Constraint(type="max_grid_import", value=10, unit="kW")],
+        assumptions={"comfort": "normal", "occupancy": "home", "tariff_mode": "flat"},
+    )
+    scenario_b = scenario_a.model_copy(
+        update={
+            "assumptions": {"tariff_mode": "flat", "comfort": "normal", "occupancy": "home"},
+        }
+    )
+
+    result_a = service.optimize(scenario_a)
+    result_b = service.optimize(scenario_b)
+
+    assert result_a.solver_evidence is not None
+    assert result_b.solver_evidence is not None
+    assert (
+        result_a.solver_evidence.scenario_fingerprint
+        == result_b.solver_evidence.scenario_fingerprint
+    )
+
+
+@pytest.mark.asyncio
 async def test_evidence_absent_for_infeasible_result() -> None:
     _, registry, service = await build_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "switch")
@@ -429,7 +483,10 @@ async def test_tier_evidence_reports_soft_tier_then_priorities_in_order() -> Non
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.solver_evidence is not None
     tiers = result.solver_evidence.tiers
     assert len(tiers) == 3
@@ -459,7 +516,10 @@ async def test_tier_evidence_single_tier_for_single_priority_no_soft_constraints
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.solver_evidence is not None
     assert len(result.solver_evidence.tiers) == 1
     assert result.solver_evidence.tiers[0].terms == ["minimize_energy_cost"]
@@ -484,7 +544,10 @@ async def test_tier_evidence_legacy_path_reports_one_implicit_tier() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE,
+        OptimizationStatus.OPTIMAL,
+    }
     assert result.solver_evidence is not None
     assert len(result.solver_evidence.tiers) == 1
     assert result.solver_evidence.tiers[0].terms == ["minimize_start"]
@@ -506,7 +569,10 @@ async def test_solver_config_evidence_reports_name_version_and_determinism() -> 
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     evidence = result.solver_evidence
     assert evidence is not None
     assert evidence.solver_name == "cp-sat"
@@ -549,7 +615,10 @@ async def test_multi_slot_optimization_produces_one_plan_per_distinct_time() -> 
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert len(result.plans) == 2
     assert result.plan == result.plans[0]
     first, second = result.plans
@@ -577,7 +646,10 @@ async def test_single_slot_optimization_still_produces_exactly_one_plan() -> Non
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert len(result.plans) == 1
     assert result.plan == result.plans[0]
     del adapter
@@ -596,7 +668,10 @@ async def test_legacy_path_also_populates_plans() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE,
+        OptimizationStatus.OPTIMAL,
+    }
     assert len(result.plans) == 1
     assert result.plan == result.plans[0]
 
@@ -616,7 +691,10 @@ async def test_omitted_base_load_behaves_like_zero() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.constraint_summary["slots"][0]["grid_import_kw"] == pytest.approx(1.0)
     assert result.objective_values["energy_cost"] == pytest.approx(0.025)
 
@@ -673,7 +751,10 @@ async def test_ev_charging_reaches_target_soc_by_deadline() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.plan is not None
     resolution_hours = context.horizon.resolution_minutes / 60
     delivered_kwh = sum(
@@ -725,9 +806,7 @@ async def test_ev_charging_already_at_target_solves_trivially() -> None:
         id="ev-already-charged-1",
         horizon=context.horizon,
         energy_context=context,
-        ev_loads=[
-            _ev_load(device_id, initial_soc_kwh=5.0, target_soc_kwh=4.0, deadline_slot=7)
-        ],
+        ev_loads=[_ev_load(device_id, initial_soc_kwh=5.0, target_soc_kwh=4.0, deadline_slot=7)],
         constraints=[
             Constraint(type="max_grid_import", value=10, unit="kW"),
             Constraint(type="max_grid_export", value=10, unit="kW"),
@@ -736,7 +815,10 @@ async def test_ev_charging_already_at_target_solves_trivially() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
 
 
 @pytest.mark.asyncio
@@ -757,7 +839,10 @@ async def test_comfort_load_active_in_at_least_minimum_slots() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     active_slots = {
         command.intent
         for plan in result.plans
@@ -792,9 +877,7 @@ async def test_comfort_load_power_is_bound_by_max_house_power() -> None:
         id="comfort-house-power-infeasible-1",
         horizon=context.horizon,
         energy_context=context,
-        comfort_loads=[
-            _comfort_load(device_id, min_active_slots=1, power=5.0, power_unit="kW")
-        ],
+        comfort_loads=[_comfort_load(device_id, min_active_slots=1, power=5.0, power_unit="kW")],
         constraints=[
             Constraint(type="max_house_power", value=1, unit="kW"),
             Constraint(type="max_grid_import", value=10, unit="kW"),
@@ -812,9 +895,7 @@ async def test_ev_and_comfort_coexist_with_generic_load_and_battery() -> None:
     _, registry, service = await build_context()
     switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
     cover_id = next(device.id for device in registry.devices if device.type.value == "cover")
-    climate_id = next(
-        device.id for device in registry.devices if device.type.value == "climate"
-    )
+    climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
     context = energy_context_for()
     scenario = OptimizationScenario(
         id="combined-ev-comfort-1",
@@ -822,9 +903,7 @@ async def test_ev_and_comfort_coexist_with_generic_load_and_battery() -> None:
         energy_context=context,
         loads=[flexible_load(switch_id, power_kw=0.5, latest_slot=5)],
         ev_loads=[_ev_load(cover_id, max_charge_kw=2.0, deadline_slot=7)],
-        comfort_loads=[
-            _comfort_load(climate_id, min_active_slots=2, power=0.5, power_unit="kW")
-        ],
+        comfort_loads=[_comfort_load(climate_id, min_active_slots=2, power=0.5, power_unit="kW")],
         constraints=[
             Constraint(type="max_house_power", value=6, unit="kW"),
             Constraint(type="max_grid_import", value=6, unit="kW"),
@@ -834,7 +913,10 @@ async def test_ev_and_comfort_coexist_with_generic_load_and_battery() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     for slot in result.constraint_summary["slots"]:
         total = (
             slot["load_power_kw"]
@@ -900,11 +982,17 @@ async def test_export_tariff_reduces_net_cost() -> None:
     result_with = service.optimize(scenario_with)
     result_without = service.optimize(scenario_without)
 
-    assert result_with.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
-    assert result_without.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
-    assert result_with.objective_values["energy_cost"] < result_without.objective_values[
-        "energy_cost"
-    ]
+    assert result_with.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert result_without.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert (
+        result_with.objective_values["energy_cost"] < result_without.objective_values["energy_cost"]
+    )
 
 
 @pytest.mark.asyncio
@@ -946,7 +1034,10 @@ async def test_export_tariff_shifts_export_toward_higher_price_slot() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.plan is not None
     command = next(cmd for cmd in result.plan.commands if cmd.device_id == device_id)
     assert command.intent == "scheduled_slot:0"
@@ -956,9 +1047,7 @@ async def test_export_tariff_shifts_export_toward_higher_price_slot() -> None:
 async def test_export_revenue_reported_separately_from_net_cost() -> None:
     _, registry, service = await build_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "switch")
-    context, horizon = _export_tariff_scenario(
-        export_price_per_kwh=0.05, with_export_tariff=True
-    )
+    context, horizon = _export_tariff_scenario(export_price_per_kwh=0.05, with_export_tariff=True)
     scenario = OptimizationScenario(
         id="export-revenue-reported-1",
         horizon=horizon,
@@ -973,7 +1062,10 @@ async def test_export_revenue_reported_separately_from_net_cost() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.objective_values["export_revenue"] > 0
     assert result.objective_values["energy_cost"] == pytest.approx(
         sum(
@@ -988,9 +1080,7 @@ async def test_export_revenue_reported_separately_from_net_cost() -> None:
 async def test_scenario_without_export_tariff_reports_zero_export_revenue() -> None:
     _, registry, service = await build_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "switch")
-    context, horizon = _export_tariff_scenario(
-        export_price_per_kwh=0.05, with_export_tariff=False
-    )
+    context, horizon = _export_tariff_scenario(export_price_per_kwh=0.05, with_export_tariff=False)
     scenario = OptimizationScenario(
         id="export-revenue-absent-1",
         horizon=horizon,
@@ -1005,7 +1095,10 @@ async def test_scenario_without_export_tariff_reports_zero_export_revenue() -> N
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.objective_values["export_revenue"] == 0.0
 
 
@@ -1043,9 +1136,7 @@ def _confidence_context(
             SolarForecastPoint(
                 slot=slot,
                 power=5.0,
-                confidence=(
-                    ConfidenceBand(low=1.0, high=6.0) if with_solar_confidence else None
-                ),
+                confidence=(ConfidenceBand(low=1.0, high=6.0) if with_solar_confidence else None),
             )
             for slot in range(2)
         ],
@@ -1106,7 +1197,10 @@ async def test_confidence_bounds_present_but_conservative_off_matches_no_bounds_
         _confidence_scenario("confidence-absent-1", context_without, horizon, device_id)
     )
 
-    assert result_with.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_with.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result_without.status == result_with.status
     assert result_with.objective_values["energy_cost"] == pytest.approx(
         result_without.objective_values["energy_cost"]
@@ -1196,8 +1290,14 @@ async def test_conservative_mode_uses_pessimistic_solar_and_base_load() -> None:
         _confidence_scenario("conservative-on-1", context, horizon, device_id, conservative=True)
     )
 
-    assert result_normal.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
-    assert result_conservative.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result_normal.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert result_conservative.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     # Pessimistic solar (low=1.0 vs point 5.0) and pessimistic base load (high=3.0 vs
     # point 1.0) both push grid import up, so the conservative plan must cost more.
     assert (
@@ -1337,7 +1437,10 @@ async def test_battery_throughput_reported_when_battery_present() -> None:
         _degradation_scenario("throughput-present-1", context, horizon, device_id)
     )
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     expected = sum(
         (slot["battery_charge_kw"] + slot["battery_discharge_kw"])
         * (horizon.resolution_minutes / 60)
@@ -1358,7 +1461,10 @@ async def test_battery_throughput_zero_when_no_battery() -> None:
         _degradation_scenario("throughput-absent-1", context, horizon, device_id)
     )
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.objective_values["battery_throughput_kwh"] == 0.0
     assert result.objective_values["battery_degradation_cost"] == 0.0
 
@@ -1389,9 +1495,7 @@ async def test_degradation_cost_discourages_cycling_with_no_net_benefit() -> Non
     context_no_cost, horizon = _degradation_context(
         degradation_cost_per_kwh=None, solar_slot0_kw=2.0
     )
-    context_with_cost, _ = _degradation_context(
-        degradation_cost_per_kwh=1.0, solar_slot0_kw=2.0
-    )
+    context_with_cost, _ = _degradation_context(degradation_cost_per_kwh=1.0, solar_slot0_kw=2.0)
 
     result_no_cost = service.optimize(
         _degradation_scenario("no-benefit-without-1", context_no_cost, horizon, device_id)
@@ -1421,7 +1525,10 @@ async def test_degradation_cost_still_allows_net_beneficial_cycling() -> None:
         _degradation_scenario("net-beneficial-1", context, horizon, device_id)
     )
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.objective_values["battery_throughput_kwh"] > 0
     assert result.objective_values["battery_degradation_cost"] > 0
 
@@ -1430,9 +1537,7 @@ async def test_degradation_cost_still_allows_net_beneficial_cycling() -> None:
 async def test_degradation_cost_zero_is_a_no_op() -> None:
     _, registry, service = await build_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "switch")
-    context_unset, horizon = _degradation_context(
-        degradation_cost_per_kwh=None, solar_slot0_kw=2.0
-    )
+    context_unset, horizon = _degradation_context(degradation_cost_per_kwh=None, solar_slot0_kw=2.0)
     context_zero, _ = _degradation_context(degradation_cost_per_kwh=0.0, solar_slot0_kw=2.0)
 
     result_unset = service.optimize(
@@ -1494,7 +1599,10 @@ async def test_ev_stop_at_zero_command_after_last_charging_slot() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     ev_commands = [
         command
         for plan in result.plans
@@ -1546,10 +1654,7 @@ async def test_ev_charging_through_horizon_end_has_no_trailing_command() -> None
     )
 
     ev_commands = [
-        command
-        for plan in plans
-        for command in plan.commands
-        if command.device_id == device_id
+        command for plan in plans for command in plan.commands if command.device_id == device_id
     ]
     assert len(ev_commands) == 2
     assert all(float(command.value) > 0 for command in ev_commands)
@@ -1623,7 +1728,10 @@ async def test_end_command_is_placed_at_start_plus_duration() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     end_commands = [
         command
         for plan in result.plans
@@ -1712,7 +1820,10 @@ async def test_ev_deadline_hard_constraint_blocks_post_deadline_charging() -> No
 
     result = service.optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     ev_commands = [
         command
         for plan in result.plans

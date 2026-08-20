@@ -148,9 +148,7 @@ class ModbusMappingDocument(StrictModel):
                 )
                 previous = points.setdefault(key, signature)
                 if previous != signature:
-                    raise ValueError(
-                        "shared Modbus state point has conflicting codec parameters"
-                    )
+                    raise ValueError("shared Modbus state point has conflicting codec parameters")
         return self
 
 

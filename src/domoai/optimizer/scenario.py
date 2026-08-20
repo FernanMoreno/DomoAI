@@ -287,9 +287,7 @@ def validate_scenario(
         )
         if comfort_load.power_unit not in {"W", "kW"}:
             errors.append(
-                _diagnostic(
-                    "invalid_unit", f"Unsupported power unit {comfort_load.power_unit!r}"
-                )
+                _diagnostic("invalid_unit", f"Unsupported power unit {comfort_load.power_unit!r}")
             )
         if comfort_load.deadline_slot > horizon_slots:
             errors.append(
@@ -355,9 +353,7 @@ def _validate_device_capability_command(
     if device is None:
         errors.append(_diagnostic("missing_device", f"Unknown device {device_id}"))
         return errors
-    capability = next(
-        (item for item in device.capabilities if item.name == capability_name), None
-    )
+    capability = next((item for item in device.capabilities if item.name == capability_name), None)
     if capability is None or not capability.writable:
         errors.append(
             _diagnostic(

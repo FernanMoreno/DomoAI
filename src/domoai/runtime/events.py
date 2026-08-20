@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Protocol
 from uuid import uuid4
 
 from domoai.domain.models import AuditEvent
+from domoai.runtime.clock import Clock, SystemClock
+
+DEFAULT_MAX_EVENTS = 1000
 
 _REDACTED = "[REDACTED]"
 _SECRET_KEYS = {
@@ -40,11 +44,24 @@ def redact_payload(value: Any, *, key: str | None = None) -> Any:
 
 
 class AuditLog:
-    """Small append-only in-memory sink used by the foundation and tests."""
+    """Append-only audit emitter with a bounded in-memory retention window.
 
-    def __init__(self, sink: AuditEventSink | None = None) -> None:
-        self._events: list[AuditEvent] = []
+    The in-memory window is a process-local convenience copy, not the
+    durable record -- a configured `sink` still receives every event
+    regardless of in-memory eviction, so bounding this window does not
+    lose data for callers reading through the sink (Spec 080).
+    """
+
+    def __init__(
+        self,
+        sink: AuditEventSink | None = None,
+        *,
+        max_events: int = DEFAULT_MAX_EVENTS,
+        clock: Clock | None = None,
+    ) -> None:
+        self._events: deque[AuditEvent] = deque(maxlen=max_events)
         self._sink = sink
+        self.clock = clock or SystemClock()
 
     @property
     def events(self) -> tuple[AuditEvent, ...]:
@@ -64,6 +81,7 @@ class AuditLog:
             actor=actor,
             subject_id=subject_id,
             payload=redact_payload(payload),
+            created_at=self.clock.now(),
         )
         self._events.append(event)
         if self._sink is not None:

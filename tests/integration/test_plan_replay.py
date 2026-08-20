@@ -31,9 +31,14 @@ async def _build_live_context(tmp_path):
 
 
 async def _persist_and_execute_plan(tmp_path, device_id: str, plan_id: str = "replay-plan-1"):
-    adapter, registry, state_store, plan_service, executor, plan_repository = (
-        await _build_live_context(tmp_path)
-    )
+    (
+        adapter,
+        registry,
+        state_store,
+        plan_service,
+        executor,
+        plan_repository,
+    ) = await _build_live_context(tmp_path)
     plan = Plan(
         id=plan_id,
         commands=[
@@ -129,6 +134,9 @@ async def test_replay_is_repeatable(tmp_path) -> None:
         outcome.status for outcome in second.outcomes
     ]
     assert first.incomplete_reconstruction_notes == second.incomplete_reconstruction_notes
+    assert [outcome.completed_at for outcome in first.outcomes] == [
+        outcome.completed_at for outcome in second.outcomes
+    ]
 
 
 @pytest.mark.asyncio
@@ -185,9 +193,7 @@ async def test_replay_never_touches_the_live_adapter(tmp_path) -> None:
         state_store = StateStore()
         audit = AuditLog()
         await DiscoveryService(adapter, registry, state_store, audit).refresh()
-        device_id = next(
-            device.id for device in registry.devices if device.type.value == "switch"
-        )
+        device_id = next(device.id for device in registry.devices if device.type.value == "switch")
         device_id_holder["id"] = device_id
         plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
         database = SQLiteDatabase(tmp_path / "repo.sqlite3")

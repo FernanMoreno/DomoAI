@@ -22,6 +22,7 @@ from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
+from domoai.runtime.metrics import RuntimeMetricsCollector
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
@@ -41,7 +42,7 @@ async def build_fixture_server() -> FastMCP:
         state_service=StateService(state_store),
         facade=facade,
         registry=registry,
-        policies=[],
+        policies=plan_service.policy_engine.policies,
     )
     optimizer_context = OrtoolsMcpContext(
         registry=registry,
@@ -52,9 +53,7 @@ async def build_fixture_server() -> FastMCP:
             CpSatOptimizer(registry),
         ),
     )
-    return create_unified_server(
-        UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
-    )
+    return create_unified_server(UnifiedMcpContext(domotics=context, optimizer=optimizer_context))
 
 
 async def build_configured_server(
@@ -62,12 +61,26 @@ async def build_configured_server(
 ) -> tuple[RuntimeComposition, FastMCP]:
     runtime = await build_runtime(settings)
     operator_token = runtime.settings.operator_approval_token
+    optimization_service = OptimizationService(
+        runtime.registry,
+        runtime.plan_service,
+        CpSatOptimizer(runtime.registry),
+    )
+    metrics = RuntimeMetricsCollector(
+        adapter=runtime.adapter,
+        event_consumer=runtime.event_consumer,
+        scheduler=runtime.scheduler,
+        state_store=runtime.state_store,
+        plan_repository=runtime.plan_repository,
+        database=runtime.database,
+        optimization_service=optimization_service,
+    )
     context = DomoticsMcpContext(
         discovery=runtime.discovery,
         state_service=StateService(runtime.state_store),
         facade=runtime.facade,
         registry=runtime.registry,
-        policies=[],
+        policies=runtime.plan_service.policy_engine.policies,
         approval_store=ApprovalStore(
             operator_token=(
                 operator_token.get_secret_value() if operator_token is not None else None
@@ -76,15 +89,12 @@ async def build_configured_server(
         energy_context_provider=runtime.energy_context_provider,
         scheduler=runtime.scheduler,
         audit_repository=runtime.audit_repository,
+        metrics=metrics,
     )
     optimizer_context = OrtoolsMcpContext(
         registry=runtime.registry,
         plan_service=runtime.plan_service,
-        optimization_service=OptimizationService(
-            runtime.registry,
-            runtime.plan_service,
-            CpSatOptimizer(runtime.registry),
-        ),
+        optimization_service=optimization_service,
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context)

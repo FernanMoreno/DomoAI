@@ -11,14 +11,11 @@ from domoai.adapters.home_assistant.config import (
 def test_load_metric_mappings_accepts_strict_v1_document(tmp_path: Path) -> None:
     path = tmp_path / "home-assistant-mappings.json"
     path.write_text(
-        '{"schema_version":"v1","metric_mappings":'
-        '{"sensor.pv_power":{"power":"energy.pv.power"}}}',
+        '{"schema_version":"v1","metric_mappings":{"sensor.pv_power":{"power":"energy.pv.power"}}}',
         encoding="utf-8",
     )
 
-    assert load_metric_mappings(path) == {
-        "sensor.pv_power": {"power": "energy.pv.power"}
-    }
+    assert load_metric_mappings(path) == {"sensor.pv_power": {"power": "energy.pv.power"}}
 
 
 @pytest.mark.parametrize(

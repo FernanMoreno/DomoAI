@@ -82,11 +82,15 @@ async def test_two_independent_mcp_clients_receive_equivalent_results() -> None:
         second_context, second_device_id
     )
 
-    assert first_tools == second_tools == [
-        "validate_scenario",
-        "optimize_scenario",
-        "explain_solution",
-    ]
+    assert (
+        first_tools
+        == second_tools
+        == [
+            "validate_scenario",
+            "optimize_scenario",
+            "explain_solution",
+        ]
+    )
     assert first_result == second_result
     assert first_explanation == second_explanation
     assert first_adapter.calls == []

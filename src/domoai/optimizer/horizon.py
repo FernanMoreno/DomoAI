@@ -21,16 +21,12 @@ class Horizon(StrictModel):
             raise ValueError("horizon timestamps must be timezone-aware")
         if self.end <= self.start:
             raise ValueError("horizon end must be after start")
-        seconds = (
-            self.end.astimezone(UTC) - self.start.astimezone(UTC)
-        ).total_seconds()
+        seconds = (self.end.astimezone(UTC) - self.start.astimezone(UTC)).total_seconds()
         if seconds % (self.resolution_minutes * 60) != 0:
             raise ValueError("horizon duration must be divisible by resolution_minutes")
         return self
 
     @property
     def slots(self) -> int:
-        seconds = (
-            self.end.astimezone(UTC) - self.start.astimezone(UTC)
-        ).total_seconds()
+        seconds = (self.end.astimezone(UTC) - self.start.astimezone(UTC)).total_seconds()
         return int(seconds // (self.resolution_minutes * 60))

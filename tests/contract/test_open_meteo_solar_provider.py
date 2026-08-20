@@ -78,9 +78,9 @@ def test_provider_rejects_timezone_mismatch_before_client_call() -> None:
             raise AssertionError("network must not be called")
 
     with pytest.raises(EnergyProviderError) as raised:
-        OpenMeteoSolarProvider(
-            Client(), open_meteo_config(timezone="UTC")
-        ).get_forecast(omie_horizon())
+        OpenMeteoSolarProvider(Client(), open_meteo_config(timezone="UTC")).get_forecast(
+            omie_horizon()
+        )
 
     assert raised.value.diagnostic.code == "unsupported_horizon"
     assert called is False

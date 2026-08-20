@@ -32,7 +32,8 @@ VALID_BINDINGS = """
 - `execute_plan` → `mcp.execute_plan` (`mutation`)
 """
 
-FULL_SKILL = """---
+FULL_SKILL = (
+    """---
 name: test-skill
 description: test procedure
 ---
@@ -56,7 +57,9 @@ description: test procedure
 5. `explain_solution` — explain.
 6. `operator_approval` — approve.
 7. `execute_plan` — execute.
-""" + VALID_BINDINGS
+"""
+    + VALID_BINDINGS
+)
 
 
 def test_validator_rejects_undeclared_operation(tmp_path: Path) -> None:
@@ -102,10 +105,7 @@ def test_validator_accepts_one_general_mcp_binding(tmp_path: Path) -> None:
     procedure = validate_skill(path)
 
     assert {item.provider for item in procedure.bindings} == {"mcp", "operator"}
-    assert all(
-        item.provider == "operator" or item.provider == "mcp"
-        for item in procedure.bindings
-    )
+    assert all(item.provider == "operator" or item.provider == "mcp" for item in procedure.bindings)
 
 
 def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: Path) -> None:
@@ -117,8 +117,7 @@ def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: P
         .replace("- `get_state`\n", "- `get_state`\n- `get_energy_context`\n")
         .replace(
             "2. `get_state` — read state.\n",
-            "2. `get_state` — read state.\n"
-            "3. `get_energy_context` — read energy.\n",
+            "2. `get_state` — read state.\n3. `get_energy_context` — read energy.\n",
         )
         .replace(
             "- `get_state` → `mcp.get_state` (`read`)\n",
@@ -159,9 +158,7 @@ def test_validator_rejects_invalid_provider_tool_or_mode(
 ) -> None:
     path = tmp_path / "SKILL.md"
     path.write_text(
-        FULL_SKILL.replace(
-            "- `discover_devices` → `mcp.discover_devices` (`read`)", binding
-        ),
+        FULL_SKILL.replace("- `discover_devices` → `mcp.discover_devices` (`read`)", binding),
         encoding="utf-8",
     )
 

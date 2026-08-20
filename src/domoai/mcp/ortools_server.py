@@ -48,11 +48,11 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
     if result.plan is not None and result.status in {
         OptimizationStatus.OPTIMAL,
         OptimizationStatus.FEASIBLE,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+        OptimizationStatus.FEASIBLE_HIERARCHY,
     }:
         if hard_satisfied is True:
-            summary = (
-                f"A {result.status.value} proposal satisfies all declared hard constraints."
-            )
+            summary = f"A {result.status.value} proposal satisfies all declared hard constraints."
         else:
             summary = (
                 f"A {result.status.value} proposal was produced without complete "
@@ -70,9 +70,7 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
                     if member.execute_at is not None
                     else None,
                     "status": member.status.value,
-                    "commands": [
-                        command.model_dump(mode="json") for command in member.commands
-                    ],
+                    "commands": [command.model_dump(mode="json") for command in member.commands],
                 }
                 for member in bundle
             ],

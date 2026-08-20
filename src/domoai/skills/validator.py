@@ -128,7 +128,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
-        metadata[key.strip()] = value.strip().strip('"\'')
+        metadata[key.strip()] = value.strip().strip("\"'")
     return metadata, text[marker + len("\n---\n") :]
 
 

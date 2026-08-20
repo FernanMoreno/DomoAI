@@ -84,9 +84,7 @@ def test_composer_allows_optional_battery() -> None:
 
 def test_composer_rejects_stale_provider_data_with_typed_diagnostic() -> None:
     tariffs, solar, battery = provider_inputs()
-    stale = tariffs.model_copy(
-        update={"observed_at": NOW - timedelta(seconds=61)}
-    )
+    stale = tariffs.model_copy(update={"observed_at": NOW - timedelta(seconds=61)})
     composed = ComposedEnergyContextProvider(
         StaticTariffProvider(stale),
         StaticSolarForecastProvider(solar),

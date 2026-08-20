@@ -34,9 +34,7 @@ async def test_shadow_comparison_classifies_matches_and_only_one_side() -> None:
     production_only = _entity(
         "switch.production_only", domain="switch", name="Production only switch"
     )
-    candidate_only = _entity(
-        "switch.candidate_only", domain="switch", name="Candidate only switch"
-    )
+    candidate_only = _entity("switch.candidate_only", domain="switch", name="Candidate only switch")
     production = SimulatedHomeAdapter(entities=[shared_entity, production_only])
     candidate = SimulatedHomeAdapter(entities=[shared_entity, candidate_only])
 

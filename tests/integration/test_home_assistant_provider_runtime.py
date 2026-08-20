@@ -38,7 +38,6 @@ async def test_provider_runtime_feeds_registry_state_store_and_semantic_mcp(
             database_path=tmp_path / "provider-runtime.sqlite3",
             home_assistant_url="http://home-assistant.test",
             home_assistant_token=SecretStr("fixture-token"),
-            home_assistant_provider=True,
         )
     )
     try:
@@ -104,7 +103,6 @@ async def test_provider_runtime_uses_existing_plan_execution_and_readback(
             database_path=tmp_path / "provider-execution.sqlite3",
             home_assistant_url="http://home-assistant.test",
             home_assistant_token=SecretStr("fixture-token"),
-            home_assistant_provider=True,
         )
     )
     try:

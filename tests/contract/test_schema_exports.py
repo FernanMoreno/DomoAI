@@ -9,9 +9,7 @@ def test_energy_contract_schemas_are_published_and_versioned() -> None:
         (ROOT / "schemas" / "v1" / "energy-context.schema.json").read_text(encoding="utf-8")
     )
     optimization = json.loads(
-        (ROOT / "schemas" / "v1" / "optimization-scenario.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "schemas" / "v1" / "optimization-scenario.schema.json").read_text(encoding="utf-8")
     )
 
     assert energy_context["properties"]["schema_version"]["const"] == "v1"

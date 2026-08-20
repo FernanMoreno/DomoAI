@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -74,7 +76,7 @@ class CpSatOptimizer:
         if objective_terms:
             model.Minimize(sum(objective_terms))
 
-        solver, status = _solve(model, scenario)
+        solver, status = _solve(model, scenario, time_limit=scenario.solver_time_limit_seconds)
         failure = _failure_result(scenario, status)
         if failure is not None:
             return failure
@@ -96,9 +98,7 @@ class CpSatOptimizer:
                         minimize_start_objective.priority if minimize_start_objective else None
                     ),
                     terms=["minimize_start"] if objective_terms else [],
-                    achieved_value=(
-                        solver.Value(sum(objective_terms)) if objective_terms else 0
-                    ),
+                    achieved_value=(solver.Value(sum(objective_terms)) if objective_terms else 0),
                 )
             ],
             scenario_fingerprint=_scenario_fingerprint(scenario),
@@ -146,9 +146,7 @@ class CpSatOptimizer:
             else [0] * horizon_slots
         )
         forecast_confidence = {
-            "solar_bounded": all(
-                point.confidence is not None for point in context.solar_forecast
-            ),
+            "solar_bounded": all(point.confidence is not None for point in context.solar_forecast),
             "base_load_bounded": (
                 all(point.confidence is not None for point in context.base_load_forecast)
                 if context.base_load_forecast is not None
@@ -306,7 +304,7 @@ class CpSatOptimizer:
                 >= to_energy_int(ev_load.target_soc_kwh)
             )
 
-        solver, status, solved_tiers, wall_time = _solve_tiers(
+        solver, status, solved_tiers, wall_time, degraded = _solve_tiers(
             model,
             scenario,
             start_variables,
@@ -353,8 +351,7 @@ class CpSatOptimizer:
                 load_powers[load.id]
                 for load in scenario.loads
                 if any(
-                    start <= slot < start + load.duration_slots
-                    and solver.Value(variable)
+                    start <= slot < start + load.duration_slots and solver.Value(variable)
                     for start, variable in start_variables[load.id].items()
                 )
             )
@@ -362,9 +359,7 @@ class CpSatOptimizer:
             import_kw = solver.Value(grid_import[slot]) / POWER_SCALE
             export_kw = solver.Value(grid_export[slot]) / POWER_SCALE
             charge_kw = solver.Value(charge_variables[slot]) / POWER_SCALE if battery else 0.0
-            discharge_kw = (
-                solver.Value(discharge_variables[slot]) / POWER_SCALE if battery else 0.0
-            )
+            discharge_kw = solver.Value(discharge_variables[slot]) / POWER_SCALE if battery else 0.0
             soc_kwh = solver.Value(soc_variables[slot]) / SOC_SCALE if battery else 0.0
             ev_charge_kw = sum(
                 solver.Value(ev_charge_variables[ev_load.id][slot]) / POWER_SCALE
@@ -415,7 +410,7 @@ class CpSatOptimizer:
         )
         return build_result(
             scenario_id=scenario.id,
-            status=_status(status),
+            status=_status_for_tiers(status, degraded),
             plan=plans[0],
             plans=plans,
             objective_values={
@@ -466,9 +461,7 @@ def _active_load_terms(
     terms: list[Any] = []
     for load in scenario.loads:
         power = (
-            powers[load.id]
-            if powers is not None
-            else to_solver_int(load.power, load.power_unit)
+            powers[load.id] if powers is not None else to_solver_int(load.power, load.power_unit)
         )
         for start, variable in start_variables[load.id].items():
             if start <= slot < start + load.duration_slots:
@@ -523,9 +516,7 @@ def _add_energy_constraints(
             else:
                 model.Add(actual >= limit)
             continue
-        violation = model.NewIntVar(
-            0, violation_bound, f"soft_violation_{constraint.type}_{slot}"
-        )
+        violation = model.NewIntVar(0, violation_bound, f"soft_violation_{constraint.type}_{slot}")
         if is_max_bound:
             model.Add(violation >= actual - limit)
         else:
@@ -626,7 +617,7 @@ def _solve_tiers(
     context: Any,
     charge_variables: list[Any] | None = None,
     discharge_variables: list[Any] | None = None,
-) -> tuple[Any, int, list[SolvedTier], float]:
+) -> tuple[Any, int, list[SolvedTier], float, bool]:
     tiers: list[dict[str, Any]] = []
     if soft_violations:
         distinct_types = sorted({violation_type for violation_type, _slot, _var in soft_violations})
@@ -666,13 +657,21 @@ def _solve_tiers(
     status: Any = cp_model.UNKNOWN
     solved_tiers: list[SolvedTier] = []
     wall_time = 0.0
+    degraded = False
+    start = time.monotonic()
     for tier in tiers:
+        remaining = scenario.solver_time_limit_seconds - (time.monotonic() - start)
+        if remaining <= 0:
+            degraded = True
+            break
         tier_terms = tier["tier_terms"]
         model.Minimize(sum(tier_terms))
-        solver, status = _solve(model, scenario)
+        solver, status = _solve(model, scenario, time_limit=remaining)
         wall_time += solver.WallTime()
         if status not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
-            return solver, status, solved_tiers, wall_time
+            return solver, status, solved_tiers, wall_time, degraded
+        if status == cp_model.FEASIBLE:
+            degraded = True
         achieved_value = solver.Value(sum(tier_terms))
         solved_tiers.append(
             SolvedTier(
@@ -681,13 +680,17 @@ def _solve_tiers(
         )
         model.Add(sum(tier_terms) <= achieved_value)
     if solver is None:
-        solver, status = _solve(model, scenario)
+        remaining = scenario.solver_time_limit_seconds - (time.monotonic() - start)
+        solver, status = _solve(model, scenario, time_limit=remaining)
         wall_time += solver.WallTime()
-    return solver, status, solved_tiers, wall_time
+        if status == cp_model.FEASIBLE:
+            degraded = True
+    return solver, status, solved_tiers, wall_time, degraded
 
 
 def _scenario_fingerprint(scenario: OptimizationScenario) -> str:
-    return hashlib.sha256(scenario.model_dump_json().encode("utf-8")).hexdigest()
+    canonical = json.dumps(scenario.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _reported_soft_violations(
@@ -700,9 +703,7 @@ def _reported_soft_violations(
             continue
         is_soc_type = constraint_type in {"battery_min_soc", "battery_max_soc"}
         scale = SOC_SCALE if is_soc_type else POWER_SCALE
-        reported.append(
-            {"type": constraint_type, "slot": slot, "amount": value / scale}
-        )
+        reported.append({"type": constraint_type, "slot": slot, "amount": value / scale})
     return reported
 
 
@@ -823,9 +824,9 @@ def _proposal_plan(
     return plans
 
 
-def _solve(model: Any, scenario: OptimizationScenario) -> tuple[Any, int]:
+def _solve(model: Any, scenario: OptimizationScenario, *, time_limit: float) -> tuple[Any, int]:
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = scenario.solver_time_limit_seconds
+    solver.parameters.max_time_in_seconds = max(time_limit, 0.0)
     solver.parameters.num_search_workers = 1
     solver.parameters.random_seed = 0
     return solver, solver.Solve(model)
@@ -866,11 +867,13 @@ def _failure_result(scenario: OptimizationScenario, status: int) -> Optimization
 
 
 def _status(status: int) -> OptimizationStatus:
-    return (
-        OptimizationStatus.OPTIMAL
-        if status == cp_model.OPTIMAL
-        else OptimizationStatus.FEASIBLE
-    )
+    return OptimizationStatus.OPTIMAL if status == cp_model.OPTIMAL else OptimizationStatus.FEASIBLE
+
+
+def _status_for_tiers(status: int, degraded: bool) -> OptimizationStatus:
+    if status == cp_model.OPTIMAL and not degraded:
+        return OptimizationStatus.OPTIMAL_HIERARCHY
+    return OptimizationStatus.FEASIBLE_HIERARCHY
 
 
 def to_solver_int(value: float, unit: str) -> int:

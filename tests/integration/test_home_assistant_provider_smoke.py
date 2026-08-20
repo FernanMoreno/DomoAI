@@ -39,7 +39,6 @@ async def test_home_assistant_provider_runtime_live_smoke(tmp_path: Path) -> Non
             database_path=tmp_path / "home-assistant-provider-live.sqlite3",
             home_assistant_url=base_url,
             home_assistant_token=SecretStr(token),
-            home_assistant_provider=True,
         )
     )
     try:
@@ -64,9 +63,7 @@ async def test_home_assistant_provider_runtime_live_smoke(tmp_path: Path) -> Non
             policies=[],
         )
         server = create_domotics_server(context)
-        inventory = _structured(
-            await server.call_tool("discover_devices", {"refresh": False})
-        )
+        inventory = _structured(await server.call_tool("discover_devices", {"refresh": False}))
         assert inventory["devices"]
         assert any(device["id"] == state.device_id for device in inventory["devices"])
 

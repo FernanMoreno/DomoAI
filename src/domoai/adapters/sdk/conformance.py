@@ -206,9 +206,7 @@ def _validate_source_identity(entities: list[dict[str, Any]]) -> None:
         raise ValueError("source entity ids must be unique")
 
 
-def _validate_availability(
-    entities: list[dict[str, Any]], states: list[dict[str, Any]]
-) -> None:
+def _validate_availability(entities: list[dict[str, Any]], states: list[dict[str, Any]]) -> None:
     if any(not isinstance(entity.get("available"), bool) for entity in entities):
         raise ValueError("source entity availability must be boolean")
     if any(not isinstance(state.get("available"), bool) for state in states):
@@ -311,8 +309,6 @@ def _command_value(device: Device, command_name: str) -> int | float | None:
         capability = next(item for item in device.capabilities if item.name == capability_name)
         return capability.minimum if capability.minimum is not None else 0
     if command_name == "set_temperature":
-        capability = next(
-            item for item in device.capabilities if item.name == "target_temperature"
-        )
+        capability = next(item for item in device.capabilities if item.name == "target_temperature")
         return capability.minimum if capability.minimum is not None else 20
     return None

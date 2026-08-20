@@ -19,9 +19,17 @@ class OptimizationService:
         self.registry = registry
         self.plan_service = plan_service
         self.optimizer = optimizer
+        self._last_wall_time_seconds: float | None = None
+
+    @property
+    def last_wall_time_seconds(self) -> float | None:
+        return self._last_wall_time_seconds
 
     def optimize(self, scenario: OptimizationScenario) -> OptimizationResult:
-        return self.optimizer.optimize(scenario)
+        result = self.optimizer.optimize(scenario)
+        if result.solver_evidence is not None:
+            self._last_wall_time_seconds = result.solver_evidence.wall_time_seconds
+        return result
 
     def validate_proposal(self, result: OptimizationResult) -> OptimizationResult:
         bundle = result.plans or ([result.plan] if result.plan is not None else [])

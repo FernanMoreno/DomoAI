@@ -104,9 +104,7 @@ class TelemetryFixture:
             )
         ]
 
-    async def get_measurements(
-        self, device_ids: Sequence[str] | None = None
-    ) -> list[Measurement]:
+    async def get_measurements(self, device_ids: Sequence[str] | None = None) -> list[Measurement]:
         if device_ids is not None and "inverter.main" not in device_ids:
             return []
         source = SourceRef(adapter_id=self.manifest.provider_id, external_id="inverter.main")
@@ -181,9 +179,7 @@ class CommandFixture:
 
 
 class FailingTelemetryFixture(TelemetryFixture):
-    async def get_measurements(
-        self, device_ids: Sequence[str] | None = None
-    ) -> list[Measurement]:
+    async def get_measurements(self, device_ids: Sequence[str] | None = None) -> list[Measurement]:
         raise ConnectionError("fixture transport contains token=must-not-leak")
 
 

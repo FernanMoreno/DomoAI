@@ -81,8 +81,7 @@ def energy_snapshot(registry: DeviceRegistry, runtime_revision: str) -> dict[str
         "schema_version": "v1",
         "runtime_revision": runtime_revision,
         "devices": [
-            device.model_dump(mode="json")
-            for device in sorted(devices, key=lambda item: item.id)
+            device.model_dump(mode="json") for device in sorted(devices, key=lambda item: item.id)
         ],
     }
 

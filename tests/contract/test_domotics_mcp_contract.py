@@ -165,6 +165,7 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",
+        "domotics://metrics",
     ]
 
 
@@ -176,21 +177,132 @@ async def test_invalid_mcp_command_returns_safe_error_envelope_without_adapter_c
     device_id = next(
         device.id for device in context.registry.devices if device.type.value == "light"
     )
-    result = structured(await server.call_tool(
-        "validate_command",
-        {
-            "command": {
-                "device_id": device_id,
-                "command": "set_brightness",
-                "value": 140,
-                "idempotency_key": "invalid-intent",
-            }
-        },
-    ))
+    result = structured(
+        await server.call_tool(
+            "validate_command",
+            {
+                "command": {
+                    "device_id": device_id,
+                    "command": "set_brightness",
+                    "value": 140,
+                    "idempotency_key": "invalid-intent",
+                }
+            },
+        )
+    )
 
     assert result["error"]["code"] == "validation_error"
     assert adapter.calls == []
     assert "token" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_validate_plan_generates_agent_request_id_when_omitted() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    result = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-contract-no-request-id",
+                    "commands": [
+                        {
+                            "id": "cmd-contract-no-request-id",
+                            "device_id": device_id,
+                            "command": "turn_on",
+                            "idempotency_key": "intent-contract-no-request-id",
+                        }
+                    ],
+                }
+            },
+        )
+    )
+
+    assert result["plan"]["agent_request_id"]
+
+
+@pytest.mark.asyncio
+async def test_validate_plan_preserves_a_supplied_agent_request_id() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    result = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-contract-explicit-request-id",
+                    "commands": [
+                        {
+                            "id": "cmd-contract-explicit-request-id",
+                            "device_id": device_id,
+                            "command": "turn_on",
+                            "idempotency_key": "intent-contract-explicit-request-id",
+                        }
+                    ],
+                    "agent_request_id": "agent-req-contract-explicit",
+                }
+            },
+        )
+    )
+
+    assert result["plan"]["agent_request_id"] == "agent-req-contract-explicit"
+
+
+@pytest.mark.asyncio
+async def test_validate_command_accepts_and_defaults_agent_request_id() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+
+    with_explicit = structured(
+        await server.call_tool(
+            "validate_command",
+            {
+                "command": {
+                    "id": "cmd-contract-command-explicit",
+                    "device_id": device_id,
+                    "command": "turn_on",
+                    "idempotency_key": "intent-contract-command-explicit",
+                },
+                "agent_request_id": "agent-req-contract-command",
+            },
+        )
+    )
+    without_explicit = structured(
+        await server.call_tool(
+            "validate_command",
+            {
+                "command": {
+                    "id": "cmd-contract-command-default",
+                    "device_id": device_id,
+                    "command": "turn_on",
+                    "idempotency_key": "intent-contract-command-default",
+                }
+            },
+        )
+    )
+
+    assert context.plans[with_explicit["plan_id"]].agent_request_id == "agent-req-contract-command"
+    assert context.plans[without_explicit["plan_id"]].agent_request_id
+
+
+@pytest.mark.asyncio
+async def test_metrics_resource_reports_unavailable_without_a_collector() -> None:
+    server = create_domotics_server(await build_context())
+
+    contents = list(await server.read_resource("domotics://metrics"))
+
+    body = json.loads(contents[0].content)
+    assert body["available"] is False
 
 
 @pytest.mark.asyncio

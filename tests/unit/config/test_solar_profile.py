@@ -47,9 +47,7 @@ def test_json_profile_source_loads_once_persisted_metadata(tmp_path: Path) -> No
 )
 def test_json_profile_source_fails_safely(tmp_path: Path, payload: object) -> None:
     path = tmp_path / "solar-profile.json"
-    path.write_text(
-        payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8"
-    )
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(SolarProfileConfigurationError, match="solar profile") as raised:
         JsonSolarInstallationProfileSource(path).load()

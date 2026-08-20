@@ -37,10 +37,14 @@ def manifest(adapter_id: str = "fixture") -> AdapterManifest:
 
 
 def registration(adapter_id: str = "fixture") -> AdapterRegistration:
-    factory = SimulatedHomeAdapter if adapter_id == "fixture" else type(
-        "ExternalFixtureAdapter",
-        (SimulatedHomeAdapter,),
-        {"adapter_id": adapter_id},
+    factory = (
+        SimulatedHomeAdapter
+        if adapter_id == "fixture"
+        else type(
+            "ExternalFixtureAdapter",
+            (SimulatedHomeAdapter,),
+            {"adapter_id": adapter_id},
+        )
     )
     return AdapterRegistration(manifest=manifest(adapter_id), factory=factory)
 

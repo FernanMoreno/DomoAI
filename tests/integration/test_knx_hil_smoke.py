@@ -33,9 +33,7 @@ async def test_knx_hil_command_round_trip(tmp_path: Path) -> None:
             (
                 device
                 for device in runtime.registry.devices
-                if any(
-                    ref.external_id == "living_room.main_light" for ref in device.source_refs
-                )
+                if any(ref.external_id == "living_room.main_light" for ref in device.source_refs)
             ),
             None,
         )

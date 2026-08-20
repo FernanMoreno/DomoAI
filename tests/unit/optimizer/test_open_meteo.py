@@ -75,9 +75,7 @@ def test_provider_sanitizes_client_failure() -> None:
             raise TimeoutError("token=must-not-cross-boundary")
 
     with pytest.raises(EnergyProviderError) as raised:
-        OpenMeteoSolarProvider(FailingClient(), open_meteo_config()).get_forecast(
-            omie_horizon()
-        )
+        OpenMeteoSolarProvider(FailingClient(), open_meteo_config()).get_forecast(omie_horizon())
 
     assert raised.value.diagnostic.code == "provider_unavailable"
     assert "token" not in str(raised.value.diagnostic)

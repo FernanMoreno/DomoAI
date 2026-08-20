@@ -37,9 +37,7 @@ def entity(
         "connections": [f"fixture:{source_device_id}"],
         "name": name,
         "area_id": area_id,
-        "domain": (
-            "light" if any(item["name"] == "power" for item in capabilities) else "sensor"
-        ),
+        "domain": ("light" if any(item["name"] == "power" for item in capabilities) else "sensor"),
         "semantic_type": (
             "light" if any(item["name"] == "power" for item in capabilities) else "sensor"
         ),
@@ -115,14 +113,14 @@ def source_snapshot(
         )
     entities.extend(
         [
-        entity(
-            entity_id=f"sensor.{adapter_id}.temperature",
-            source_device_id=f"{adapter_id}-environment",
-            canonical_id=f"{adapter_id}.environment",
-            name=f"{adapter_id.title()} Environment",
-            capabilities=[read_only_capability("temperature", "°C")],
-            area_id="bedroom",
-        ),
+            entity(
+                entity_id=f"sensor.{adapter_id}.temperature",
+                source_device_id=f"{adapter_id}-environment",
+                canonical_id=f"{adapter_id}.environment",
+                name=f"{adapter_id.title()} Environment",
+                capabilities=[read_only_capability("temperature", "°C")],
+                area_id="bedroom",
+            ),
         ]
     )
     if shared_brightness:
@@ -216,9 +214,7 @@ class RecordingAdapter:
     async def execute(self, command: Command) -> AdapterExecutionAck:
         return await self.execute_source(command, command.device_id)
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         if not self.connected or not self.available:
             return AdapterExecutionAck(accepted=False, message="Fixture source unavailable")
         self.writes.append((source_entity_id, command))

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from domoai.config.settings import Settings
 
@@ -57,30 +57,30 @@ def test_settings_allow_multiple_live_sources() -> None:
     assert settings.zigbee2mqtt_url is not None
 
 
-def test_home_assistant_provider_mode_requires_explicit_connection_pair() -> None:
-    with pytest.raises(ValueError, match="DOMOAI_HOME_ASSISTANT_PROVIDER"):
-        Settings(home_assistant_provider=True)
+def test_home_assistant_provider_field_no_longer_exists() -> None:
+    # Home Assistant integration converged onto a single (Provider) path
+    # (Spec 081); the old dual-path selector field is a hard construction
+    # error now, not silently ignored, per StrictModel's extra="forbid".
+    with pytest.raises(ValidationError):
+        Settings(home_assistant_provider=True)  # type: ignore[call-arg]
 
-    with pytest.raises(ValueError, match="DOMOAI_HOME_ASSISTANT_MAPPING_PATH"):
-        Settings(home_assistant_mapping_path=Path("config/home-assistant-mappings.json"))
+
+def test_home_assistant_mapping_path_no_longer_requires_a_flag() -> None:
+    settings = Settings(home_assistant_mapping_path=Path("config/home-assistant-mappings.json"))
+
+    assert settings.home_assistant_mapping_path == Path("config/home-assistant-mappings.json")
 
 
-def test_home_assistant_provider_settings_are_loaded_from_environment(
+def test_home_assistant_mapping_path_is_loaded_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DOMOAI_HOME_ASSISTANT_PROVIDER", "1")
     monkeypatch.setenv("DOMOAI_HOME_ASSISTANT_URL", "http://home-assistant.test")
     monkeypatch.setenv("DOMOAI_HOME_ASSISTANT_TOKEN", "fixture-token")
-    monkeypatch.setenv(
-        "DOMOAI_HOME_ASSISTANT_MAPPING_PATH", "config/home-assistant-mappings.json"
-    )
+    monkeypatch.setenv("DOMOAI_HOME_ASSISTANT_MAPPING_PATH", "config/home-assistant-mappings.json")
 
     settings = Settings.from_environment()
 
-    assert settings.home_assistant_provider is True
-    assert settings.home_assistant_mapping_path == Path(
-        "config/home-assistant-mappings.json"
-    )
+    assert settings.home_assistant_mapping_path == Path("config/home-assistant-mappings.json")
     assert "fixture-token" not in repr(settings)
 
 
@@ -108,9 +108,7 @@ def test_settings_allow_matter_with_another_live_source() -> None:
 
 
 def test_modbus_settings_have_safe_defaults_and_require_complete_pair() -> None:
-    settings = Settings(
-        modbus_host="modbus.test", modbus_config_path=Path("config/modbus.json")
-    )
+    settings = Settings(modbus_host="modbus.test", modbus_config_path=Path("config/modbus.json"))
 
     assert settings.modbus_port == 502
     assert settings.modbus_timeout_seconds == 5
@@ -173,6 +171,30 @@ def test_composite_event_queue_max_size_defaults_and_loads_from_environment(
     settings = Settings.from_environment()
 
     assert settings.composite_event_queue_max_size == 42
+
+
+def test_scheduler_poll_interval_seconds_defaults_and_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_settings = Settings()
+    assert default_settings.scheduler_poll_interval_seconds == 30
+
+    monkeypatch.setenv("DOMOAI_SCHEDULER_POLL_INTERVAL_SECONDS", "15")
+    settings = Settings.from_environment()
+
+    assert settings.scheduler_poll_interval_seconds == 15
+
+
+def test_scheduler_grace_window_seconds_defaults_and_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_settings = Settings()
+    assert default_settings.scheduler_grace_window_seconds == 900
+
+    monkeypatch.setenv("DOMOAI_SCHEDULER_GRACE_WINDOW_SECONDS", "120")
+    settings = Settings.from_environment()
+
+    assert settings.scheduler_grace_window_seconds == 120
 
 
 def test_sqlite_busy_timeout_ms_defaults_and_loads_from_environment(

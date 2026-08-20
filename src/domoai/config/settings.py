@@ -18,7 +18,6 @@ class Settings(StrictModel):
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
     operator_approval_token: SecretStr | None = None
-    home_assistant_provider: bool = False
     home_assistant_mapping_path: Path | None = None
     zigbee2mqtt_url: str | None = None
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
@@ -62,17 +61,6 @@ class Settings(StrictModel):
 
     @model_validator(mode="after")
     def validate_source_selection(self) -> Settings:
-        if self.home_assistant_provider and (
-            self.home_assistant_url is None or self.home_assistant_token is None
-        ):
-            raise ValueError(
-                "DOMOAI_HOME_ASSISTANT_PROVIDER requires "
-                "DOMOAI_HOME_ASSISTANT_URL and DOMOAI_HOME_ASSISTANT_TOKEN"
-            )
-        if self.home_assistant_mapping_path is not None and not self.home_assistant_provider:
-            raise ValueError(
-                "DOMOAI_HOME_ASSISTANT_MAPPING_PATH requires DOMOAI_HOME_ASSISTANT_PROVIDER"
-            )
         knx_settings = (self.knx_gateway_host is not None, self.knx_config_path is not None)
         if knx_settings[0] != knx_settings[1]:
             raise ValueError(
@@ -129,9 +117,7 @@ class Settings(StrictModel):
                 }
                 missing = [name for name, value in required_solar.items() if value is None]
                 if missing:
-                    raise ValueError(
-                        "missing live solar configuration: " + ", ".join(missing)
-                    )
+                    raise ValueError("missing live solar configuration: " + ", ".join(missing))
         return self
 
     @classmethod
@@ -160,9 +146,7 @@ class Settings(StrictModel):
                 else None
             ),
             risk_overrides_path=(
-                Path(risk_path)
-                if (risk_path := os.getenv("DOMOAI_RISK_OVERRIDES_PATH"))
-                else None
+                Path(risk_path) if (risk_path := os.getenv("DOMOAI_RISK_OVERRIDES_PATH")) else None
             ),
             safety_limits_path=(
                 Path(safety_path)
@@ -174,26 +158,19 @@ class Settings(StrictModel):
                 SecretStr(token) if (token := os.getenv("DOMOAI_HOME_ASSISTANT_TOKEN")) else None
             ),
             operator_approval_token=(
-                SecretStr(token)
-                if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN"))
-                else None
+                SecretStr(token) if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN")) else None
             ),
-            home_assistant_provider=boolean("DOMOAI_HOME_ASSISTANT_PROVIDER"),
             home_assistant_mapping_path=(
                 Path(mapping_path)
                 if (mapping_path := os.getenv("DOMOAI_HOME_ASSISTANT_MAPPING_PATH"))
                 else None
             ),
             zigbee2mqtt_url=os.getenv("DOMOAI_ZIGBEE2MQTT_URL"),
-            zigbee2mqtt_base_topic=os.getenv(
-                "DOMOAI_ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"
-            ),
+            zigbee2mqtt_base_topic=os.getenv("DOMOAI_ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
             knx_config_path=(
-                Path(config_path)
-                if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH"))
-                else None
+                Path(config_path) if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH")) else None
             ),
             knx_timeout_seconds=float(os.getenv("DOMOAI_KNX_TIMEOUT_SECONDS", "5")),
             modbus_host=os.getenv("DOMOAI_MODBUS_HOST"),
@@ -207,17 +184,19 @@ class Settings(StrictModel):
             modbus_poll_interval_seconds=float(
                 os.getenv("DOMOAI_MODBUS_POLL_INTERVAL_SECONDS", "5")
             ),
+            scheduler_poll_interval_seconds=int(
+                os.getenv("DOMOAI_SCHEDULER_POLL_INTERVAL_SECONDS", "30")
+            ),
+            scheduler_grace_window_seconds=int(
+                os.getenv("DOMOAI_SCHEDULER_GRACE_WINDOW_SECONDS", "900")
+            ),
             mqtt_username=os.getenv("DOMOAI_MQTT_USERNAME"),
             mqtt_password=(
-                SecretStr(password)
-                if (password := os.getenv("DOMOAI_MQTT_PASSWORD"))
-                else None
+                SecretStr(password) if (password := os.getenv("DOMOAI_MQTT_PASSWORD")) else None
             ),
             mqtt_timeout_seconds=float(os.getenv("DOMOAI_MQTT_TIMEOUT_SECONDS", "5")),
             mqtt_ca_cert_path=(
-                Path(ca_path)
-                if (ca_path := os.getenv("DOMOAI_MQTT_CA_CERT_PATH"))
-                else None
+                Path(ca_path) if (ca_path := os.getenv("DOMOAI_MQTT_CA_CERT_PATH")) else None
             ),
             mqtt_client_cert_path=(
                 Path(cert_path)
@@ -225,17 +204,13 @@ class Settings(StrictModel):
                 else None
             ),
             mqtt_client_key_path=(
-                Path(key_path)
-                if (key_path := os.getenv("DOMOAI_MQTT_CLIENT_KEY_PATH"))
-                else None
+                Path(key_path) if (key_path := os.getenv("DOMOAI_MQTT_CLIENT_KEY_PATH")) else None
             ),
             mqtt_tls_insecure=boolean("DOMOAI_MQTT_TLS_INSECURE"),
             composite_event_queue_max_size=int(
                 os.getenv("DOMOAI_COMPOSITE_EVENT_QUEUE_MAX_SIZE", "1000")
             ),
-            sqlite_busy_timeout_ms=int(
-                os.getenv("DOMOAI_SQLITE_BUSY_TIMEOUT_MS", "5000")
-            ),
+            sqlite_busy_timeout_ms=int(os.getenv("DOMOAI_SQLITE_BUSY_TIMEOUT_MS", "5000")),
             matter_timeout_seconds=float(os.getenv("DOMOAI_MATTER_TIMEOUT_SECONDS", "5")),
             state_stale_after_seconds=int(stale_after),
             energy_live=boolean("DOMOAI_ENERGY_LIVE"),

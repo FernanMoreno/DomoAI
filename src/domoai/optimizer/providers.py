@@ -47,9 +47,7 @@ class ProviderMetadata(StrictModel):
     schema_version: Literal["v1"] = "v1"
     horizon: Horizon
     source_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64)
-    source_revision: str = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", max_length=128
-    )
+    source_revision: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", max_length=128)
     observed_at: datetime
 
     @model_validator(mode="after")
@@ -260,9 +258,7 @@ class ComposedEnergyContextProvider:
             raise _provider_error(
                 provider_id,
                 code=(
-                    "provider_unavailable"
-                    if _is_retryable_exception(error)
-                    else "provider_invalid"
+                    "provider_unavailable" if _is_retryable_exception(error) else "provider_invalid"
                 ),
                 message=f"{label} provider failed",
                 retryable=_is_retryable_exception(error),
@@ -285,9 +281,7 @@ class ComposedEnergyContextProvider:
             raise _provider_error(
                 provider_id,
                 code=(
-                    "provider_unavailable"
-                    if _is_retryable_exception(error)
-                    else "provider_invalid"
+                    "provider_unavailable" if _is_retryable_exception(error) else "provider_invalid"
                 ),
                 message="solar provider failed",
                 retryable=_is_retryable_exception(error),
@@ -311,9 +305,7 @@ class ComposedEnergyContextProvider:
             raise _provider_error(
                 provider_id,
                 code=(
-                    "provider_unavailable"
-                    if _is_retryable_exception(error)
-                    else "provider_invalid"
+                    "provider_unavailable" if _is_retryable_exception(error) else "provider_invalid"
                 ),
                 message="battery provider failed",
                 retryable=_is_retryable_exception(error),

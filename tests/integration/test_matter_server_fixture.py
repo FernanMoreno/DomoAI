@@ -4,7 +4,7 @@ from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, PlanStatus, SourceEvent, StateStatus
+from domoai.domain.models import Command, PlanStatus, StateStatus
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -53,7 +53,7 @@ async def test_matter_events_refresh_canonical_state_and_availability() -> None:
     transport.enqueue(event_message("node_updated", nodes[0]))
     event = await consumer.consume_once()
 
-    assert isinstance(event, SourceEvent)
+    assert event is not None
     assert event.kind in {"availability_changed", "state_changed"}
     device_id = registry.canonical_id_for_source("matter", "node:1001/endpoint:1")
     assert device_id is not None

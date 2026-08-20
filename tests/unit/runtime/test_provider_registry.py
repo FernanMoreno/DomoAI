@@ -19,9 +19,7 @@ from tests.fixtures.provider_sdk import (
 @pytest.mark.asyncio
 async def test_registry_orders_providers_and_preserves_healthy_collection() -> None:
     registry = ProviderRegistry()
-    failing = FailingTelemetryFixture(
-        manifest=telemetry_manifest("fixture_failing")
-    )
+    failing = FailingTelemetryFixture(manifest=telemetry_manifest("fixture_failing"))
     healthy = TelemetryFixture()
     commands = CommandFixture()
     registry.register(failing)

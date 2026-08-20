@@ -80,8 +80,7 @@ def open_meteo_payload(
 ) -> dict[str, object]:
     start = horizon.start.astimezone(UTC)
     timestamps = [
-        int((start + timedelta(minutes=15 * slot)).timestamp())
-        for slot in range(horizon.slots)
+        int((start + timedelta(minutes=15 * slot)).timestamp()) for slot in range(horizon.slots)
     ]
     return {
         "timezone": timezone or horizon.timezone,
@@ -139,9 +138,7 @@ def energy_context_for(
 def static_energy_provider(
     horizon: Horizon | None = None, *, with_battery: bool = True
 ) -> StaticEnergyContextProvider:
-    return StaticEnergyContextProvider(
-        energy_context_for(horizon, with_battery=with_battery)
-    )
+    return StaticEnergyContextProvider(energy_context_for(horizon, with_battery=with_battery))
 
 
 def flexible_load(

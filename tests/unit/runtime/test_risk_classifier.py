@@ -117,8 +117,7 @@ def test_cover_commands_default_to_confirm() -> None:
 
     for command_name in ("open", "close", "set_position", "stop"):
         assert (
-            classifier.classify(device, "position", _command(command_name))
-            is RiskClass.CONFIRM
+            classifier.classify(device, "position", _command(command_name)) is RiskClass.CONFIRM
         ), command_name
 
 
@@ -127,18 +126,16 @@ def test_switch_commands_default_to_safe() -> None:
     device = _device("switch.kitchen", DeviceType.SWITCH)
 
     for command_name in ("turn_on", "turn_off", "toggle"):
-        assert (
-            classifier.classify(device, "power", _command(command_name)) is RiskClass.SAFE
-        ), command_name
+        assert classifier.classify(device, "power", _command(command_name)) is RiskClass.SAFE, (
+            command_name
+        )
 
 
 def test_light_set_brightness_defaults_to_safe() -> None:
     classifier = RiskClassifier()
     device = _device("light.kitchen", DeviceType.LIGHT)
 
-    assert (
-        classifier.classify(device, "brightness", _command("set_brightness")) is RiskClass.SAFE
-    )
+    assert classifier.classify(device, "brightness", _command("set_brightness")) is RiskClass.SAFE
 
 
 def test_sensor_and_energy_commands_default_to_restricted() -> None:
@@ -155,8 +152,7 @@ def test_ev_charger_commands_default_to_confirm() -> None:
     device = _device("ev_charger.garage", DeviceType.EV_CHARGER)
 
     assert (
-        classifier.classify(device, "charge_power", _command("start_charge"))
-        is RiskClass.CONFIRM
+        classifier.classify(device, "charge_power", _command("start_charge")) is RiskClass.CONFIRM
     )
 
 
@@ -164,9 +160,7 @@ def test_unrecognized_command_on_known_device_type_fails_closed() -> None:
     classifier = RiskClassifier()
     device = _device("light.kitchen", DeviceType.LIGHT)
 
-    assert (
-        classifier.classify(device, "power", _command("factory_reset")) is RiskClass.RESTRICTED
-    )
+    assert classifier.classify(device, "power", _command("factory_reset")) is RiskClass.RESTRICTED
 
 
 def test_climate_temperature_within_envelope_defaults_to_safe() -> None:
@@ -200,9 +194,7 @@ def test_climate_temperature_with_no_configured_envelope_defaults_to_confirm() -
     device = _climate_device(minimum=None, maximum=None)
 
     assert (
-        classifier.classify(
-            device, "target_temperature", _command("set_temperature", value=21)
-        )
+        classifier.classify(device, "target_temperature", _command("set_temperature", value=21))
         is RiskClass.CONFIRM
     )
 
@@ -214,9 +206,7 @@ def test_climate_temperature_with_non_numeric_value_defaults_to_confirm() -> Non
     string_command = _command("set_temperature", value="warm")
     bool_command = _command("set_temperature", value=True)
 
-    assert (
-        classifier.classify(device, "target_temperature", string_command) is RiskClass.CONFIRM
-    )
+    assert classifier.classify(device, "target_temperature", string_command) is RiskClass.CONFIRM
     assert classifier.classify(device, "target_temperature", bool_command) is RiskClass.CONFIRM
 
 

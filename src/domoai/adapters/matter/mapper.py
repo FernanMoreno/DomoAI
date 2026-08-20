@@ -40,9 +40,7 @@ class MatterMapper:
             unsupported_sources=unsupported_sources,
         )
 
-    def map_states(
-        self, node: dict[str, Any]
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    def map_states(self, node: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
         node_id = self._node_id(node)
         available = bool(node.get("available", False))
         attributes = self._attributes(node)
@@ -83,9 +81,7 @@ class MatterMapper:
     def path(endpoint_id: int, cluster_id: int, attribute_id: int) -> str:
         return f"{endpoint_id}/{cluster_id}/{attribute_id}"
 
-    def _map_node(
-        self, node: dict[str, Any]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _map_node(self, node: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         node_id = self._node_id(node)
         available = bool(node.get("available", False))
         attributes = self._attributes(node)
@@ -97,9 +93,12 @@ class MatterMapper:
                 attributes.get(self.path(endpoint_id, DESCRIPTOR_CLUSTER, 0))
             )
             semantic_type, domain, writable_profile = self._profile(device_types)
-            if device_types.intersection(
-                {ON_OFF_LIGHT, DIMMABLE_LIGHT, ON_OFF_PLUG, DIMMABLE_PLUG}
-            ) and self.path(endpoint_id, ON_OFF_CLUSTER, 0) not in attributes:
+            if (
+                device_types.intersection(
+                    {ON_OFF_LIGHT, DIMMABLE_LIGHT, ON_OFF_PLUG, DIMMABLE_PLUG}
+                )
+                and self.path(endpoint_id, ON_OFF_CLUSTER, 0) not in attributes
+            ):
                 semantic_type = DeviceType.UNSUPPORTED
                 domain, writable_profile = "unsupported", False
             if semantic_type is DeviceType.UNSUPPORTED and self._has_sensor_capability(

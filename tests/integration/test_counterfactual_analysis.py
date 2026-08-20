@@ -96,9 +96,15 @@ async def test_counterfactual_compares_feasible_variation_against_baseline() -> 
 
     result = analyzer.compare(baseline, {"with_export_tariff": variation})
 
-    assert result.baseline.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.baseline.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     outcome = result.variations["with_export_tariff"]
-    assert outcome.result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert outcome.result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert outcome.diff["energy_cost"] == pytest.approx(expected_diff)
 
 
@@ -234,7 +240,10 @@ async def test_counterfactual_zero_variations_returns_baseline_only() -> None:
     result = analyzer.compare(baseline, {})
 
     assert result.variations == {}
-    assert result.baseline.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.baseline.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
 
 
 @pytest.mark.asyncio

@@ -141,14 +141,16 @@ class HomeAssistantProvider:
         self.client = client
         self.mapper = HomeAssistantMapper()
         self.metric_mappings = {
-            str(entity_id): {
-                str(capability): str(metric) for capability, metric in mapping.items()
-            }
+            str(entity_id): {str(capability): str(metric) for capability, metric in mapping.items()}
             for entity_id, mapping in (metric_mappings or {}).items()
         }
         self._entities: dict[str, dict[str, Any]] = {}
         self._entity_device: dict[str, str] = {}
         self._entity_commands: dict[str, set[str]] = {}
+        # Best-effort, process-local duplicate suppression only -- reset on
+        # restart, not shared across processes. The authoritative barrier
+        # against re-executing a command is the persistent execution claim
+        # in PlanRepository.claim_for_execution (Spec 057).
         self._executed_idempotency_keys: set[str] = set()
         self._connected = False
 
@@ -208,9 +210,7 @@ class HomeAssistantProvider:
 
         return await self._load_snapshot()
 
-    async def get_measurements(
-        self, device_ids: Sequence[str] | None = None
-    ) -> list[Measurement]:
+    async def get_measurements(self, device_ids: Sequence[str] | None = None) -> list[Measurement]:
         snapshot = await self._load_snapshot()
         allowed = set(device_ids or ())
         return self._measurements_for_snapshot(snapshot.source_states, allowed or None)

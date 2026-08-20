@@ -64,9 +64,7 @@ class InMemoryModbusTransport:
         self._values = {
             (sample.unit_id, sample.area, sample.address): sample for sample in self.samples
         }
-        self.write_state_map: dict[
-            tuple[int, ModbusArea, int], tuple[int, ModbusArea, int]
-        ] = {}
+        self.write_state_map: dict[tuple[int, ModbusArea, int], tuple[int, ModbusArea, int]] = {}
         self._waiter = asyncio.Event()
 
     async def connect(self) -> None:
@@ -219,8 +217,7 @@ class PyModbusTcpTransport:
                     )
                 elif area == "holding_register":
                     if any(
-                        isinstance(value, bool) or not isinstance(value, int)
-                        for value in values
+                        isinstance(value, bool) or not isinstance(value, int) for value in values
                     ):
                         raise ValueError("Modbus register write requires integer registers")
                     if len(values) == 1:

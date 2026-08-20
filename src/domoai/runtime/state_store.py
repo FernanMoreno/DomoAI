@@ -53,6 +53,11 @@ class StateStore:
             self._state_versions[key] = self._version_counter
         self._snapshots[key] = snapshot
 
+    async def delete(self, device_id: str) -> None:
+        for key in [key for key in self._snapshots if key[0] == device_id]:
+            del self._snapshots[key]
+            self._state_versions.pop(key, None)
+
     async def get(self, device_id: str, capability: str) -> StateSnapshot | None:
         return self._snapshots.get((device_id, capability))
 

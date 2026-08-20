@@ -11,12 +11,16 @@ from typing import Any
 from domoai.adapters.zigbee2mqtt.mapper import canonical_id, map_definition, map_states
 from domoai.adapters.zigbee2mqtt.transport import MqttMessage, MqttTransport
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
+    AvailabilityChangedEvent,
     Command,
+    DeviceMembershipChangedEvent,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -41,6 +45,10 @@ class Zigbee2MqttAdapter:
         self._availability: dict[str, bool] = {}
         self._bridge_online = True
         self._unsupported: list[dict[str, Any]] = []
+        # Best-effort, process-local duplicate suppression only -- reset on
+        # restart, not shared across processes. The authoritative barrier
+        # against re-executing a command is the persistent execution claim
+        # in PlanRepository.claim_for_execution (Spec 057).
         self._executed_idempotency_keys: set[str] = set()
 
     async def connect(self) -> None:
@@ -102,9 +110,7 @@ class Zigbee2MqttAdapter:
             return AdapterExecutionAck(accepted=False, message="Unknown Zigbee2MQTT device")
         return await self.execute_source(command, friendly_name)
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         self._require_connected()
         friendly_name = source_entity_id
         if friendly_name not in self._definitions:
@@ -197,8 +203,7 @@ class Zigbee2MqttAdapter:
                 self._unsupported.append(
                     {"friendly_name": friendly_name, "reason": "unsupported definition"}
                 )
-        return SourceEvent(
-            kind="device_membership_changed",
+        return DeviceMembershipChangedEvent(
             payload={"count": len(self._definitions)},
         )
 
@@ -207,8 +212,7 @@ class Zigbee2MqttAdapter:
         if not isinstance(payload, dict) or payload.get("state") not in {"online", "offline"}:
             return self._diagnostic(message.topic, "bridge state must be online or offline")
         self._bridge_online = payload["state"] == "online"
-        return SourceEvent(
-            kind="availability_changed",
+        return AvailabilityChangedEvent(
             payload={"bridge": True, "available": self._bridge_online},
         )
 
@@ -216,7 +220,7 @@ class Zigbee2MqttAdapter:
         payload = self._json(message)
         if not isinstance(payload, dict):
             return self._diagnostic(message.topic, "bridge event must be an object")
-        return SourceEvent(kind="device_membership_changed", payload={"event": payload})
+        return DeviceMembershipChangedEvent(payload={"event": payload})
 
     def _ingest_availability(self, friendly_name: str, message: MqttMessage) -> SourceEvent:
         payload = self._json(message)
@@ -224,8 +228,7 @@ class Zigbee2MqttAdapter:
             return self._diagnostic(message.topic, "availability state must be online or offline")
         available = payload["state"] == "online"
         self._availability[friendly_name] = available
-        return SourceEvent(
-            kind="availability_changed",
+        return AvailabilityChangedEvent(
             payload={"friendly_name": friendly_name, "available": available},
         )
 
@@ -241,8 +244,7 @@ class Zigbee2MqttAdapter:
             self._states[(friendly_name, state["capability"])] = state
         if diagnostics:
             return self._diagnostic(message.topic, "; ".join(diagnostics))
-        return SourceEvent(
-            kind="state_changed",
+        return StateChangedEvent(
             payload={
                 "friendly_name": friendly_name,
                 "capabilities": [state["capability"] for state in states],
@@ -255,8 +257,8 @@ class Zigbee2MqttAdapter:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
-    def _diagnostic(self, topic: str, reason: str) -> SourceEvent:
-        return SourceEvent(kind="adapter_diagnostic", payload={"topic": topic, "reason": reason})
+    def _diagnostic(self, topic: str, reason: str) -> AdapterDiagnosticEvent:
+        return AdapterDiagnosticEvent(payload={"topic": topic, "reason": reason})
 
     def _relative_topic(self, topic: str) -> str:
         prefix = f"{self.base_topic}/"

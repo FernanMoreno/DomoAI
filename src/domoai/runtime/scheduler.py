@@ -35,6 +35,7 @@ class Scheduler:
         self.poll_interval = poll_interval
         self.recurring_repository = recurring_repository
         self.clock = clock or SystemClock()
+        self.alive = False
 
     async def schedule(self, plan: Plan) -> None:
         await self.repository.schedule(plan)
@@ -119,6 +120,7 @@ class Scheduler:
             plan = Plan(
                 id=f"{schedule_id}@{execute_at.isoformat()}",
                 commands=commands,
+                created_at=self.clock.now(),
             )
             try:
                 validated = self.executor.plan_service.validate(plan)
@@ -156,23 +158,27 @@ class Scheduler:
         return results
 
     async def run(self) -> None:
-        while True:
-            await asyncio.sleep(self.poll_interval.total_seconds())
-            try:
-                await self.run_due()
-            except Exception as error:
-                self.audit.append(
-                    event_type="schedule_sweep_error",
-                    actor="runtime",
-                    subject_id="scheduler",
-                    payload={"error": str(error)[:200]},
-                )
-            try:
-                await self.run_due_recurring()
-            except Exception as error:
-                self.audit.append(
-                    event_type="recurring_sweep_error",
-                    actor="runtime",
-                    subject_id="scheduler",
-                    payload={"error": str(error)[:200]},
-                )
+        self.alive = True
+        try:
+            while True:
+                await asyncio.sleep(self.poll_interval.total_seconds())
+                try:
+                    await self.run_due()
+                except Exception as error:
+                    self.audit.append(
+                        event_type="schedule_sweep_error",
+                        actor="runtime",
+                        subject_id="scheduler",
+                        payload={"error": str(error)[:200]},
+                    )
+                try:
+                    await self.run_due_recurring()
+                except Exception as error:
+                    self.audit.append(
+                        event_type="recurring_sweep_error",
+                        actor="runtime",
+                        subject_id="scheduler",
+                        payload={"error": str(error)[:200]},
+                    )
+        finally:
+            self.alive = False

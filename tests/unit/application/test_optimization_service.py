@@ -88,3 +88,48 @@ async def test_validate_proposal_falls_back_to_plan_only_when_plans_is_empty() -
     assert len(validated.plans) == 1
     assert validated.plans[0].validation is not None
     assert validated.plan == validated.plans[0]
+
+
+def _result_with_wall_time(wall_time_seconds: float) -> OptimizationResult:
+    from domoai.optimizer.ports import SolverEvidence
+
+    return OptimizationResult(
+        scenario_id="fixture-scenario-latency",
+        status=OptimizationStatus.OPTIMAL,
+        solver="fake",
+        solver_evidence=SolverEvidence(
+            solver_name="cp-sat",
+            solver_version="test",
+            num_search_workers=1,
+            random_seed=0,
+            wall_time_seconds=wall_time_seconds,
+            tiers=[],
+            scenario_fingerprint="fp",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_last_wall_time_seconds_none_before_any_optimize_call() -> None:
+    registry, plan_service = await build_service()
+    service = OptimizationService(
+        registry, plan_service, _FixedOptimizer(_result_with_wall_time(1.0))
+    )
+
+    assert service.last_wall_time_seconds is None
+
+
+@pytest.mark.asyncio
+async def test_last_wall_time_seconds_set_after_one_call_and_updated_after_a_second() -> None:
+    registry, plan_service = await build_service()
+    service = OptimizationService(
+        registry, plan_service, _FixedOptimizer(_result_with_wall_time(1.5))
+    )
+    scenario = object()
+
+    service.optimize(scenario)  # type: ignore[arg-type]
+    assert service.last_wall_time_seconds == 1.5
+
+    service.optimizer = _FixedOptimizer(_result_with_wall_time(2.5))
+    service.optimize(scenario)  # type: ignore[arg-type]
+    assert service.last_wall_time_seconds == 2.5

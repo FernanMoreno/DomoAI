@@ -29,15 +29,13 @@ async def test_reinitializing_an_already_migrated_database_is_not_reapplied(tmp_
     db_path = tmp_path / "repo.sqlite3"
     database = SQLiteDatabase(db_path)
     await database.initialize()
-    first_count = database.connection.execute(
-        "SELECT COUNT(*) FROM schema_migrations"
-    ).fetchone()[0]
+    first_count = database.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[
+        0
+    ]
 
     second = SQLiteDatabase(db_path)
     await second.initialize()
-    second_count = second.connection.execute(
-        "SELECT COUNT(*) FROM schema_migrations"
-    ).fetchone()[0]
+    second_count = second.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
 
     assert second_count == first_count == len(_migration_filenames())
 
@@ -52,9 +50,7 @@ async def test_only_not_yet_applied_migrations_run_on_a_partially_migrated_datab
 
     # Simulate an older deployment that only ever had 001_initial.sql applied:
     # forget every later migration from the ledger without dropping their tables.
-    database.connection.execute(
-        "DELETE FROM schema_migrations WHERE filename != '001_initial.sql'"
-    )
+    database.connection.execute("DELETE FROM schema_migrations WHERE filename != '001_initial.sql'")
     database.connection.commit()
 
     reopened = SQLiteDatabase(db_path)
@@ -76,9 +72,7 @@ async def test_upgrade_preserves_existing_data_and_enables_new_tables(tmp_path) 
     # 001_initial.sql was ever recorded as applied (even though the fixture
     # already created every table, matching a real accidentally-idempotent
     # legacy database per the spec's own Assumptions).
-    database.connection.execute(
-        "DELETE FROM schema_migrations WHERE filename != '001_initial.sql'"
-    )
+    database.connection.execute("DELETE FROM schema_migrations WHERE filename != '001_initial.sql'")
     database.connection.commit()
 
     plan_repository = PlanRepository(database)
@@ -137,15 +131,11 @@ async def test_non_idempotent_migration_survives_a_second_initialization(tmp_pat
     database = SQLiteDatabase(db_path)
     await database.initialize(migrations_dir=migrations_dir)
 
-    columns_first = {
-        row[1] for row in database.connection.execute("PRAGMA table_info(widgets)")
-    }
+    columns_first = {row[1] for row in database.connection.execute("PRAGMA table_info(widgets)")}
     assert "label" in columns_first
 
     reopened = SQLiteDatabase(db_path)
     await reopened.initialize(migrations_dir=migrations_dir)
 
-    columns_second = {
-        row[1] for row in reopened.connection.execute("PRAGMA table_info(widgets)")
-    }
+    columns_second = {row[1] for row in reopened.connection.execute("PRAGMA table_info(widgets)")}
     assert columns_second == columns_first

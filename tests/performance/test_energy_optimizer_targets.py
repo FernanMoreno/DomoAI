@@ -45,5 +45,8 @@ async def test_energy_optimizer_acceptance_target_for_ten_loads() -> None:
 
     result = CpSatOptimizer(registry).optimize(scenario)
 
-    assert result.status in {OptimizationStatus.FEASIBLE, OptimizationStatus.OPTIMAL}
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
     assert result.plan is not None

@@ -57,9 +57,7 @@ class HomeAssistantClient:
     async def call_service(
         self, domain: str, service: str, data: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(
-            timeout=self.timeout, transport=self.transport
-        ) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             response = await client.post(
                 f"{self.base_url}/api/services/{domain}/{service}",
                 headers={"Authorization": f"Bearer {self.token}"},
@@ -74,9 +72,7 @@ class HomeAssistantClient:
     async def fetch_entity_registry(self) -> list[dict[str, Any]]:
         """Fetch enabled entity-registry entries through the HA WebSocket API."""
 
-        async with websockets.connect(
-            self.websocket_url, open_timeout=self.timeout
-        ) as socket:
+        async with websockets.connect(self.websocket_url, open_timeout=self.timeout) as socket:
             await self._authenticate_socket(socket)
             await socket.send(
                 json.dumps(

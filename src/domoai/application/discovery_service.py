@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from domoai.domain.models import (
     AdapterSnapshot,
@@ -15,6 +14,7 @@ from domoai.domain.models import (
     StateStatus,
 )
 from domoai.persistence.repositories import DeviceRepository, StateSnapshotRepository
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
@@ -39,6 +39,7 @@ class DiscoveryService:
         *,
         device_repository: DeviceRepository | None = None,
         state_snapshot_repository: StateSnapshotRepository | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.adapter = adapter
         self.registry = registry
@@ -46,6 +47,7 @@ class DiscoveryService:
         self.audit = audit
         self.device_repository = device_repository
         self.state_snapshot_repository = state_snapshot_repository
+        self.clock = clock or SystemClock()
 
     async def refresh(self) -> DiscoveryResult:
         snapshot = await self.adapter.discover()
@@ -94,6 +96,8 @@ class DiscoveryService:
             persisted_ids = {device.id for device in await self.device_repository.list_all()}
             for device_id in persisted_ids - current_ids:
                 await self.device_repository.delete(device_id)
+                await self.state_snapshot_repository.delete(device_id)
+                await self.state_store.delete(device_id)
             for device in self.registry.devices:
                 await self.device_repository.save(device)
             for state in await self.state_store.all():
@@ -112,7 +116,7 @@ class DiscoveryService:
         )
 
     async def _record_states(self, snapshot: AdapterSnapshot) -> list[StateSnapshot]:
-        received_at = datetime.now(UTC)
+        received_at = self.clock.now()
         states: list[StateSnapshot] = []
         seen_this_cycle: dict[tuple[str, str], StateSnapshot] = {}
         for raw_state in snapshot.source_states:

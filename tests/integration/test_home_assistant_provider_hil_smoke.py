@@ -28,7 +28,6 @@ async def test_home_assistant_provider_hil_command_round_trip(tmp_path: Path) ->
             database_path=tmp_path / "home-assistant-provider-hil.sqlite3",
             home_assistant_url=base_url,
             home_assistant_token=SecretStr(token),
-            home_assistant_provider=True,
         )
     )
     try:

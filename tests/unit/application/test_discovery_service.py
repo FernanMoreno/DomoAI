@@ -126,3 +126,24 @@ async def test_single_source_capability_records_no_conflict() -> None:
     assert cached is not None
     assert cached.status is StateStatus.CURRENT
     assert cached.value is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_stamps_state_snapshots_from_the_injected_clock() -> None:
+    from datetime import UTC, datetime
+
+    from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+    from domoai.runtime.clock import FixedClock
+
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    fixed = FixedClock(datetime(2026, 1, 1, tzinfo=UTC))
+    discovery = DiscoveryService(adapter, registry, state_store, audit, clock=fixed)
+
+    await discovery.refresh()
+
+    snapshots = await state_store.all()
+    assert snapshots
+    assert all(snapshot.received_at == fixed.now() for snapshot in snapshots)

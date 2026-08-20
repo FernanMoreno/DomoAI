@@ -64,9 +64,7 @@ async def test_zigbee2mqtt_discovery_returns_canonical_devices_and_capabilities(
 
     snapshot = await adapter.discover()
 
-    light = next(
-        entity for entity in snapshot.source_entities if entity["domain"] == "light"
-    )
+    light = next(entity for entity in snapshot.source_entities if entity["domain"] == "light")
     assert light["device_id"].startswith("0x00158d")
     assert light["manufacturer"] == "Fixture Lamps"
     assert {item["name"] for item in light["capabilities"]} == {"power", "brightness"}
@@ -199,7 +197,5 @@ async def test_state_and_malformed_payloads_become_events_or_diagnostics() -> No
     assert any(event.kind == "adapter_diagnostic" for event in events)
 
     snapshot = await adapter.discover()
-    light = next(
-        entity for entity in snapshot.source_entities if entity["domain"] == "light"
-    )
+    light = next(entity for entity in snapshot.source_entities if entity["domain"] == "light")
     assert light["available"] is False

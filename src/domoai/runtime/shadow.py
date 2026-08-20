@@ -69,10 +69,9 @@ class ShadowComparator:
                 classification = "only_production"
             elif in_candidate and not in_production:
                 classification = "only_candidate"
-            elif (
-                production_entities[entity_id].get("semantic_type")
-                != candidate_entities[entity_id].get("semantic_type")
-            ):
+            elif production_entities[entity_id].get("semantic_type") != candidate_entities[
+                entity_id
+            ].get("semantic_type"):
                 classification = "disagrees"
             else:
                 classification = "matches"

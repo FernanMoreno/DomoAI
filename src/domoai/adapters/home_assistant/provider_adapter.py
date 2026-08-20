@@ -15,6 +15,7 @@ from domoai.domain.models import (
     ExecutionStatus,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -65,9 +66,7 @@ class HomeAssistantProviderAdapter:
                 observed_at=now,
                 received_at=now,
                 status=(
-                    StateStatus.CURRENT
-                    if state.get("available", True)
-                    else StateStatus.UNAVAILABLE
+                    StateStatus.CURRENT if state.get("available", True) else StateStatus.UNAVAILABLE
                 ),
                 source_ref=SourceRef(
                     adapter_id=self.adapter_id,
@@ -89,9 +88,7 @@ class HomeAssistantProviderAdapter:
             return AdapterExecutionAck(accepted=False, message=message)
         return await self.execute_source(command, candidates[0])
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         if source_entity_id not in self._canonical_by_source:
             return AdapterExecutionAck(
                 accepted=False,
@@ -131,7 +128,7 @@ class HomeAssistantProviderAdapter:
 
     async def _event_stream(self) -> AsyncIterator[SourceEvent]:
         async for event in self.provider.client.subscribe_state_events():
-            yield SourceEvent(kind="state_changed", payload=event)
+            yield StateChangedEvent(payload=event)
 
     async def health(self) -> AdapterHealth:
         connected = self._connected and await self.provider.client.health()
@@ -164,9 +161,9 @@ class HomeAssistantProviderAdapter:
             self._canonical_by_source[entity_id] = canonical_id
             for capability in entity.get("capabilities", []):
                 for command in capability.get("commands", []):
-                    self._source_by_command.setdefault(
-                        (canonical_id, str(command)), []
-                    ).append(entity_id)
+                    self._source_by_command.setdefault((canonical_id, str(command)), []).append(
+                        entity_id
+                    )
 
 
 def _slug(value: str) -> str:

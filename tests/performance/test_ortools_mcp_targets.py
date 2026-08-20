@@ -42,9 +42,7 @@ async def test_fifty_load_scenario_finishes_within_local_target() -> None:
 
     started = perf_counter()
     result = structured(
-        await server.call_tool(
-            "optimize_scenario", {"scenario": scenario.model_dump(mode="json")}
-        )
+        await server.call_tool("optimize_scenario", {"scenario": scenario.model_dump(mode="json")})
     )
     elapsed = perf_counter() - started
 

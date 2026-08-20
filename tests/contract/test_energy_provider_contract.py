@@ -42,13 +42,9 @@ def test_provider_contract_models_round_trip_as_v1() -> None:
 
     assert TariffSeries.model_validate(tariff.model_dump(mode="python")).schema_version == "v1"
     assert (
-        SolarForecastSeries.model_validate(solar.model_dump(mode="python")).points
-        == solar.points
+        SolarForecastSeries.model_validate(solar.model_dump(mode="python")).points == solar.points
     )
-    assert (
-        BatteryState.model_validate(battery.model_dump(mode="python")).battery
-        == battery.battery
-    )
+    assert BatteryState.model_validate(battery.model_dump(mode="python")).battery == battery.battery
 
 
 def test_provider_diagnostic_is_safe_and_strict() -> None:

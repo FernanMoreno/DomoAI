@@ -47,9 +47,7 @@ async def test_real_agent_can_connect_discover_and_validate_over_the_wire(
             )
 
             try:
-                discovery_result = await session.call_tool(
-                    "discover_devices", {"refresh": False}
-                )
+                discovery_result = await session.call_tool("discover_devices", {"refresh": False})
             except Exception as exc:  # pragma: no cover - failure-path message only
                 raise AssertionError(f"tool-call stage failure (discover_devices): {exc}") from exc
             assert discovery_result.isError is not True, (

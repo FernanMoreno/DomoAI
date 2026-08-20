@@ -178,9 +178,7 @@ async def test_mcp_accepts_omie_and_open_meteo_inside_existing_composer() -> Non
         )
     )
 
-    assert result["context"]["source_revision"].startswith(
-        "tariff:omie_spain@"
-    )
+    assert result["context"]["source_revision"].startswith("tariff:omie_spain@")
     assert result["context"]["solar_forecast"][0]["power"] == pytest.approx(3.444)
 
 

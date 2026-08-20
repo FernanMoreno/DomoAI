@@ -103,9 +103,7 @@ class EnergyContext(StrictModel):
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
         expected = list(range(self.horizon.slots))
-        SeriesEntry = tuple[
-            str, list[TariffPoint] | list[SolarForecastPoint] | list[BaseLoadPoint]
-        ]
+        SeriesEntry = tuple[str, list[TariffPoint] | list[SolarForecastPoint] | list[BaseLoadPoint]]
         series: list[SeriesEntry] = [
             ("tariffs", self.tariffs),
             ("solar_forecast", self.solar_forecast),
@@ -117,9 +115,7 @@ class EnergyContext(StrictModel):
         for name, points in series:
             slots = [point.slot for point in points]
             if len(points) != self.horizon.slots:
-                raise ValueError(
-                    f"{name} must contain exactly one point for every horizon slot"
-                )
+                raise ValueError(f"{name} must contain exactly one point for every horizon slot")
             if len(set(slots)) != len(slots):
                 raise ValueError(f"{name} must not contain duplicate slots")
             if slots != expected:

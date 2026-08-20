@@ -49,9 +49,7 @@ class InMemoryKnxTransport:
         self.writes: list[KnxWrite] = []
         self.connected = False
         self.healthy = True
-        self._values = {
-            (value.group_address, value.dpt): value for value in self.incoming
-        }
+        self._values = {(value.group_address, value.dpt): value for value in self.incoming}
         self.write_state_map: dict[tuple[str, str], tuple[str, str]] = {}
         self._waiter = asyncio.Event()
 

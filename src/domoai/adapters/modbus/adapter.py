@@ -22,12 +22,15 @@ from domoai.adapters.modbus.config import (
 from domoai.adapters.modbus.mapper import ModbusMapper
 from domoai.adapters.modbus.transport import ModbusTransport, RawValue
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
+    AvailabilityChangedEvent,
     Command,
     SourceEvent,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -54,6 +57,10 @@ class ModbusAdapter:
         self._connected = False
         self._available = False
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
+        # Best-effort, process-local duplicate suppression only -- reset on
+        # restart, not shared across processes. The authoritative barrier
+        # against re-executing a command is the persistent execution claim
+        # in PlanRepository.claim_for_execution (Spec 057).
         self._executed_idempotency_keys: set[str] = set()
         self._canonical_by_source = {
             entity.entity_id: canonical_device_id(entity) for entity in self.mapping.entities
@@ -129,9 +136,7 @@ class ModbusAdapter:
             return AdapterExecutionAck(accepted=False, message="Unknown Modbus device")
         return await self.execute_source(command, entity.entity_id)
 
-    async def execute_source(
-        self, command: Command, source_entity_id: str
-    ) -> AdapterExecutionAck:
+    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
         self._require_connected()
         entity = next(
             (item for item in self.mapping.entities if item.entity_id == source_entity_id),
@@ -189,8 +194,7 @@ class ModbusAdapter:
         if transport_available != self._available:
             self._available = transport_available
             events.append(
-                SourceEvent(
-                    kind="availability_changed",
+                AvailabilityChangedEvent(
                     payload={"available": self._available},
                 )
             )
@@ -240,8 +244,7 @@ class ModbusAdapter:
                         state["available"] = False
         if changed_entities:
             events.append(
-                SourceEvent(
-                    kind="state_changed",
+                StateChangedEvent(
                     payload={
                         "entity_ids": sorted(changed_entities),
                         "capabilities": sorted(changed_capabilities),
@@ -295,9 +298,8 @@ class ModbusAdapter:
         return None
 
     @staticmethod
-    def _diagnostic(entity_id: str, reason: str) -> SourceEvent:
-        return SourceEvent(
-            kind="adapter_diagnostic",
+    def _diagnostic(entity_id: str, reason: str) -> AdapterDiagnosticEvent:
+        return AdapterDiagnosticEvent(
             payload={"entity_id": entity_id, "reason": reason[:200]},
         )
 

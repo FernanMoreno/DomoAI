@@ -53,14 +53,10 @@ def test_mapper_projects_light_sensor_and_unsupported_endpoints() -> None:
     )
 
     light = next(
-        entity
-        for entity in snapshot.source_entities
-        if entity["entity_id"] == "node:1/endpoint:1"
+        entity for entity in snapshot.source_entities if entity["entity_id"] == "node:1/endpoint:1"
     )
     sensor = next(
-        entity
-        for entity in snapshot.source_entities
-        if entity["entity_id"] == "node:2/endpoint:1"
+        entity for entity in snapshot.source_entities if entity["entity_id"] == "node:2/endpoint:1"
     )
     unsupported = next(
         source
@@ -84,9 +80,7 @@ def test_mapper_accepts_matter_js_numeric_descriptor_fields() -> None:
 
     snapshot = MatterMapper().to_snapshot([node])
     light = next(
-        entity
-        for entity in snapshot.source_entities
-        if entity["entity_id"] == "node:5/endpoint:1"
+        entity for entity in snapshot.source_entities if entity["entity_id"] == "node:5/endpoint:1"
     )
     power = next(
         capability for capability in light["capabilities"] if capability["name"] == "power"

@@ -75,9 +75,10 @@ def test_live_rediscovery_after_load_persisted_makes_device_executable() -> None
             )
         ]
     )
-    assert registry.resolve_command_route(
-        "living_room.main_light", "turn_on"
-    ).reason == "route_not_found"
+    assert (
+        registry.resolve_command_route("living_room.main_light", "turn_on").reason
+        == "route_not_found"
+    )
 
     registry.apply_snapshot(source_snapshot(adapter_id="home_assistant"), "home_assistant")
 

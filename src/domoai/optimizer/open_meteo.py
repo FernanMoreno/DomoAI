@@ -192,9 +192,7 @@ def parse_open_meteo_solar_forecast(
     if not isinstance(minutely, Mapping):
         raise ValueError("Open-Meteo response has no minutely_15 data")
     timestamps = _as_sequence(minutely.get("time"), "timestamps")
-    irradiance = _as_sequence(
-        minutely.get("global_tilted_irradiance"), "global tilted irradiance"
-    )
+    irradiance = _as_sequence(minutely.get("global_tilted_irradiance"), "global tilted irradiance")
     if len(timestamps) != len(irradiance):
         raise ValueError("Open-Meteo timestamp and irradiance arrays differ in length")
 
@@ -217,12 +215,7 @@ def parse_open_meteo_solar_forecast(
         irradiance_wm2 = float(raw_irradiance)
         if not math.isfinite(irradiance_wm2) or irradiance_wm2 < 0:
             raise ValueError("Open-Meteo irradiance must be finite and non-negative")
-        power_kw = (
-            config.installed_kwp
-            * irradiance_wm2
-            / 1000
-            * config.performance_ratio
-        )
+        power_kw = config.installed_kwp * irradiance_wm2 / 1000 * config.performance_ratio
         if config.inverter_ac_max_kw is not None:
             power_kw = min(power_kw, config.inverter_ac_max_kw)
         if not math.isfinite(power_kw) or power_kw < 0:
@@ -247,9 +240,7 @@ class OpenMeteoSolarProvider:
         except EnergyProviderError:
             raise
         except ValueError as error:
-            raise _provider_error(
-                "provider_invalid", "Open-Meteo response is invalid"
-            ) from error
+            raise _provider_error("provider_invalid", "Open-Meteo response is invalid") from error
         except Exception as error:
             raise _provider_error(
                 "provider_unavailable",
@@ -264,9 +255,7 @@ class OpenMeteoSolarProvider:
         if not isinstance(downloaded.source_revision, str) or not re.fullmatch(
             _SAFE_REVISION, downloaded.source_revision
         ):
-            raise _provider_error(
-                "provider_invalid", "Open-Meteo source revision is invalid"
-            )
+            raise _provider_error("provider_invalid", "Open-Meteo source revision is invalid")
         if downloaded.observed_at.tzinfo is None:
             raise _provider_error(
                 "provider_invalid", "Open-Meteo observation is not timezone-aware"

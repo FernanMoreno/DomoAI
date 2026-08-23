@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "BundleMemberCommitStatus": {
+      "enum": [
+        "pending",
+        "executed",
+        "scheduled",
+        "failed",
+        "unknown"
+      ],
+      "title": "BundleMemberCommitStatus",
+      "type": "string"
+    },
+    "ExecutionStatus": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unavailable",
+        "failed",
+        "cancelled",
+        "confirmed_success",
+        "unknown"
+      ],
+      "title": "ExecutionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "plan_id": {
+      "minLength": 1,
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "validation_digest": {
+      "minLength": 1,
+      "title": "Validation Digest",
+      "type": "string"
+    },
+    "execute_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Execute At"
+    },
+    "status": {
+      "$ref": "#/$defs/BundleMemberCommitStatus",
+      "default": "pending"
+    },
+    "execution_status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "scheduled": {
+      "default": false,
+      "title": "Scheduled",
+      "type": "boolean"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "details": {
+      "additionalProperties": true,
+      "title": "Details",
+      "type": "object"
+    }
+  },
+  "required": [
+    "plan_id",
+    "validation_digest"
+  ],
+  "title": "BundleMemberCommit",
+  "type": "object"
+}

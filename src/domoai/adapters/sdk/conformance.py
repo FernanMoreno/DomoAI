@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import Field
 
 from domoai.domain.models import Command, Device, RiskClass, SourceRef, StrictModel
+from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.registry import DeviceRegistry
 
 from .manifest import (
@@ -262,7 +263,13 @@ async def _check_safe_execution(adapter: Any, snapshot: Any) -> None:
         risk_class=RiskClass.SAFE,
         idempotency_key="sdk-conformance-idempotency",
     )
-    first = await adapter.execute(command)
+    execution_context = ExecutionContext(
+        agent_request_id="sdk-conformance-agent",
+        plan_id="sdk-conformance-plan",
+        execution_attempt_id="sdk-conformance-attempt",
+        adapter_request_id="sdk-conformance-adapter-request",
+    )
+    first = await adapter.execute(command, execution_context)
     if not first.accepted:
         raise ValueError("declared safe command was rejected")
     source_ref = first.source_ref or route.source_ref
@@ -274,7 +281,8 @@ async def _check_safe_execution(adapter: Any, snapshot: Any) -> None:
                 **command.model_dump(),
                 "id": "sdk-conformance-duplicate",
             }
-        )
+        ),
+        execution_context,
     )
     if duplicate.accepted:
         raise ValueError("duplicate idempotency key was accepted")

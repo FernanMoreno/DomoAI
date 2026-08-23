@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from domoai.domain.models import Command
 from domoai.runtime.composite_adapter import CompositeAdapter
+from domoai.runtime.execution_context import ExecutionContext
+from domoai.runtime.registry import DeviceRegistry
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
 
 
@@ -55,3 +58,31 @@ async def test_two_down_adapters_are_both_individually_identifiable() -> None:
     assert health.components is not None
     down_ids = {component.adapter_id for component in health.components if not component.connected}
     assert down_ids == {"home_assistant", "modbus"}
+
+
+@pytest.mark.asyncio
+async def test_composite_forwards_the_same_execution_context_to_child() -> None:
+    child = _adapter("fixture")
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([child], registry=registry)
+    await composite.connect()
+    snapshot = await composite.discover()
+    registry.apply_snapshot(snapshot, "fixture")
+
+    context = ExecutionContext(
+        agent_request_id="agent-composite-1",
+        plan_id="plan-composite-1",
+        execution_attempt_id="attempt-composite-1",
+        adapter_request_id="adapter-composite-1",
+    )
+    await composite.execute(
+        Command(
+            id="composite-command-1",
+            device_id="living_room.main_light",
+            command="turn_on",
+            idempotency_key="composite-intent-1",
+        ),
+        context,
+    )
+
+    assert child.execution_contexts == [context]

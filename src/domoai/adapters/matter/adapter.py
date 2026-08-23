@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 from domoai.adapters.matter.mapper import (
@@ -32,6 +31,8 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class MatterServerAdapter:
@@ -44,9 +45,11 @@ class MatterServerAdapter:
         transport: MatterTransport,
         *,
         discovery_timeout: float = 5.0,
+        clock: Clock | None = None,
     ) -> None:
         self.transport = transport
         self.discovery_timeout = discovery_timeout
+        self._clock = clock or SystemClock()
         self.mapper = MatterMapper()
         self._connected = False
         self._nodes: dict[int, dict[str, Any]] = {}
@@ -91,7 +94,7 @@ class MatterServerAdapter:
         for (source_entity_id, capability), state in self._states.items():
             if source_entity_id not in wanted:
                 continue
-            received_at = state.get("received_at", datetime.now(UTC))
+            received_at = state.get("received_at", self._clock.now())
             snapshots.append(
                 StateSnapshot(
                     device_id=self._canonical_by_source.get(source_entity_id, source_entity_id),
@@ -113,7 +116,9 @@ class MatterServerAdapter:
             )
         return snapshots
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         self._require_connected()
         source_entity_id = next(
             (
@@ -125,9 +130,14 @@ class MatterServerAdapter:
         )
         if source_entity_id is None:
             return AdapterExecutionAck(accepted=False, message="Unknown Matter endpoint")
-        return await self.execute_source(command, source_entity_id)
+        return await self.execute_source(command, source_entity_id, execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         self._require_connected()
         if command.idempotency_key in self._executed_idempotency_keys:
             return AdapterExecutionAck(accepted=False, message="Duplicate idempotency key")
@@ -141,7 +151,9 @@ class MatterServerAdapter:
                 message=f"Unsupported Matter command: {command.command}",
             )
         try:
-            await self.transport.request("device_command", translated)
+            await self.transport.request(
+                "device_command", translated, execution_context=execution_context
+            )
         except (ConnectionError, OSError, TimeoutError) as error:
             raise ConnectionError(f"Matter Server command failed: {error}") from error
         self._executed_idempotency_keys.add(command.idempotency_key)
@@ -233,7 +245,7 @@ class MatterServerAdapter:
         )
         self._unsupported.extend(snapshot.unsupported_sources)
         states, _diagnostics = self.mapper.map_states(node)
-        received_at = datetime.now(UTC)
+        received_at = self._clock.now()
         for state in states:
             state["received_at"] = received_at
             self._states[(str(state["entity_id"]), str(state["capability"]))] = state

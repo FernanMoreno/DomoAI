@@ -18,6 +18,7 @@ class Settings(StrictModel):
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
     operator_approval_token: SecretStr | None = None
+    allow_legacy_operator_token: bool = False
     home_assistant_mapping_path: Path | None = None
     zigbee2mqtt_url: str | None = None
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
@@ -160,6 +161,7 @@ class Settings(StrictModel):
             operator_approval_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN")) else None
             ),
+            allow_legacy_operator_token=boolean("DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN"),
             home_assistant_mapping_path=(
                 Path(mapping_path)
                 if (mapping_path := os.getenv("DOMOAI_HOME_ASSISTANT_MAPPING_PATH"))

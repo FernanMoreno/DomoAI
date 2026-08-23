@@ -23,7 +23,8 @@ class PlanRecoveryService:
         orphaned = await self.plan_repository.list_by_status(frozenset({PlanStatus.EXECUTING}))
         recovered_ids: list[str] = []
         for plan in orphaned:
-            await self.plan_repository.save(plan.model_copy(update={"status": PlanStatus.UNKNOWN}))
+            if not await self.plan_repository.mark_unknown_if_executing(plan.id):
+                continue
             self.audit.append(
                 event_type="plan_execution_recovered",
                 actor="runtime",

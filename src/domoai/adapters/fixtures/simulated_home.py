@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any
 
 from domoai.adapters.home_assistant.mapper import HomeAssistantMapper
@@ -21,6 +20,8 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 def default_entities() -> list[dict[str, Any]]:
@@ -108,8 +109,11 @@ def default_entities() -> list[dict[str, Any]]:
 class SimulatedHomeAdapter:
     adapter_id = "fixture"
 
-    def __init__(self, entities: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, entities: list[dict[str, Any]] | None = None, *, clock: Clock | None = None
+    ) -> None:
         self._entities = deepcopy(entities if entities is not None else default_entities())
+        self._clock = clock or SystemClock()
         self._events: list[SourceEvent] = []
         self._connected = False
         self.calls: list[Command] = []
@@ -129,7 +133,7 @@ class SimulatedHomeAdapter:
         snapshot = HomeAssistantMapper().to_snapshot(
             [entity for entity in self._entities if entity["entity_id"] in wanted]
         )
-        now = datetime.now(UTC)
+        now = self._clock.now()
         return [
             StateSnapshot(
                 device_id=state["entity_id"],
@@ -149,11 +153,18 @@ class SimulatedHomeAdapter:
             for state in snapshot.source_states
         ]
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         entity = self._find_for_device(command.device_id)
-        return await self.execute_source(command, entity["entity_id"])
+        return await self.execute_source(command, entity["entity_id"], execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         if command.idempotency_key in self._executed_idempotency_keys:
             return AdapterExecutionAck(accepted=False, message="Duplicate idempotency key")
         try:

@@ -1,0 +1,206 @@
+{
+  "$defs": {
+    "MeasurementQuality": {
+      "enum": [
+        "good",
+        "stale",
+        "unavailable",
+        "invalid"
+      ],
+      "title": "MeasurementQuality",
+      "type": "string"
+    },
+    "NominalCapacityAttestation": {
+      "additionalProperties": false,
+      "description": "Non-secret provenance explaining why a capacity is claimed nominal.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_type": {
+          "enum": [
+            "vendor_documentation",
+            "installer_attestation"
+          ],
+          "title": "Evidence Type",
+          "type": "string"
+        },
+        "reference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        },
+        "subject_model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Subject Model",
+          "type": "string"
+        },
+        "attested_by": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Attested By",
+          "type": "string"
+        },
+        "attested_at": {
+          "format": "date-time",
+          "title": "Attested At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_type",
+        "reference",
+        "subject_model",
+        "attested_by",
+        "attested_at"
+      ],
+      "title": "NominalCapacityAttestation",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Explicit provider/device-bound capacity used for SOC conversion.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "device_id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Device Id",
+      "type": "string"
+    },
+    "capacity_kwh": {
+      "exclusiveMinimum": 0,
+      "title": "Capacity Kwh",
+      "type": "number"
+    },
+    "capacity_source": {
+      "default": "provider_config",
+      "enum": [
+        "provider_config",
+        "provider_measurement"
+      ],
+      "title": "Capacity Source",
+      "type": "string"
+    },
+    "quality": {
+      "$ref": "#/$defs/MeasurementQuality",
+      "default": "good"
+    },
+    "source_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Observed At"
+    },
+    "received_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Received At"
+    },
+    "nominal_capacity_attestation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NominalCapacityAttestation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "provider_id",
+    "device_id",
+    "capacity_kwh"
+  ],
+  "title": "BatteryCapacityEvidence",
+  "type": "object"
+}

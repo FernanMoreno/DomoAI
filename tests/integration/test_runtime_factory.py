@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,8 +14,16 @@ from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.application.runtime_factory import build_runtime, create_adapter
 from domoai.config.settings import Settings
-from domoai.domain.models import Command, Plan, PlanStatus, StateStatus
-from domoai.optimizer.providers import ComposedEnergyContextProvider
+from domoai.domain.models import Command, Plan, PlanStatus, SourceRef, StateStatus
+from domoai.domain.provider import MeasurementQuality
+from domoai.optimizer.energy import (
+    BatteryActuator,
+    BatteryCapacityEvidence,
+    BatteryProfile,
+    BatterySocObservation,
+    DispatchableBatteryBinding,
+)
+from domoai.optimizer.providers import ComposedEnergyContextProvider, StateStoreBatteryProvider
 from domoai.persistence.repositories import (
     AuditEventRepository,
     DeviceRepository,
@@ -30,6 +39,51 @@ from tests.fixtures.modbus import mapping_payload as modbus_mapping_payload
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
 
 
+def _runtime_dispatchable_battery_binding() -> DispatchableBatteryBinding:
+    observed_at = datetime(2026, 8, 22, 12, tzinfo=UTC)
+    return DispatchableBatteryBinding(
+        provider_id="home_assistant",
+        device_id="battery.home",
+        profile=BatteryProfile(
+            capacity_kwh=8.0,
+            initial_soc_kwh=4.0,
+            min_soc_kwh=0.0,
+            max_soc_kwh=8.0,
+            max_charge_kw=2.0,
+            max_discharge_kw=2.0,
+            charge_efficiency=1.0,
+            discharge_efficiency=1.0,
+            actuator=BatteryActuator(
+                device_id="battery.home",
+                capability="battery_power",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery.power",
+                power_feedback_tolerance_kw=0.1,
+                soc_reconciliation_capability="battery.soc",
+            ),
+            initial_soc_observation=BatterySocObservation(
+                provider_id="home_assistant",
+                device_id="battery.home",
+                value_kwh=4.0,
+                observed_at=observed_at,
+                received_at=observed_at,
+                quality=MeasurementQuality.GOOD,
+                source_ref=SourceRef(
+                    adapter_id="home_assistant",
+                    external_id="sensor.battery_soc",
+                ),
+            ),
+        ),
+        capacity_evidence=BatteryCapacityEvidence(
+            provider_id="home_assistant",
+            device_id="battery.home",
+            capacity_kwh=8.0,
+        ),
+    )
+
+
 def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> None:
     assert isinstance(create_adapter(Settings()), SimulatedHomeAdapter)
     assert isinstance(
@@ -41,6 +95,68 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         ),
         HomeAssistantProviderAdapter,
     )
+
+    dispatch_mapping_path = tmp_path / "home-assistant-battery.json"
+    dispatch_mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v1",
+                "battery_capacity_bindings": {
+                    "sensor.battery_capacity": {
+                        "device_id": "ha-battery-1",
+                        "semantics": "nominal_capacity",
+                        "nominal_capacity_attestation": {
+                            "evidence_type": "vendor_documentation",
+                            "reference": "https://vendor.example/battery",
+                            "subject_model": "Battery",
+                            "attested_by": "operator",
+                            "attested_at": "2026-08-22T12:00:00Z",
+                        },
+                    }
+                },
+                "battery_dispatch_bindings": {
+                    "home-battery": {
+                        "schema_version": "v1",
+                        "device_id": "ha-battery-1",
+                        "soc_entity_id": "sensor.battery_soc",
+                        "power_feedback_entity_id": "sensor.battery_power",
+                        "capacity_entity_id": "sensor.battery_capacity",
+                        "capacity_metric": "battery.capacity",
+                        "charge": {
+                            "entity_id": "number.battery_command",
+                            "provider_command": "charge",
+                        },
+                        "discharge": {
+                            "entity_id": "number.battery_command",
+                            "provider_command": "discharge",
+                        },
+                        "stop": {
+                            "entity_id": "number.battery_command",
+                            "provider_command": "stop",
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    route_registry = ProviderRegistry()
+    route_adapter = create_adapter(
+        Settings(
+            home_assistant_url="http://home-assistant.test",
+            home_assistant_token=SecretStr("fixture-token"),
+            home_assistant_mapping_path=dispatch_mapping_path,
+        ),
+        provider_registry=route_registry,
+    )
+    assert isinstance(route_adapter, HomeAssistantProviderAdapter)
+    route_provider = route_registry.get("home_assistant")
+    assert isinstance(route_provider, HomeAssistantProvider)
+    assert set(route_provider.battery_dispatch_bindings) == {"home-battery"}
+    assert route_provider.battery_dispatch_bindings["home-battery"].charge.provider_command == (
+        "charge"
+    )
+
     plaintext_adapter = create_adapter(Settings(zigbee2mqtt_url="mqtt://broker.test:1884"))
     assert isinstance(plaintext_adapter, Zigbee2MqttAdapter)
     assert plaintext_adapter.transport.port == 1884
@@ -317,6 +433,108 @@ async def test_runtime_factory_persisted_state_stays_current_across_rediscoverie
 
 
 @pytest.mark.asyncio
+async def test_scheduled_plan_executes_after_real_runtime_restart(tmp_path: Path) -> None:
+    database_path = tmp_path / "restart-scheduled-runtime.sqlite3"
+    first_adapter = SimulatedHomeAdapter()
+    first_run = await build_runtime(Settings(database_path=database_path), adapter=first_adapter)
+    light_id = next(
+        device.id for device in first_run.registry.devices if device.type.value == "light"
+    )
+    # Leave it pending without sleeping; the first runtime never runs its
+    # scheduler, so a just-due timestamp still exercises restart persistence.
+    execute_at = datetime.now(UTC) - timedelta(seconds=1)
+    validated = first_run.plan_service.validate(
+        Plan(
+            id="restart-scheduled-plan-1",
+            execute_at=execute_at,
+            expires_at=execute_at + timedelta(minutes=5),
+            commands=[
+                Command(
+                    id="restart-scheduled-command-1",
+                    device_id=light_id,
+                    command="set_brightness",
+                    value=60,
+                    unit="%",
+                    idempotency_key="restart-scheduled-intent-1",
+                )
+            ],
+        )
+    )
+    await first_run.scheduler.schedule(validated)
+    await first_run.close()
+
+    second_adapter = SimulatedHomeAdapter()
+    second_run = await build_runtime(Settings(database_path=database_path), adapter=second_adapter)
+    try:
+        results = await second_run.scheduler.run_due(now=execute_at + timedelta(seconds=1))
+
+        assert results == [{"plan_id": validated.id, "outcome": "executed"}]
+        assert [command.id for command in second_adapter.calls] == [
+            "restart-scheduled-command-1"
+        ]
+        stored = await second_run.scheduled_plan_repository.get(validated.id)
+        assert stored is not None
+        assert stored[1] == "executed"
+    finally:
+        await second_run.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["state", "inventory"])
+async def test_restart_changed_dependency_stays_stale_without_adapter_call(
+    tmp_path: Path, change: str
+) -> None:
+    database_path = tmp_path / f"restart-changed-{change}.sqlite3"
+    first_run = await build_runtime(
+        Settings(database_path=database_path), adapter=SimulatedHomeAdapter()
+    )
+    light_id = next(
+        device.id for device in first_run.registry.devices if device.type.value == "light"
+    )
+    execute_at = datetime.now(UTC) - timedelta(seconds=1)
+    validated = first_run.plan_service.validate(
+        Plan(
+            id=f"restart-changed-plan-{change}",
+            execute_at=execute_at,
+            expires_at=execute_at + timedelta(minutes=5),
+            commands=[
+                Command(
+                    id=f"restart-changed-command-{change}",
+                    device_id=light_id,
+                    command="set_brightness",
+                    value=60,
+                    unit="%",
+                    idempotency_key=f"restart-changed-intent-{change}",
+                )
+            ],
+        )
+    )
+    await first_run.scheduler.schedule(validated)
+    await first_run.close()
+
+    second_adapter = SimulatedHomeAdapter()
+    if change == "state":
+        second_adapter._find("light.living_room_main")["state"]["brightness"] = 42
+    else:
+        second_adapter._entities[:] = [
+            entity
+            for entity in second_adapter._entities
+            if entity["entity_id"] != "light.living_room_main"
+        ]
+    second_run = await build_runtime(Settings(database_path=database_path), adapter=second_adapter)
+    try:
+        results = await second_run.scheduler.run_due(now=execute_at + timedelta(seconds=1))
+
+        assert results == [{"plan_id": validated.id, "outcome": "error"}]
+        assert second_adapter.calls == []
+        stored = await second_run.scheduled_plan_repository.get(validated.id)
+        assert stored is not None
+        assert stored[1] == "pending"
+    finally:
+        await second_run.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_factory_reconciled_away_device_does_not_reappear_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -485,8 +703,58 @@ async def test_runtime_factory_builds_live_energy_provider_only_when_enabled(
     runtime = await build_runtime(settings, adapter=SimulatedHomeAdapter())
     try:
         assert runtime.energy_context_provider is not None
+        assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
+        assert runtime.energy_context_provider.battery is None
+        assert runtime.battery_provider is None
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_installs_explicit_dispatchable_battery_binding(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        database_path=tmp_path / "energy-battery.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6,
+        solar_tilt=30,
+        solar_azimuth=0,
+        solar_performance_ratio=0.82,
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=SimulatedHomeAdapter(),
+        dispatchable_battery_binding=_runtime_dispatchable_battery_binding(),
+    )
+    try:
+        assert isinstance(runtime.battery_provider, StateStoreBatteryProvider)
+        assert runtime.battery_provider.device_id == "battery.home"
+        assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
+        assert runtime.energy_context_provider.battery is runtime.battery_provider
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_rejects_battery_binding_when_energy_is_disabled(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "disabled-energy-battery.sqlite3"
+
+    with pytest.raises(ValueError, match="energy_live"):
+        await build_runtime(
+            Settings(database_path=database_path),
+            adapter=SimulatedHomeAdapter(),
+            dispatchable_battery_binding=_runtime_dispatchable_battery_binding(),
+        )
+
+    assert not database_path.exists()
 
 
 @pytest.mark.asyncio

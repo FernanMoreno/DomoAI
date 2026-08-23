@@ -1,6 +1,7 @@
 import pytest
 
 from domoai.domain.provider import ProviderCommand
+from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.provider_sdk import (
     DuplicateProviderError,
     ProviderRegistry,
@@ -102,9 +103,34 @@ async def test_registry_routes_commands_and_rejects_telemetry_only_without_invoc
 
 
 @pytest.mark.asyncio
+async def test_registry_forwards_execution_context_to_command_provider() -> None:
+    registry = ProviderRegistry()
+    command_provider = CommandFixture()
+    registry.register(command_provider)
+    context = ExecutionContext(
+        agent_request_id="agent-provider-1",
+        plan_id="plan-provider-1",
+        execution_attempt_id="attempt-provider-1",
+        adapter_request_id="adapter-provider-1",
+    )
+    command = ProviderCommand(
+        provider_id="fixture_commands",
+        external_device_id="living_room.main_light",
+        command="turn_on",
+        idempotency_key="provider-context-1",
+    )
+
+    await registry.execute("fixture_commands", command, execution_context=context)
+
+    assert command_provider.execution_contexts == [context]
+
+
+@pytest.mark.asyncio
 async def test_registry_converts_provider_command_failure_to_safe_result() -> None:
     class FailingCommandProvider(CommandFixture):
-        async def execute(self, command: ProviderCommand):
+        async def execute(
+            self, command: ProviderCommand, execution_context: ExecutionContext | None = None
+        ):
             raise RuntimeError("response body contains password=must-not-leak")
 
     registry = ProviderRegistry()

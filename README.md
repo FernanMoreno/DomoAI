@@ -139,12 +139,10 @@ key. They do not bypass `PlanService`, policy validation or `AdapterPort`.
 The first concrete implementation is `HomeAssistantProvider`. It reuses the
 authenticated REST/WebSocket client, groups entities by Home Assistant
 `device_id` when registry metadata is available, and exposes only explicit
-entity/capability metric mappings. It remains additive to the classic
-`HomeAssistantAdapter`; the runtime factory selects it only when
-`DOMOAI_HOME_ASSISTANT_PROVIDER=1` is explicitly enabled. The same provider
-object is registered in `ProviderRegistry` and wrapped by the existing
-`AdapterPort`, so `DeviceRegistry`, `StateStore`, plan execution and MCP keep
-one semantic path and one Home Assistant client.
+entity/capability metric mappings. It is the single Home Assistant integration
+path: the provider is registered in `ProviderRegistry` and wrapped by
+`HomeAssistantProviderAdapter`, so `DeviceRegistry`, `StateStore`, plan
+execution and MCP keep one semantic path and one Home Assistant client.
 See [`docs/adapter-sdk.md`](docs/adapter-sdk.md) and
 [`docs/contracts.md`](docs/contracts.md) for the public boundary.
 
@@ -175,15 +173,14 @@ more complete source configurations. Configure Home Assistant with:
 ```bash
 export DOMOAI_HOME_ASSISTANT_URL="http://home-assistant.local:8123"
 export DOMOAI_HOME_ASSISTANT_TOKEN="<long-lived-access-token>"
-export DOMOAI_HOME_ASSISTANT_PROVIDER="1"
 export DOMOAI_HOME_ASSISTANT_MAPPING_PATH="config/home-assistant-mappings.json"
 export DOMOAI_DATABASE_PATH="data/domoai.sqlite3"
 uv run domoai-mcp
 ```
 
-Provider mode is opt-in. Without it, the classic `HomeAssistantAdapter` is
-selected for compatibility. If it is enabled, the URL/token pair is required
-and an optional strict v1 mapping document can make energy roles explicit:
+The provider path is the configured Home Assistant runtime. The URL/token pair
+is required and an optional strict v1 mapping document can make energy roles
+explicit:
 
 ```json
 {
@@ -220,10 +217,9 @@ also reads Home Assistant's enabled entity registry over WebSocket when state
 payloads do not include `device_id`; registry identity is preserved when
 provided, never inferred from names or areas.
 
-Removing `DOMOAI_HOME_ASSISTANT_PROVIDER` rolls back to the classic adapter
-without changing the agent-facing MCP surface. The provider path is covered
-by deterministic fixtures. The opt-in live provider-runtime smoke validates the
-same route against a real Home Assistant instance without executing commands:
+The provider path is covered by deterministic fixtures. The opt-in live
+provider-runtime smoke validates the same route against a real Home Assistant
+instance without executing commands:
 
 ```bash
 uv run pytest -q tests/integration/test_home_assistant_provider_smoke.py
@@ -365,13 +361,13 @@ uv run mypy src
 uv lock --check
 ```
 
-The latest full-suite result without live credentials is `318 passed, 8
+The latest full-suite result without live credentials is `972 passed, 10
 skipped`, with no warnings. The skips
 are opt-in Matter Server, KNX/IP and other live cases without their external
 node, gateway or service configuration; deterministic fixture coverage remains
-enabled. The separate live results are: Zigbee2MQTT/Modbus `2 passed`, OMIE/
-Open-Meteo `2 passed`, Home Assistant classic adapter `1 passed` and the
-Home Assistant Provider runtime bridge `1 passed`. The FastMCP compatibility
+enabled. No live gateway or hardware result is claimed by this run; the Home
+Assistant inverter HIL smoke remains opt-in and was not executed because its
+credentials and hardware were unavailable. The FastMCP compatibility
 seam keeps the known `pydantic_settings` incomplete-field warning out of the
 MCP contracts without globally suppressing warnings.
 

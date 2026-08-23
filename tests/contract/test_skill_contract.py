@@ -61,6 +61,43 @@ description: test procedure
     + VALID_BINDINGS
 )
 
+V3_SKILL = (
+    FULL_SKILL.replace(
+        "description: test procedure\n---",
+        "description: test procedure\ncontract_version: v3\n---",
+    )
+    .replace(
+        "- `get_state`\n",
+        "- `get_state`\n- `get_energy_context`\n",
+    )
+    .replace(
+        "2. `get_state` — read state.\n",
+        "2. `get_state` — read state.\n3. `get_energy_context` — read energy.\n",
+    )
+    .replace("3. `optimize_scenario`", "4. `optimize_scenario`")
+    .replace("4. `validate_plan`", "5. `validate_plan`")
+    .replace("5. `explain_solution`", "6. `explain_solution`")
+    .replace("6. `operator_approval`", "7. `operator_approval`")
+    .replace("7. `execute_plan`", "8. `execute_plan`")
+    .replace(
+        "- `get_state` → `mcp.get_state` (`read`)\n",
+        "- `get_state` → `mcp.get_state` (`read`)\n"
+        "- `get_energy_context` → `mcp.get_energy_context` (`read`)\n",
+    )
+    .replace(
+        "- `execute_plan`\n\n## Procedure",
+        "- `commit_or_schedule_bundle`\n\n## Procedure",
+    )
+    .replace(
+        "8. `execute_plan` — execute.",
+        "8. `commit_or_schedule_bundle` — commit or schedule the bundle.",
+    )
+    .replace(
+        "- `execute_plan` → `mcp.execute_plan` (`mutation`)",
+        "- `commit_or_schedule_bundle` → `mcp.commit_or_schedule_bundle` (`mutation`)",
+    )
+)
+
 
 def test_validator_rejects_undeclared_operation(tmp_path: Path) -> None:
     path = tmp_path / "SKILL.md"
@@ -134,6 +171,18 @@ def test_validator_accepts_v2_context_binding_and_requires_its_order(tmp_path: P
     assert procedure.operations.index("get_energy_context") < procedure.operations.index(
         "optimize_scenario"
     )
+
+
+def test_validator_accepts_v3_bundle_commit_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(V3_SKILL, encoding="utf-8")
+
+    procedure = validate_skill(path)
+
+    assert procedure.contract_version == "v3"
+    assert "execute_plan" not in procedure.operations
+    assert procedure.operations[-2:] == ("operator_approval", "commit_or_schedule_bundle")
+    assert procedure.bindings[-1].tool == "commit_or_schedule_bundle"
 
 
 @pytest.mark.parametrize(

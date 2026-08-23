@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
 
+from domoai.runtime.execution_context import ExecutionContext
+
 
 @dataclass(frozen=True)
 class MatterTransportMessage:
@@ -18,6 +20,7 @@ class MatterTransportMessage:
 class MatterRequest:
     command: str
     args: dict[str, Any] | None
+    execution_context: ExecutionContext | None = None
 
 
 class MatterTransport(Protocol):
@@ -25,7 +28,13 @@ class MatterTransport(Protocol):
 
     async def disconnect(self) -> None: ...
 
-    async def request(self, command: str, args: dict[str, Any] | None = None) -> Any: ...
+    async def request(
+        self,
+        command: str,
+        args: dict[str, Any] | None = None,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> Any: ...
 
     async def receive(self, timeout: float | None = None) -> MatterTransportMessage | None: ...
 
@@ -62,10 +71,18 @@ class InMemoryMatterTransport:
     async def disconnect(self) -> None:
         self.connected = False
 
-    async def request(self, command: str, args: dict[str, Any] | None = None) -> Any:
+    async def request(
+        self,
+        command: str,
+        args: dict[str, Any] | None = None,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> Any:
         if not self.connected:
             raise ConnectionError("Matter transport is not connected")
-        self.requests.append(MatterRequest(command=command, args=args))
+        self.requests.append(
+            MatterRequest(command=command, args=args, execution_context=execution_context)
+        )
         if command == "start_listening":
             return self.nodes
         return self.responses.get(command)
@@ -104,6 +121,7 @@ class MatterServerWebSocketTransport:
         self._events: asyncio.Queue[MatterTransportMessage] = asyncio.Queue()
         self._server_info: dict[str, Any] | None = None
         self._connected = False
+        self.last_request_context: ExecutionContext | None = None
 
     async def connect(self) -> None:
         try:
@@ -150,10 +168,17 @@ class MatterServerWebSocketTransport:
                 pass
         self._socket = None
 
-    async def request(self, command: str, args: dict[str, Any] | None = None) -> Any:
+    async def request(
+        self,
+        command: str,
+        args: dict[str, Any] | None = None,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> Any:
         if not self._connected or self._socket is None:
             raise ConnectionError("Matter transport is not connected")
         message_id = str(uuid4())
+        self.last_request_context = execution_context
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[message_id] = future
         try:

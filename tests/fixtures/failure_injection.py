@@ -13,6 +13,7 @@ from domoai.domain.models import (
     SourceRef,
     StateSnapshot,
 )
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class FailureInjectingAdapter:
@@ -51,7 +52,9 @@ class FailureInjectingAdapter:
         self._maybe_raise("read_state")
         return []
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         self._maybe_raise("execute")
         self.execute_calls.append(command)
         return AdapterExecutionAck(accepted=True)

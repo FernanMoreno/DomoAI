@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 import websockets
 
+from domoai.runtime.execution_context import ExecutionContext
+
 
 class HomeAssistantClient:
     def __init__(
@@ -55,12 +57,26 @@ class HomeAssistantClient:
         raise last_error
 
     async def call_service(
-        self, domain: str, service: str, data: dict[str, Any]
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any],
+        *,
+        execution_context: ExecutionContext | None = None,
     ) -> list[dict[str, Any]]:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if execution_context is not None:
+            headers.update(
+                {
+                    "X-DomoAI-Plan-ID": execution_context.plan_id,
+                    "X-DomoAI-Execution-Attempt-ID": execution_context.execution_attempt_id,
+                    "X-DomoAI-Adapter-Request-ID": execution_context.adapter_request_id,
+                }
+            )
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             response = await client.post(
                 f"{self.base_url}/api/services/{domain}/{service}",
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers=headers,
                 json=data,
             )
             response.raise_for_status()

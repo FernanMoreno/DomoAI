@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,8 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class ModbusAdapter:
@@ -48,11 +49,13 @@ class ModbusAdapter:
         *,
         discovery_timeout: float = 5.0,
         poll_interval: float = 5.0,
+        clock: Clock | None = None,
     ) -> None:
         self.transport = transport
         self.mapping = load_mapping(mapping) if isinstance(mapping, Path) else mapping
         self.discovery_timeout = discovery_timeout
         self.poll_interval = poll_interval
+        self._clock = clock or SystemClock()
         self.mapper = ModbusMapper()
         self._connected = False
         self._available = False
@@ -129,14 +132,21 @@ class ModbusAdapter:
             )
         return snapshots
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         self._require_connected()
         entity = self._entity_by_canonical.get(command.device_id)
         if entity is None:
             return AdapterExecutionAck(accepted=False, message="Unknown Modbus device")
-        return await self.execute_source(command, entity.entity_id)
+        return await self.execute_source(command, entity.entity_id, execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         self._require_connected()
         entity = next(
             (item for item in self.mapping.entities if item.entity_id == source_entity_id),
@@ -158,7 +168,13 @@ class ModbusAdapter:
         point, values = translated
         try:
             await asyncio.wait_for(
-                self.transport.write(entity.unit_id, point.area, point.address, values),
+                self.transport.write(
+                    entity.unit_id,
+                    point.area,
+                    point.address,
+                    values,
+                    execution_context=execution_context,
+                ),
                 self.discovery_timeout,
             )
         except (ConnectionError, OSError, TimeoutError) as error:
@@ -224,7 +240,7 @@ class ModbusAdapter:
                     decoded = self.mapper.decode(entity, binding, sample)
                     state_key = (entity.entity_id, binding.name)
                     previous = self._states.get(state_key)
-                    received_at = datetime.now(UTC)
+                    received_at = self._clock.now()
                     self._states[state_key] = {
                         **decoded,
                         "received_at": received_at,

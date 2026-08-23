@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
 from domoai.domain.models import ExecutionStatus
@@ -18,6 +17,8 @@ from domoai.domain.provider import (
     ProviderManifest,
     ProviderRole,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class TelemetryProviderPort(Protocol):
@@ -39,7 +40,11 @@ class TelemetryProviderPort(Protocol):
 class CommandProviderPort(Protocol):
     manifest: ProviderManifest
 
-    async def execute(self, command: ProviderCommand) -> ProviderExecutionResult: ...
+    async def execute(
+        self,
+        command: ProviderCommand,
+        execution_context: ExecutionContext | None = None,
+    ) -> ProviderExecutionResult: ...
 
 
 class ProviderRegistryError(ValueError):
@@ -62,8 +67,9 @@ _TELEMETRY_METHODS = (
 class ProviderRegistry:
     """Register providers and compose them without leaking provider failures."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Clock | None = None) -> None:
         self._providers: dict[str, object] = {}
+        self._clock = clock or SystemClock()
 
     @property
     def providers(self) -> tuple[object, ...]:
@@ -123,7 +129,12 @@ class ProviderRegistry:
                 diagnostics.append(_diagnostic(manifest.provider_id, "collection_failed", error))
         return ProviderCollectionResult(measurements=measurements, diagnostics=diagnostics)
 
-    async def execute(self, provider_id: str, command: ProviderCommand) -> ProviderExecutionResult:
+    async def execute(
+        self,
+        provider_id: str,
+        command: ProviderCommand,
+        execution_context: ExecutionContext | None = None,
+    ) -> ProviderExecutionResult:
         provider = self._providers.get(provider_id)
         if provider is None:
             raise ProviderRegistryError(f"unknown provider id {provider_id!r}")
@@ -133,14 +144,17 @@ class ProviderRegistry:
         if command.provider_id != provider_id:
             raise ProviderRegistryError("command provider_id does not match route")
         try:
-            result = await _call_async(provider, "execute", command)
+            if execution_context is None:
+                result = await _call_async(provider, "execute", command)
+            else:
+                result = await _call_async(provider, "execute", command, execution_context)
         except Exception:
             return ProviderExecutionResult(
                 provider_id=provider_id,
                 external_device_id=command.external_device_id,
                 command=command.command,
                 status=ExecutionStatus.FAILED,
-                completed_at=_utc_now(),
+                completed_at=self._clock.now(),
                 message="provider command failed",
             )
         if not isinstance(result, ProviderExecutionResult):
@@ -149,7 +163,7 @@ class ProviderRegistry:
                 external_device_id=command.external_device_id,
                 command=command.command,
                 status=ExecutionStatus.FAILED,
-                completed_at=_utc_now(),
+                completed_at=self._clock.now(),
                 message="provider returned an invalid command result",
             )
         if result.provider_id != provider_id:
@@ -158,7 +172,7 @@ class ProviderRegistry:
                 external_device_id=command.external_device_id,
                 command=command.command,
                 status=ExecutionStatus.FAILED,
-                completed_at=_utc_now(),
+                completed_at=self._clock.now(),
                 message="provider returned an invalid command provenance",
             )
         return result
@@ -200,7 +214,3 @@ def _diagnostic(provider_id: str, code: str, error: BaseException) -> ProviderDi
         message="provider operation failed",
         retryable=isinstance(error, (ConnectionError, TimeoutError, OSError)),
     )
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

@@ -1,0 +1,249 @@
+{
+  "$defs": {
+    "BundleCommitStatus": {
+      "enum": [
+        "committing",
+        "completed",
+        "scheduled",
+        "partially_committed",
+        "failed",
+        "unknown"
+      ],
+      "title": "BundleCommitStatus",
+      "type": "string"
+    },
+    "BundleMemberCommit": {
+      "additionalProperties": false,
+      "properties": {
+        "plan_id": {
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "validation_digest": {
+          "minLength": 1,
+          "title": "Validation Digest",
+          "type": "string"
+        },
+        "execute_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execute At"
+        },
+        "status": {
+          "$ref": "#/$defs/BundleMemberCommitStatus",
+          "default": "pending"
+        },
+        "execution_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scheduled": {
+          "default": false,
+          "title": "Scheduled",
+          "type": "boolean"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "plan_id",
+        "validation_digest"
+      ],
+      "title": "BundleMemberCommit",
+      "type": "object"
+    },
+    "BundleMemberCommitStatus": {
+      "enum": [
+        "pending",
+        "executed",
+        "scheduled",
+        "failed",
+        "unknown"
+      ],
+      "title": "BundleMemberCommitStatus",
+      "type": "string"
+    },
+    "ErrorDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "capability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ErrorDetail",
+      "type": "object"
+    },
+    "ExecutionStatus": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unavailable",
+        "failed",
+        "cancelled",
+        "confirmed_success",
+        "unknown"
+      ],
+      "title": "ExecutionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "bundle_digest": {
+      "minLength": 1,
+      "title": "Bundle Digest",
+      "type": "string"
+    },
+    "scenario_id": {
+      "minLength": 1,
+      "title": "Scenario Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/BundleCommitStatus",
+      "default": "committing"
+    },
+    "compensation_policy": {
+      "const": "none",
+      "default": "none",
+      "title": "Compensation Policy",
+      "type": "string"
+    },
+    "members": {
+      "items": {
+        "$ref": "#/$defs/BundleMemberCommit"
+      },
+      "maxItems": 50,
+      "minItems": 1,
+      "title": "Members",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "failure": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ErrorDetail"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "bundle_digest",
+    "scenario_id",
+    "members"
+  ],
+  "title": "BundleCommit",
+  "type": "object"
+}

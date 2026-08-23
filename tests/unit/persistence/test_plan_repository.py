@@ -63,3 +63,24 @@ async def test_list_by_status_on_empty_store_returns_empty_list(tmp_path) -> Non
     result = await repository.list_by_status(frozenset({PlanStatus.EXECUTING}))
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_claim_for_execution_rejects_non_executable_statuses_at_repository_boundary(
+    tmp_path,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    plan = _plan("plan-draft", PlanStatus.DRAFT)
+    await repository.save(plan)
+
+    claimed = await repository.claim_for_execution(
+        plan.model_copy(update={"status": PlanStatus.EXECUTING}),
+        allowed_statuses=frozenset({PlanStatus.DRAFT, PlanStatus.READY}),
+    )
+
+    assert claimed is False
+    persisted = await repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.DRAFT

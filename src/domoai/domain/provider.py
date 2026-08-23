@@ -45,6 +45,23 @@ class MeasurementQuality(StrEnum):
     INVALID = "invalid"
 
 
+class NominalCapacityAttestation(StrictModel):
+    """Non-secret provenance explaining why a capacity is claimed nominal."""
+
+    schema_version: Literal["v1"] = PROVIDER_SCHEMA_VERSION
+    evidence_type: Literal["vendor_documentation", "installer_attestation"]
+    reference: str = Field(min_length=1, max_length=512)
+    subject_model: str = Field(min_length=1, max_length=256)
+    attested_by: str = Field(min_length=1, max_length=256)
+    attested_at: datetime
+
+    @model_validator(mode="after")
+    def validate_attestation(self) -> NominalCapacityAttestation:
+        if self.attested_at.tzinfo is None:
+            raise ValueError("attested_at must be timezone-aware")
+        return self
+
+
 def _contains_sensitive_key(key: str) -> bool:
     normalized = key.casefold().replace("-", "_")
     return any(fragment in normalized for fragment in _SENSITIVE_FRAGMENTS)
@@ -129,6 +146,7 @@ class Measurement(StrictModel):
     received_at: datetime
     quality: MeasurementQuality = MeasurementQuality.GOOD
     source_ref: SourceRef
+    nominal_capacity_attestation: NominalCapacityAttestation | None = None
 
     @model_validator(mode="after")
     def validate_observation(self) -> Measurement:
@@ -138,6 +156,10 @@ class Measurement(StrictModel):
             raise ValueError("received_at must be greater than or equal to observed_at")
         if self.source_ref.adapter_id != self.provider_id:
             raise ValueError("source_ref.adapter_id must match provider_id")
+        if self.nominal_capacity_attestation is not None and self.metric != "battery.capacity":
+            raise ValueError(
+                "nominal capacity attestation requires a battery.capacity measurement"
+            )
         if isinstance(self.value, (int, float)) and not isinstance(self.value, bool):
             if not math.isfinite(self.value):
                 raise ValueError("numeric measurement values must be finite")

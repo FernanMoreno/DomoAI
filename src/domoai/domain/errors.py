@@ -27,6 +27,7 @@ class ErrorCode(StrEnum):
     PRECONDITION_FAILED = "precondition_failed"
     NOT_YET_DUE = "not_yet_due"
     SAFETY_LIMIT_EXCEEDED = "safety_limit_exceeded"
+    POST_WRITE_RECONCILIATION_FAILED = "post_write_reconciliation_failed"
 
 
 class DomainError(ValueError):

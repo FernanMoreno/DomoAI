@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.adapters.home_assistant.client import HomeAssistantClient
-from domoai.adapters.home_assistant.config import load_metric_mappings
+from domoai.adapters.home_assistant.config import load_home_assistant_mapping
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.adapters.knx.adapter import KnxAdapter
@@ -31,6 +31,7 @@ from domoai.config.risk_classification import load_risk_overrides_file
 from domoai.config.safety_kernel_loader import load_safety_limits_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
+from domoai.domain.models import Plan
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
     OpenMeteoHttpClient,
@@ -38,17 +39,29 @@ from domoai.optimizer.open_meteo import (
     OpenMeteoSolarProvider,
 )
 from domoai.optimizer.ports import EnergyContextProvider
-from domoai.optimizer.providers import ComposedEnergyContextProvider
+from domoai.optimizer.providers import (
+    BatteryProvider,
+    ComposedEnergyContextProvider,
+    DispatchableBatteryBinding,
+    StateStoreBatteryProvider,
+)
 from domoai.persistence.repositories import (
     AuditEventRepository,
+    BundleCommitRepository,
     DeviceRepository,
     ExecutionOutcomeRepository,
     PlanRepository,
     RecurringScheduleRepository,
+    RuntimeStateMetadataRepository,
     ScheduledPlanRepository,
     StateSnapshotRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.approval_store import (
+    ApprovalStore,
+    OperatorPrincipalProvider,
+)
+from domoai.runtime.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.event_consumer import RuntimeEventConsumer
@@ -70,10 +83,13 @@ def create_adapter(
     *,
     registry: DeviceRegistry | None = None,
     provider_registry: ProviderRegistry | None = None,
+    clock: Clock | None = None,
 ) -> AdapterPort:
-    adapters = _create_configured_adapters(settings, provider_registry=provider_registry)
+    adapters = _create_configured_adapters(
+        settings, provider_registry=provider_registry, clock=clock
+    )
     if not adapters:
-        return SimulatedHomeAdapter()
+        return SimulatedHomeAdapter(clock=clock)
     if len(adapters) == 1:
         return adapters[0]
     return CompositeAdapter(
@@ -84,7 +100,10 @@ def create_adapter(
 
 
 def _create_configured_adapters(
-    settings: Settings, *, provider_registry: ProviderRegistry | None = None
+    settings: Settings,
+    *,
+    provider_registry: ProviderRegistry | None = None,
+    clock: Clock | None = None,
 ) -> list[AdapterPort]:
     adapters: list[AdapterPort] = []
     has_url = settings.home_assistant_url is not None
@@ -96,8 +115,8 @@ def _create_configured_adapters(
     if has_url and has_token:
         assert settings.home_assistant_url is not None
         assert settings.home_assistant_token is not None
-        metric_mappings = (
-            load_metric_mappings(settings.home_assistant_mapping_path)
+        mapping_document = (
+            load_home_assistant_mapping(settings.home_assistant_mapping_path)
             if settings.home_assistant_mapping_path is not None
             else None
         )
@@ -107,11 +126,18 @@ def _create_configured_adapters(
         )
         provider = HomeAssistantProvider(
             client,
-            metric_mappings=metric_mappings,
+            metric_mappings=(mapping_document.metric_mappings if mapping_document else None),
+            battery_capacity_bindings=(
+                mapping_document.battery_capacity_bindings if mapping_document else None
+            ),
+            battery_dispatch_bindings=(
+                mapping_document.battery_dispatch_bindings if mapping_document else None
+            ),
+            clock=clock,
         )
         if provider_registry is not None:
             provider_registry.register(provider)
-        adapters.append(HomeAssistantProviderAdapter(provider))
+        adapters.append(HomeAssistantProviderAdapter(provider, clock=clock))
     if settings.zigbee2mqtt_url is not None:
         parsed = urlparse(settings.zigbee2mqtt_url)
         if parsed.scheme not in {"mqtt", "mqtts"} or parsed.hostname is None:
@@ -138,6 +164,7 @@ def _create_configured_adapters(
                 ),
                 base_topic=settings.zigbee2mqtt_base_topic,
                 discovery_timeout=settings.mqtt_timeout_seconds,
+                clock=clock,
             )
         )
     if settings.matter_server_url is not None:
@@ -151,6 +178,7 @@ def _create_configured_adapters(
                     timeout=settings.matter_timeout_seconds,
                 ),
                 discovery_timeout=settings.matter_timeout_seconds,
+                clock=clock,
             )
         )
     if settings.knx_gateway_host is not None and settings.knx_config_path is not None:
@@ -166,9 +194,11 @@ def _create_configured_adapters(
                     settings.knx_gateway_host,
                     timeout=settings.knx_timeout_seconds,
                     group_dpts=group_dpts,
+                    clock=clock,
                 ),
                 mapping,
                 discovery_timeout=settings.knx_timeout_seconds,
+                clock=clock,
             ),
         )
     if settings.modbus_host is not None and settings.modbus_config_path is not None:
@@ -181,10 +211,12 @@ def _create_configured_adapters(
                     settings.modbus_host,
                     port=settings.modbus_port,
                     timeout=settings.modbus_timeout_seconds,
+                    clock=clock,
                 ),
                 modbus_mapping,
                 discovery_timeout=settings.modbus_timeout_seconds,
                 poll_interval=settings.modbus_poll_interval_seconds,
+                clock=clock,
             ),
         )
     return adapters
@@ -192,6 +224,9 @@ def _create_configured_adapters(
 
 def _create_energy_context_provider(
     settings: Settings,
+    *,
+    battery_provider: BatteryProvider | None = None,
+    clock: Clock | None = None,
 ) -> tuple[EnergyContextProvider | None, tuple[Callable[[], None], ...]]:
     if not settings.energy_live:
         return None, ()
@@ -209,12 +244,14 @@ def _create_energy_context_provider(
         timezone=settings.solar_timezone,
     )
     solar_config = OpenMeteoSolarConfig.from_profile(profile)
-    omie_client = OmieTariffHttpClient(timeout=settings.omie_timeout_seconds)
-    solar_client = OpenMeteoHttpClient(timeout=settings.solar_timeout_seconds)
+    omie_client = OmieTariffHttpClient(timeout=settings.omie_timeout_seconds, clock=clock)
+    solar_client = OpenMeteoHttpClient(timeout=settings.solar_timeout_seconds, clock=clock)
     provider = ComposedEnergyContextProvider(
         tariffs=OmieTariffProvider(omie_client),
         solar=OpenMeteoSolarProvider(solar_client, solar_config),
+        battery=battery_provider,
         max_age_seconds=settings.energy_max_age_seconds,
+        now=(clock.now if clock is not None else None),
     )
     return provider, (omie_client.close, solar_client.close)
 
@@ -229,7 +266,12 @@ class RuntimeComposition:
     outcome_repository: ExecutionOutcomeRepository
     device_repository: DeviceRepository
     state_snapshot_repository: StateSnapshotRepository
+    runtime_state_metadata_repository: RuntimeStateMetadataRepository
     scheduled_plan_repository: ScheduledPlanRepository
+    bundle_commit_repository: BundleCommitRepository
+    bundle_commit_service: BundleCommitService
+    approval_store: ApprovalStore
+    plans: dict[str, Plan]
     recurring_schedule_repository: RecurringScheduleRepository
     registry: DeviceRegistry
     provider_registry: ProviderRegistry
@@ -241,7 +283,10 @@ class RuntimeComposition:
     event_consumer: RuntimeEventConsumer
     scheduler: Scheduler
     energy_context_provider: EnergyContextProvider | None = None
+    battery_provider: BatteryProvider | None = None
     energy_closers: tuple[Callable[[], None], ...] = ()
+    clock: Clock = field(default_factory=SystemClock)
+    operator_principal_provider: OperatorPrincipalProvider | None = None
 
     async def close(self) -> None:
         try:
@@ -253,34 +298,61 @@ class RuntimeComposition:
 
 
 async def build_runtime(
-    settings: Settings | None = None, *, adapter: AdapterPort | None = None
+    settings: Settings | None = None,
+    *,
+    adapter: AdapterPort | None = None,
+    dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
+    operator_principal_provider: OperatorPrincipalProvider | None = None,
+    clock: Clock | None = None,
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
-    energy_context_provider, energy_closers = _create_energy_context_provider(resolved_settings)
-    database = SQLiteDatabase(
-        resolved_settings.database_path,
-        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-    )
-    await database.initialize()
-    clock: Clock = SystemClock()
-    audit_repository = AuditEventRepository(database)
-    audit = AuditLog(sink=audit_repository, clock=clock)
-    device_repository = DeviceRepository(database, clock=clock)
-    state_snapshot_repository = StateSnapshotRepository(database)
-    registry = DeviceRegistry()
-    registry.load_persisted(await device_repository.list_all())
-    provider_registry = ProviderRegistry()
-    selected_adapter = adapter or create_adapter(
-        resolved_settings,
-        registry=registry,
-        provider_registry=provider_registry,
-    )
-    if isinstance(selected_adapter, CompositeAdapter):
-        selected_adapter.bind_registry(registry)
+    if dispatchable_battery_binding is not None and not resolved_settings.energy_live:
+        raise ValueError(
+            "dispatchable_battery_binding requires energy_live to be enabled"
+        )
+    clock = clock or SystemClock()
     state_store = StateStore(
         stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds),
         clock=clock,
     )
+    battery_provider = (
+        StateStoreBatteryProvider.from_binding(
+            state_store=state_store,
+            binding=dispatchable_battery_binding,
+        )
+        if dispatchable_battery_binding is not None
+        else None
+    )
+    energy_context_provider, energy_closers = _create_energy_context_provider(
+        resolved_settings,
+        battery_provider=battery_provider,
+        clock=clock,
+    )
+    database = SQLiteDatabase(
+        resolved_settings.database_path,
+        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+        clock=clock,
+    )
+    await database.initialize()
+    audit_repository = AuditEventRepository(database)
+    audit = AuditLog(sink=audit_repository, clock=clock)
+    device_repository = DeviceRepository(database, clock=clock)
+    state_snapshot_repository = StateSnapshotRepository(database)
+    runtime_state_metadata_repository = RuntimeStateMetadataRepository(database, clock=clock)
+    registry = DeviceRegistry()
+    registry.load_persisted(await device_repository.list_all())
+    provider_registry = ProviderRegistry(clock=clock)
+    selected_adapter = adapter or create_adapter(
+        resolved_settings,
+        registry=registry,
+        provider_registry=provider_registry,
+        clock=clock,
+    )
+    if isinstance(selected_adapter, CompositeAdapter):
+        selected_adapter.bind_registry(registry)
+    runtime_state_metadata = await runtime_state_metadata_repository.get()
+    if runtime_state_metadata is not None:
+        state_store.restore_metadata(runtime_state_metadata)
     state_store.load_persisted(await state_snapshot_repository.list_all())
     discovery = DiscoveryService(
         selected_adapter,
@@ -289,6 +361,7 @@ async def build_runtime(
         audit,
         device_repository=device_repository,
         state_snapshot_repository=state_snapshot_repository,
+        runtime_state_metadata_repository=runtime_state_metadata_repository,
         clock=clock,
     )
     try:
@@ -339,6 +412,7 @@ async def build_runtime(
         audit,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
+        state_snapshot_repository=state_snapshot_repository,
         clock=clock,
         safety_kernel=safety_kernel,
     )
@@ -355,6 +429,33 @@ async def build_runtime(
         recurring_repository=recurring_schedule_repository,
         clock=clock,
     )
+    bundle_commit_repository = BundleCommitRepository(database, clock=clock)
+    plans: dict[str, Plan] = {}
+    approval_store = ApprovalStore(
+        operator_token=(
+            resolved_settings.operator_approval_token.get_secret_value()
+            if resolved_settings.operator_approval_token is not None
+            else None
+        ),
+        allow_legacy_token=resolved_settings.allow_legacy_operator_token,
+        clock=clock,
+    )
+    bundle_commit_service = BundleCommitService(
+        facade=facade,
+        plans=plans,
+        approval_store=approval_store,
+        bundle_repository=bundle_commit_repository,
+        scheduled_repository=scheduled_plan_repository,
+        audit=audit,
+        plan_repository=plan_repository,
+        clock=clock,
+    )
+    await BundleRecoveryService(
+        bundle_repository=bundle_commit_repository,
+        plan_repository=plan_repository,
+        scheduled_repository=scheduled_plan_repository,
+        audit=audit,
+    ).recover_orphaned_bundles()
     return RuntimeComposition(
         settings=resolved_settings,
         adapter=selected_adapter,
@@ -364,7 +465,12 @@ async def build_runtime(
         outcome_repository=outcome_repository,
         device_repository=device_repository,
         state_snapshot_repository=state_snapshot_repository,
+        runtime_state_metadata_repository=runtime_state_metadata_repository,
         scheduled_plan_repository=scheduled_plan_repository,
+        bundle_commit_repository=bundle_commit_repository,
+        bundle_commit_service=bundle_commit_service,
+        approval_store=approval_store,
+        plans=plans,
         recurring_schedule_repository=recurring_schedule_repository,
         registry=registry,
         provider_registry=provider_registry,
@@ -376,5 +482,8 @@ async def build_runtime(
         event_consumer=event_consumer,
         scheduler=scheduler,
         energy_context_provider=energy_context_provider,
+        battery_provider=battery_provider,
         energy_closers=energy_closers,
+        clock=clock,
+        operator_principal_provider=operator_principal_provider,
     )

@@ -8,6 +8,7 @@ from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError
 from domoai.domain.models import (
     Command,
+    Plan,
     Policy,
     PolicyAction,
     SourceRef,
@@ -240,3 +241,62 @@ async def test_plan_expiry_uses_injected_clock() -> None:
 
     with pytest.raises(DomainError, match="expired"):
         service.assert_executable(validated)
+
+
+@pytest.mark.asyncio
+async def test_validate_assigns_default_expiry_when_mcp_plan_omits_it() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-mcp-default-expiry-1",
+        commands=[
+            Command(
+                id="command-mcp-default-expiry-1",
+                device_id=device_id,
+                command="turn_on",
+                idempotency_key="intent-mcp-default-expiry-1",
+            )
+        ],
+    )
+
+    validated = service.validate(plan)
+
+    assert validated.expires_at == initial + PlanService.DEFAULT_PLAN_TTL
+    clock.set(initial + PlanService.DEFAULT_PLAN_TTL + timedelta(seconds=1))
+    with pytest.raises(DomainError, match="expired"):
+        service.assert_executable(validated)
+
+
+@pytest.mark.asyncio
+async def test_validate_keeps_future_plan_valid_through_execution_window() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    execute_at = initial + timedelta(hours=4)
+    plan = Plan(
+        id="plan-future-default-expiry-1",
+        execute_at=execute_at,
+        commands=[
+            Command(
+                id="command-future-default-expiry-1",
+                device_id=device_id,
+                command="turn_on",
+                idempotency_key="intent-future-default-expiry-1",
+            )
+        ],
+    )
+
+    validated = service.validate(plan)
+
+    assert validated.expires_at == execute_at + PlanService.DEFAULT_PLAN_TTL

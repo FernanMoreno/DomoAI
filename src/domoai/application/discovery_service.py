@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from domoai.domain.models import (
     AdapterSnapshot,
     Area,
-    AvailabilityStatus,
     Device,
     SourceRef,
     StateSnapshot,
     StateStatus,
 )
-from domoai.persistence.repositories import DeviceRepository, StateSnapshotRepository
+from domoai.persistence.repositories import (
+    DeviceRepository,
+    RuntimeStateMetadataRepository,
+    StateSnapshotRepository,
+)
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
+from domoai.runtime.executable_fingerprint import inventory_fingerprint
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
@@ -39,6 +44,7 @@ class DiscoveryService:
         *,
         device_repository: DeviceRepository | None = None,
         state_snapshot_repository: StateSnapshotRepository | None = None,
+        runtime_state_metadata_repository: RuntimeStateMetadataRepository | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.adapter = adapter
@@ -47,11 +53,12 @@ class DiscoveryService:
         self.audit = audit
         self.device_repository = device_repository
         self.state_snapshot_repository = state_snapshot_repository
+        self.runtime_state_metadata_repository = runtime_state_metadata_repository
         self.clock = clock or SystemClock()
 
     async def refresh(self) -> DiscoveryResult:
         snapshot = await self.adapter.discover()
-        fingerprint_before = self._inventory_fingerprint()
+        fingerprint_before = self.state_store.inventory_fingerprint or self._inventory_fingerprint()
         for diagnostic in snapshot.unsupported_sources:
             if diagnostic.get("failure"):
                 self.registry.mark_source_unavailable(
@@ -69,8 +76,10 @@ class DiscoveryService:
                 ),
                 payload=diagnostic,
             )
-        if self._inventory_fingerprint() != fingerprint_before:
+        fingerprint_after = self._inventory_fingerprint()
+        if fingerprint_after != fingerprint_before:
             self.state_store.begin_revision()
+        self.state_store.record_inventory_fingerprint(fingerprint_after)
         states = await self._record_states(snapshot)
         for diagnostic in snapshot.unsupported_sources:
             self.audit.append(
@@ -102,18 +111,20 @@ class DiscoveryService:
                 await self.device_repository.save(device)
             for state in await self.state_store.all():
                 await self.state_snapshot_repository.save(state)
+            if self.runtime_state_metadata_repository is not None:
+                await self.runtime_state_metadata_repository.save(
+                    self.state_store.export_metadata()
+                )
 
         return DiscoveryResult(tuple(devices), tuple(areas), tuple(states), revision)
 
-    def _inventory_fingerprint(self) -> frozenset[tuple[str, AvailabilityStatus, tuple[str, ...]]]:
-        return frozenset(
-            (
-                device.id,
-                device.availability,
-                tuple(sorted(capability.name for capability in device.capabilities)),
-            )
+    def _inventory_fingerprint(self) -> str:
+        routes = {
+            (device.id, capability.name): self.registry.routes_for(device.id, capability.name)
             for device in self.registry.devices
-        )
+            for capability in device.capabilities
+        }
+        return inventory_fingerprint(self.registry.devices, routes)
 
     async def _record_states(self, snapshot: AdapterSnapshot) -> list[StateSnapshot]:
         received_at = self.clock.now()
@@ -128,13 +139,16 @@ class DiscoveryService:
             status = (
                 StateStatus.CURRENT if raw_state.get("available", True) else StateStatus.UNAVAILABLE
             )
+            observed_at = _source_timestamp(raw_state.get("observed_at"), received_at)
+            source_received_at = _source_timestamp(raw_state.get("received_at"), received_at)
+            effective_received_at = max(received_at, source_received_at, observed_at)
             state = StateSnapshot(
                 device_id=device_id,
                 capability=str(raw_state["capability"]),
                 value=raw_state.get("value"),
                 unit=raw_state.get("unit"),
-                observed_at=received_at,
-                received_at=received_at,
+                observed_at=observed_at,
+                received_at=effective_received_at,
                 status=status,
                 source_ref=SourceRef(
                     adapter_id=source_adapter_id,
@@ -176,3 +190,19 @@ class DiscoveryService:
             await self.state_store.save(state)
             states.append(state)
         return states
+
+
+def _source_timestamp(value: object, fallback: datetime) -> datetime:
+    """Preserve an adapter timestamp when it is valid and timezone-aware."""
+
+    candidate = value
+    if isinstance(candidate, str):
+        try:
+            candidate = datetime.fromisoformat(candidate)
+        except ValueError:
+            return fallback
+    if not isinstance(candidate, datetime):
+        return fallback
+    if candidate.tzinfo is None or candidate.utcoffset() is None:
+        return fallback
+    return candidate.astimezone(UTC)

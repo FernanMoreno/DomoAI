@@ -27,6 +27,7 @@ from domoai.optimizer.providers import (
     EnergyProviderError,
     SolarForecastSeries,
 )
+from domoai.runtime.clock import Clock, SystemClock
 
 OPEN_METEO_BASE_URL = "https://api.open-meteo.com"
 OPEN_METEO_SOURCE_ID = "open_meteo_solar"
@@ -95,6 +96,7 @@ class OpenMeteoHttpClient:
         base_url: str = OPEN_METEO_BASE_URL,
         timeout: float = 10.0,
         transport: httpx.BaseTransport | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -102,6 +104,7 @@ class OpenMeteoHttpClient:
             transport=transport,
             follow_redirects=True,
         )
+        self._clock = clock or SystemClock()
 
     def fetch_forecast(
         self, horizon: Horizon, config: OpenMeteoSolarConfig
@@ -132,7 +135,7 @@ class OpenMeteoHttpClient:
         return OpenMeteoForecastFile(
             payload=payload,
             source_revision=revision,
-            observed_at=datetime.now(UTC),
+            observed_at=self._clock.now(),
         )
 
     def close(self) -> None:

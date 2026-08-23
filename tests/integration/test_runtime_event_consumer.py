@@ -24,7 +24,7 @@ from tests.fixtures.matter_server import event_message, node_snapshot, server_in
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
 
 
-class _StopTest(Exception):
+class _StopTest(BaseException):
     """Sentinel used to deterministically end a `run()` loop under test."""
 
 
@@ -263,6 +263,88 @@ async def test_run_skips_connect_when_already_healthy() -> None:
         await consumer.run(reconnect_delay=0.001)
 
     assert adapter.connect_calls == 0
+
+
+class _HealthRaisesThenStopsAdapter(SimulatedHomeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.health_calls = 0
+
+    async def health(self) -> AdapterHealth:
+        self.health_calls += 1
+        if self.health_calls == 1:
+            raise RuntimeError("health probe failed")
+        raise _StopTest
+
+
+@pytest.mark.asyncio
+async def test_health_exception_is_supervised_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+
+    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    adapter = _HealthRaisesThenStopsAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    with pytest.raises(_StopTest):
+        await consumer.run(reconnect_delay=1.0)
+
+    assert adapter.health_calls == 2
+    assert recorded_delays == [1.0]
+    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert audit.events[-1].event_type == "source_event_stream_unavailable"
+
+
+class _EndsThenStopsAdapter(SimulatedHomeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.subscribe_calls = 0
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(adapter_id=self.adapter_id, connected=True)
+
+    async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
+        self.subscribe_calls += 1
+        if self.subscribe_calls == 1:
+            return
+        raise _StopTest
+        yield  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_clean_stream_end_is_audited_and_reconnected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+
+    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    adapter = _EndsThenStopsAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    with pytest.raises(_StopTest):
+        await consumer.run(reconnect_delay=1.0)
+
+    assert adapter.subscribe_calls == 2
+    assert recorded_delays == [1.0]
+    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert any(event.event_type == "source_event_stream_ended" for event in audit.events)
 
 
 class _AlwaysFailsToConnectAdapter(SimulatedHomeAdapter):

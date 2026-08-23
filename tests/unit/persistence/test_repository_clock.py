@@ -102,6 +102,7 @@ async def test_plan_repository_claim_for_execution_stamps_updated_at_from_the_in
     repository = PlanRepository(database, clock=FIXED)
     plan = Plan(
         id="plan-claim-clock-test",
+        status=PlanStatus.READY,
         commands=[
             Command(
                 id="cmd-1",
@@ -115,7 +116,7 @@ async def test_plan_repository_claim_for_execution_stamps_updated_at_from_the_in
 
     claimed = await repository.claim_for_execution(
         plan.model_copy(update={"status": PlanStatus.EXECUTING}),
-        allowed_statuses=frozenset({PlanStatus.DRAFT}),
+        allowed_statuses=frozenset({PlanStatus.READY}),
     )
 
     assert claimed is True

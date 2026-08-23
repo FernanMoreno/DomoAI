@@ -9,8 +9,12 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, Plan, RecurrenceRule, RiskClass
-from domoai.persistence.repositories import RecurringScheduleRepository, ScheduledPlanRepository
+from domoai.domain.models import Command, Plan, PlanStatus, RecurrenceRule, RiskClass
+from domoai.persistence.repositories import (
+    PlanRepository,
+    RecurringScheduleRepository,
+    ScheduledPlanRepository,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock, FixedClock
 from domoai.runtime.events import AuditLog
@@ -26,6 +30,7 @@ async def _build_scheduler(
     *,
     grace_window: timedelta = timedelta(minutes=15),
     clock: Clock | None = None,
+    durable: bool = False,
 ) -> tuple[SimulatedHomeAdapter, PlanService, Scheduler, ScheduledPlanRepository, AuditLog]:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
@@ -33,9 +38,16 @@ async def _build_scheduler(
     audit = AuditLog()
     await DiscoveryService(adapter, registry, state_store, audit).refresh()
     plan_service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
-    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
     database = SQLiteDatabase(tmp_path / "repo.sqlite3")
     await database.initialize()
+    plan_repository = PlanRepository(database) if durable else None
+    executor = PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        clock=clock,
+        plan_repository=plan_repository,
+    )
     repository = ScheduledPlanRepository(database)
     recurring_repository = RecurringScheduleRepository(database)
     scheduler = Scheduler(
@@ -339,6 +351,64 @@ async def test_pending_schedule_survives_a_fresh_scheduler_instance(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_pending_schedule_with_executing_evidence_becomes_unknown_without_replay(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    adapter, plan_service, scheduler, repository, audit = await _build_scheduler(
+        tmp_path, clock=FixedClock(now), durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan = plan_service.validate(
+        _plan(device_id, plan_id="plan-orphaned-executing", execute_at=now - timedelta(minutes=1))
+    )
+    await scheduler.schedule(plan)
+    assert scheduler.executor.plan_repository is not None
+    await scheduler.executor.plan_repository.save(
+        plan.model_copy(update={"status": PlanStatus.EXECUTING})
+    )
+
+    results = await scheduler.run_due(now=now)
+
+    assert results == [{"plan_id": "plan-orphaned-executing", "outcome": "reconciled"}]
+    assert adapter.calls == []
+    _scheduled_plan, status = await repository.get("plan-orphaned-executing")
+    assert status == "unknown"
+    assert any(event.event_type == "schedule_execution_reconciled" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_recurring_executing_evidence_advances_without_replay(tmp_path) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(
+        tmp_path, clock=FixedClock(now), durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(12, 0), timezone="UTC")
+    due_at = now - timedelta(days=1)
+    schedule_id = "recurring-orphaned-executing"
+    command = _command(device_id, plan_id=schedule_id)
+    await scheduler.recurring_repository.create(schedule_id, [command], rule, due_at)
+    assert scheduler.executor.plan_repository is not None
+    occurrence_id = f"{schedule_id}@{due_at.isoformat()}"
+    await scheduler.executor.plan_repository.save(
+        Plan(id=occurrence_id, commands=[command], status=PlanStatus.EXECUTING)
+    )
+
+    results = await scheduler.run_due_recurring(now=now)
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "reconciled"}]
+    assert adapter.calls == []
+    active = await scheduler.recurring_repository.list_active()
+    assert active[0][3] > due_at
+    assert any(event.event_type == "recurring_occurrence_reconciled" for event in audit.events)
+
+
+@pytest.mark.asyncio
 async def test_cancel_prevents_execution(tmp_path) -> None:
     adapter, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
     device_id = next(
@@ -548,6 +618,201 @@ async def test_run_due_uses_injected_clock_when_no_explicit_now_given(tmp_path) 
 
     assert results == [{"plan_id": plan_id, "outcome": "executed"}]
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_plan_reconciles_before_missed_without_replay(tmp_path) -> None:
+    adapter, plan_service, scheduler, repository, audit = await _build_scheduler(
+        tmp_path, grace_window=timedelta(minutes=1), durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan_id = "reconcile-completed-1"
+    due_at = datetime.now(UTC) - timedelta(minutes=10)
+    validated = plan_service.validate(_plan(device_id, plan_id=plan_id, execute_at=due_at))
+    await scheduler.schedule(validated)
+    await scheduler.executor.execute(validated)
+    physical_calls = len(adapter.calls)
+
+    results = await scheduler.run_due(now=datetime.now(UTC))
+
+    assert results == [{"plan_id": plan_id, "outcome": "reconciled"}]
+    assert len(adapter.calls) == physical_calls
+    _, status = await repository.get(plan_id)
+    assert status == "executed"
+    assert not any(event.event_type == "schedule_missed" for event in audit.events)
+    assert any(event.event_type == "schedule_execution_reconciled" for event in audit.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan_status", "schedule_status", "outcome"),
+    [
+        (PlanStatus.COMPLETED, "executed", "reconciled"),
+        (PlanStatus.FAILED, "failed", "reconciled"),
+        (PlanStatus.PARTIALLY_FAILED, "failed", "reconciled"),
+        (PlanStatus.UNKNOWN, "unknown", "reconciled"),
+        (PlanStatus.CANCELLED, "cancelled", "reconciled"),
+        (PlanStatus.EXECUTING, "unknown", "reconciled"),
+    ],
+)
+async def test_terminal_plan_status_controls_schedule_reconciliation(
+    tmp_path, plan_status: PlanStatus, schedule_status: str | None, outcome: str
+) -> None:
+    adapter, plan_service, scheduler, repository, _audit = await _build_scheduler(
+        tmp_path, durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan_id = f"reconcile-{plan_status.value}"
+    validated = plan_service.validate(
+        _plan(device_id, plan_id=plan_id, execute_at=datetime.now(UTC) - timedelta(minutes=1))
+    )
+    await scheduler.schedule(validated)
+    await scheduler.executor.plan_repository.save(
+        validated.model_copy(update={"status": plan_status})
+    )
+
+    results = await scheduler.run_due()
+
+    assert results == [{"plan_id": plan_id, "outcome": outcome}]
+    assert adapter.calls == []
+    stored = await repository.get(plan_id)
+    assert stored is not None
+    assert stored[1] == schedule_status if schedule_status is not None else stored[1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_schedule_transition_failure_reconciles_without_second_physical_call(
+    tmp_path,
+) -> None:
+    adapter, plan_service, scheduler, repository, _audit = await _build_scheduler(
+        tmp_path, durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan_id = "reconcile-transition-failure-1"
+    validated = plan_service.validate(
+        _plan(device_id, plan_id=plan_id, execute_at=datetime.now(UTC) - timedelta(minutes=1))
+    )
+    await scheduler.schedule(validated)
+    original_mark_executed = repository.mark_executed
+    failed_once = True
+
+    async def fail_before_transition(identifier: str) -> bool:
+        nonlocal failed_once
+        if failed_once:
+            failed_once = False
+            raise RuntimeError("simulated schedule persistence failure")
+        return await original_mark_executed(identifier)
+
+    repository.mark_executed = fail_before_transition  # type: ignore[method-assign]
+    first_results = await scheduler.run_due()
+
+    assert first_results == [{"plan_id": plan_id, "outcome": "reconciled"}]
+    assert len(adapter.calls) == 1
+    assert (await repository.get(plan_id))[1] == "executed"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_failure_does_not_mark_terminal_plan_missed(tmp_path) -> None:
+    _adapter, plan_service, scheduler, repository, _audit = await _build_scheduler(
+        tmp_path, grace_window=timedelta(minutes=1), durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan_id = "reconcile-write-failure-1"
+    due_at = datetime.now(UTC) - timedelta(minutes=10)
+    validated = plan_service.validate(_plan(device_id, plan_id=plan_id, execute_at=due_at))
+    await scheduler.schedule(validated)
+    await scheduler.executor.plan_repository.save(
+        validated.model_copy(update={"status": PlanStatus.COMPLETED})
+    )
+
+    async def fail_reconciliation(identifier: str, status: str) -> bool:
+        raise RuntimeError(f"simulated reconciliation failure for {identifier}:{status}")
+
+    repository.reconcile_terminal = fail_reconciliation  # type: ignore[method-assign]
+
+    results = await scheduler.run_due(now=datetime.now(UTC))
+
+    assert results == [{"plan_id": plan_id, "outcome": "error"}]
+    assert (await repository.get(plan_id))[1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_recurring_cursor_failure_reconciles_without_replay(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _audit = await _build_scheduler(
+        tmp_path, durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    schedule_id = "reconcile-recurring-1"
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    await scheduler.recurring_repository.create(
+        schedule_id, [_command(device_id, plan_id=schedule_id)], rule, due_at
+    )
+    original_advance = scheduler.recurring_repository.advance
+    failed_once = True
+
+    async def fail_before_advance(identifier: str, next_execute_at: datetime) -> None:
+        nonlocal failed_once
+        if failed_once:
+            failed_once = False
+            raise RuntimeError("simulated recurring persistence failure")
+        await original_advance(identifier, next_execute_at)
+
+    scheduler.recurring_repository.advance = fail_before_advance  # type: ignore[method-assign]
+    first_results = await scheduler.run_due_recurring()
+    second_results = await scheduler.run_due_recurring(now=due_at + timedelta(seconds=1))
+
+    assert first_results == [{"schedule_id": schedule_id, "outcome": "error"}]
+    assert second_results == [{"schedule_id": schedule_id, "outcome": "reconciled"}]
+    assert len(adapter.calls) == 1
+    active = await scheduler.list_recurring()
+    assert active[0][3] > due_at + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_recurring_cursor_failure_does_not_abandon_other_schedule(tmp_path) -> None:
+    adapter, plan_service, scheduler, _repository, _audit = await _build_scheduler(
+        tmp_path, durable=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    for schedule_id in ("reconcile-recurring-a", "reconcile-recurring-b"):
+        await scheduler.recurring_repository.create(
+            schedule_id, [_command(device_id, plan_id=schedule_id)], rule, due_at
+        )
+    original_advance = scheduler.recurring_repository.advance
+    failed_once = True
+
+    async def fail_first_schedule(identifier: str, next_execute_at: datetime) -> None:
+        nonlocal failed_once
+        if identifier == "reconcile-recurring-a" and failed_once:
+            failed_once = False
+            raise RuntimeError("simulated recurring persistence failure")
+        await original_advance(identifier, next_execute_at)
+
+    scheduler.recurring_repository.advance = fail_first_schedule  # type: ignore[method-assign]
+
+    results = await scheduler.run_due_recurring()
+
+    outcomes = {entry["schedule_id"]: entry["outcome"] for entry in results}
+    assert outcomes == {
+        "reconcile-recurring-a": "error",
+        "reconcile-recurring-b": "executed",
+    }
+    assert len(adapter.calls) == 2
 
 
 @pytest.mark.asyncio

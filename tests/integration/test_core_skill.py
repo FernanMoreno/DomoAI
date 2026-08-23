@@ -18,11 +18,11 @@ def test_energy_skill_gathers_context_optimizes_and_pauses_before_execution() ->
         "validate_plan",
         "explain_solution",
         "operator_approval",
-        "execute_plan",
+        "commit_or_schedule_bundle",
     )
     assert procedure.approval_required is True
     assert procedure.operations.index("operator_approval") < procedure.operations.index(
-        "execute_plan"
+        "commit_or_schedule_bundle"
     )
     assert procedure.bindings[0].provider == "mcp"
-    assert procedure.bindings[-1].tool == "execute_plan"
+    assert procedure.bindings[-1].tool == "commit_or_schedule_bundle"

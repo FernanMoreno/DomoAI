@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from domoai.runtime.execution_context import ExecutionContext
+
 
 @dataclass(frozen=True)
 class MqttMessage:
@@ -22,6 +24,7 @@ class MqttPublish:
     topic: str
     payload: bytes
     retained: bool = False
+    execution_context: ExecutionContext | None = None
 
 
 class MqttTransport(Protocol):
@@ -31,7 +34,14 @@ class MqttTransport(Protocol):
 
     async def subscribe(self, topic_filter: str) -> None: ...
 
-    async def publish(self, topic: str, payload: bytes, *, retained: bool = False) -> None: ...
+    async def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        retained: bool = False,
+        execution_context: ExecutionContext | None = None,
+    ) -> None: ...
 
     async def receive(self, timeout: float | None = None) -> MqttMessage | None: ...
 
@@ -59,10 +69,17 @@ class InMemoryMqttTransport:
             raise ConnectionError("MQTT transport is not connected")
         self.subscriptions.append(topic_filter)
 
-    async def publish(self, topic: str, payload: bytes, *, retained: bool = False) -> None:
+    async def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        retained: bool = False,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
         if not self.connected:
             raise ConnectionError("MQTT transport is not connected")
-        self.published.append(MqttPublish(topic, payload, retained))
+        self.published.append(MqttPublish(topic, payload, retained, execution_context))
 
     async def receive(self, timeout: float | None = None) -> MqttMessage | None:
         if self.incoming:
@@ -113,6 +130,7 @@ class AiomqttTransport:
         self.tls_insecure = tls_insecure
         self._client: Any = None
         self._messages: AsyncIterator[Any] | None = None
+        self.last_publish_context: ExecutionContext | None = None
 
     def _build_tls_context(self) -> ssl.SSLContext:
         context = ssl.create_default_context()
@@ -163,10 +181,18 @@ class AiomqttTransport:
         except Exception as error:
             raise ConnectionError("MQTT subscription failed") from error
 
-    async def publish(self, topic: str, payload: bytes, *, retained: bool = False) -> None:
+    async def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        retained: bool = False,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
         if self._client is None:
             raise ConnectionError("MQTT transport is not connected")
         try:
+            self.last_publish_context = execution_context
             await self._client.publish(topic, payload=payload, retain=retained)
         except Exception as error:
             raise ConnectionError("MQTT publish failed") from error

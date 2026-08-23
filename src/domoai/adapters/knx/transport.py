@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Protocol
+
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 KnxScalar = bool | int | float
 
@@ -24,6 +27,7 @@ class KnxWrite:
     group_address: str
     dpt: str
     value: KnxScalar
+    execution_context: ExecutionContext | None = None
 
 
 class KnxTransport(Protocol):
@@ -33,7 +37,14 @@ class KnxTransport(Protocol):
 
     async def read_group(self, group_address: str, dpt: str) -> KnxGroupValue | None: ...
 
-    async def write_group(self, group_address: str, dpt: str, value: KnxScalar) -> None: ...
+    async def write_group(
+        self,
+        group_address: str,
+        dpt: str,
+        value: KnxScalar,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> None: ...
 
     async def receive(self, timeout: float | None = None) -> KnxGroupValue | None: ...
 
@@ -43,8 +54,11 @@ class KnxTransport(Protocol):
 class InMemoryKnxTransport:
     """Deterministic KNX transport for contract and integration tests."""
 
-    def __init__(self, incoming: Sequence[KnxGroupValue] | None = None) -> None:
+    def __init__(
+        self, incoming: Sequence[KnxGroupValue] | None = None, *, clock: Clock | None = None
+    ) -> None:
         self.incoming = list(incoming or [])
+        self._clock = clock or SystemClock()
         self.reads: list[tuple[str, str]] = []
         self.writes: list[KnxWrite] = []
         self.connected = False
@@ -64,14 +78,21 @@ class InMemoryKnxTransport:
         self.reads.append((group_address, dpt))
         return self._values.get((group_address, dpt))
 
-    async def write_group(self, group_address: str, dpt: str, value: KnxScalar) -> None:
+    async def write_group(
+        self,
+        group_address: str,
+        dpt: str,
+        value: KnxScalar,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
         self._require_connected()
-        self.writes.append(KnxWrite(group_address, dpt, value))
+        self.writes.append(KnxWrite(group_address, dpt, value, execution_context))
         self._values[(group_address, dpt)] = KnxGroupValue(
             group_address=group_address,
             dpt=dpt,
             value=value,
-            observed_at=datetime.now(UTC),
+            observed_at=self._clock.now(),
         )
         state_key = self.write_state_map.get((group_address, dpt))
         if state_key is not None:
@@ -79,7 +100,7 @@ class InMemoryKnxTransport:
                 group_address=state_key[0],
                 dpt=state_key[1],
                 value=value,
-                observed_at=datetime.now(UTC),
+                observed_at=self._clock.now(),
             )
 
     async def receive(self, timeout: float | None = None) -> KnxGroupValue | None:
@@ -127,10 +148,12 @@ class XknxTransport:
         timeout: float = 5.0,
         gateway_port: int = 3671,
         group_dpts: dict[str, str] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.gateway_host = gateway_host
         self.timeout = timeout
         self.gateway_port = gateway_port
+        self._clock = clock or SystemClock()
         self.group_dpts = dict(group_dpts or {})
         self.writes: list[KnxWrite] = []
         self._xknx: Any = None
@@ -196,9 +219,16 @@ class XknxTransport:
             raise ConnectionError("KNX group read failed") from error
         if value is None:
             return None
-        return KnxGroupValue(group_address, dpt, _enum_value(value), datetime.now(UTC))
+        return KnxGroupValue(group_address, dpt, _enum_value(value), self._clock.now())
 
-    async def write_group(self, group_address: str, dpt: str, value: KnxScalar) -> None:
+    async def write_group(
+        self,
+        group_address: str,
+        dpt: str,
+        value: KnxScalar,
+        *,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
         xknx = self._require_xknx()
         try:
             from xknx.tools import group_value_write
@@ -207,7 +237,7 @@ class XknxTransport:
             await asyncio.wait_for(xknx.join(), self.timeout)
         except (ConnectionError, OSError, TimeoutError, ValueError) as error:
             raise ConnectionError("KNX group write failed") from error
-        self.writes.append(KnxWrite(group_address, dpt, value))
+        self.writes.append(KnxWrite(group_address, dpt, value, execution_context))
 
     async def receive(self, timeout: float | None = None) -> KnxGroupValue | None:
         self._require_xknx()
@@ -233,7 +263,7 @@ class XknxTransport:
                 group_address=str(address),
                 dpt=dpt,
                 value=_enum_value(decoded.value),
-                observed_at=datetime.now(UTC),
+                observed_at=self._clock.now(),
             )
         )
 

@@ -17,11 +17,17 @@ from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_serve
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.persistence.repositories import (
     AuditEventRepository,
+    BundleCommitRepository,
     PlanRepository,
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
-from domoai.runtime.approval_store import ApprovalStore
+from domoai.runtime.approval_store import ApprovalStore, OperatorPrincipal
+from domoai.runtime.bundle_commit import (
+    BundleCommitRequestMember,
+    BundleCommitService,
+    bundle_approval_digest,
+)
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -76,15 +82,30 @@ async def build_context_with_scheduler(tmp_path) -> DomoticsMcpContext:
     facade = DomoticsFacade(plan_service, executor)
     scheduled_plan_repository = ScheduledPlanRepository(database)
     scheduler = Scheduler(executor, scheduled_plan_repository, audit)
-    return DomoticsMcpContext(
+    approval_store = ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=True)
+    plans: dict[str, Any] = {}
+    context = DomoticsMcpContext(
         discovery=discovery,
         state_service=StateService(state_store),
         facade=facade,
         registry=registry,
         policies=[],
         energy_context_provider=StaticEnergyContextProvider(energy_context_for()),
+        approval_store=approval_store,
+        plan_repository=plan_repository,
+        plans=plans,
         scheduler=scheduler,
     )
+    context.bundle_commit_service = BundleCommitService(
+        facade=facade,
+        plans=plans,
+        approval_store=approval_store,
+        bundle_repository=BundleCommitRepository(database),
+        scheduled_repository=scheduled_plan_repository,
+        audit=audit,
+        plan_repository=plan_repository,
+    )
+    return context
 
 
 async def build_context_with_audit_repository(tmp_path) -> DomoticsMcpContext:
@@ -358,6 +379,22 @@ async def test_list_audit_events_filters_through_to_the_repository(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_list_audit_events_rejects_naive_since(tmp_path) -> None:
+    context = await build_context_with_audit_repository(tmp_path)
+    server = create_domotics_server(context)
+
+    result = structured(
+        await server.call_tool(
+            "list_audit_events",
+            {"since": "2026-08-21T10:00:00"},
+        )
+    )
+
+    assert result["error"]["code"] == "validation_error"
+    assert "events" not in result
+
+
+@pytest.mark.asyncio
 async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> None:
     context = await build_composed_context()
     server = create_domotics_server(context)
@@ -478,7 +515,7 @@ async def build_confirmation_required_context() -> DomoticsMcpContext:
         facade=facade,
         registry=registry,
         policies=policies,
-        approval_store=ApprovalStore(operator_token=OPERATOR_TOKEN),
+        approval_store=ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=True),
     )
 
 
@@ -606,6 +643,61 @@ async def test_request_approval_rejects_agent_self_approval_without_operator_tok
 
 
 @pytest.mark.asyncio
+async def test_request_approval_uses_server_principal_not_caller_identity() -> None:
+    context = await build_confirmation_required_context()
+    principal = OperatorPrincipal(
+        id="human-42", authentication_context="oidc", session_id="session-7"
+    )
+    context.operator_principal_provider = lambda: principal
+    context.approval_store = ApprovalStore(
+        operator_token=OPERATOR_TOKEN, allow_legacy_token=False
+    )
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    approval = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "caller-forged-name",
+                "operator_token": "caller-forged-token",
+            },
+        )
+    )
+    grant = context.approval_store.consume(
+        approval["approval_id"], context.plans[validated["plan"]["id"]]
+    )
+    assert grant.approved_by == "human-42"
+    assert grant.authentication_context == "oidc"
+    assert grant.session_id == "session-7"
+
+
+@pytest.mark.asyncio
+async def test_legacy_mcp_approval_requires_explicit_compatibility_mode() -> None:
+    context = await build_confirmation_required_context()
+    context.approval_store = ApprovalStore(
+        operator_token=OPERATOR_TOKEN, allow_legacy_token=False
+    )
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    result = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "operator",
+                "operator_token": OPERATOR_TOKEN,
+            },
+        )
+    )
+    assert result["error"]["code"] == "operator_authentication_failed"
+
+
+@pytest.mark.asyncio
 async def test_execute_plan_succeeds_after_request_approval() -> None:
     context = await build_confirmation_required_context()
     server = create_domotics_server(context)
@@ -727,6 +819,84 @@ async def test_schedule_plan_defers_execution_until_due(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_validated_plan_survives_mcp_runtime_restart(tmp_path) -> None:
+    first_context = await build_context_with_scheduler(tmp_path)
+    first_server = create_domotics_server(first_context)
+    validated = await _validated_safe_plan(first_server, first_context)
+
+    second_context = await build_context_with_scheduler(tmp_path)
+    second_server = create_domotics_server(second_context)
+    result = structured(
+        await second_server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+            },
+        )
+    )
+
+    assert result["plan_id"] == validated["plan"]["id"]
+    assert result["outcomes"]
+    assert cast(SimulatedHomeAdapter, second_context.facade.executor.adapter).calls
+
+
+@pytest.mark.asyncio
+async def test_schedule_plan_rejects_naive_execute_at(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    validated = await _validated_safe_plan(server, context)
+
+    result = structured(
+        await server.call_tool(
+            "schedule_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "execute_at": "2026-08-22T03:00:00",
+            },
+        )
+    )
+
+    assert result["error"]["code"] == "validation_error"
+    assert await context.scheduler.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_bundle_commit_tool_returns_durable_aggregate_and_is_idempotent(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    tools = [tool.name for tool in await server.list_tools()]
+    assert "commit_or_schedule_bundle" in tools
+    validated = await _validated_safe_plan(server, context)
+    member = BundleCommitRequestMember(
+        plan_id=validated["plan"]["id"],
+        validation_digest=validated["validation"]["digest"],
+    )
+    digest = bundle_approval_digest("contract-bundle-1", [member])
+    arguments = {
+        "bundle_digest": digest,
+        "scenario_id": "contract-bundle-1",
+        "members": [member.model_dump(mode="json")],
+    }
+
+    first = structured(await server.call_tool("commit_or_schedule_bundle", arguments))
+    second = structured(await server.call_tool("commit_or_schedule_bundle", arguments))
+
+    assert first["status"] == "completed"
+    assert first["bundle_commit_id"] == second["bundle_commit_id"]
+    assert first["members"] == [
+        {
+            "plan_id": member.plan_id,
+            "status": "executed",
+            "execution_status": "confirmed_success",
+            "error_code": None,
+        }
+    ]
+    assert len(cast(SimulatedHomeAdapter, context.facade.executor.adapter).calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_scheduled_plan_removes_it_from_pending(tmp_path) -> None:
     context = await build_context_with_scheduler(tmp_path)
     server = create_domotics_server(context)
@@ -753,6 +923,9 @@ async def test_cancel_scheduled_plan_removes_it_from_pending(tmp_path) -> None:
         await server.call_tool("cancel_scheduled_plan", {"plan_id": validated["plan"]["id"]})
     )
     assert second_attempt["cancelled"] is False
+    persisted = await context.plan_repository.get(validated["plan"]["id"])
+    assert persisted is not None
+    assert persisted.status.value == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -781,6 +954,36 @@ async def test_reschedule_plan_changes_pending_execute_at(tmp_path) -> None:
 
     pending = structured(await server.call_tool("list_scheduled_plans", {}))
     assert pending["plans"][0]["execute_at"] == new_time.isoformat()
+    persisted = await context.plan_repository.get(validated["plan"]["id"])
+    assert persisted is not None
+    assert persisted.execute_at == new_time
+
+
+@pytest.mark.asyncio
+async def test_reschedule_plan_rejects_naive_execute_at_and_preserves_schedule(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    validated = await _validated_safe_plan(server, context)
+    original_time = datetime.now(UTC) + timedelta(hours=1)
+    await server.call_tool(
+        "schedule_plan",
+        {
+            "plan_id": validated["plan"]["id"],
+            "validation_digest": validated["validation"]["digest"],
+            "execute_at": original_time.isoformat(),
+        },
+    )
+
+    result = structured(
+        await server.call_tool(
+            "reschedule_plan",
+            {"plan_id": validated["plan"]["id"], "execute_at": "2026-08-22T04:00:00"},
+        )
+    )
+
+    assert result["error"]["code"] == "validation_error"
+    pending = structured(await server.call_tool("list_scheduled_plans", {}))
+    assert pending["plans"][0]["execute_at"] == original_time.isoformat()
 
 
 @pytest.mark.asyncio

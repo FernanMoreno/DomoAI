@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 from domoai.adapters.zigbee2mqtt.mapper import canonical_id, map_definition, map_states
@@ -24,6 +23,8 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class Zigbee2MqttAdapter:
@@ -35,10 +36,12 @@ class Zigbee2MqttAdapter:
         *,
         base_topic: str = "zigbee2mqtt",
         discovery_timeout: float = 5.0,
+        clock: Clock | None = None,
     ) -> None:
         self.transport = transport
         self.base_topic = base_topic.strip("/")
         self.discovery_timeout = discovery_timeout
+        self._clock = clock or SystemClock()
         self._connected = False
         self._definitions: dict[str, dict[str, Any]] = {}
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
@@ -79,7 +82,7 @@ class Zigbee2MqttAdapter:
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         self._require_connected()
         wanted = {source_ref.external_id for source_ref in source_refs}
-        now = datetime.now(UTC)
+        now = self._clock.now()
         snapshots: list[StateSnapshot] = []
         for (friendly_name, capability), state in self._states.items():
             if friendly_name not in wanted:
@@ -103,14 +106,21 @@ class Zigbee2MqttAdapter:
             )
         return snapshots
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         self._require_connected()
         friendly_name = self._friendly_for_device(command.device_id)
         if friendly_name is None:
             return AdapterExecutionAck(accepted=False, message="Unknown Zigbee2MQTT device")
-        return await self.execute_source(command, friendly_name)
+        return await self.execute_source(command, friendly_name, execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         self._require_connected()
         friendly_name = source_entity_id
         if friendly_name not in self._definitions:
@@ -127,6 +137,7 @@ class Zigbee2MqttAdapter:
             await self.transport.publish(
                 f"{self.base_topic}/{friendly_name}/set",
                 json.dumps(payload, separators=(",", ":")).encode(),
+                execution_context=execution_context,
             )
         except (ConnectionError, OSError, TimeoutError) as error:
             raise ConnectionError(f"Zigbee2MQTT publish failed: {error}") from error
@@ -238,7 +249,7 @@ class Zigbee2MqttAdapter:
             return self._diagnostic(message.topic, "device state must be an object")
         available = self._availability.get(friendly_name, self._bridge_online)
         states, diagnostics = map_states(friendly_name, payload, available=available)
-        received_at = datetime.now(UTC)
+        received_at = self._clock.now()
         for state in states:
             state["received_at"] = received_at
             self._states[(friendly_name, state["capability"])] = state

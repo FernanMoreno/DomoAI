@@ -107,6 +107,145 @@ seleccionado por `DOMOAI_HOME_ASSISTANT_MAPPING_PATH`; no se infieren por nombre
 El bridge mantiene las rutas por entidad para que un dispositivo físico con
 varias entidades conserve comandos y `SourceRef` exactos.
 
+Un binding de `battery.capacity` debe declarar además una atestación nominal
+estructurada (`vendor_documentation` o `installer_attestation`, referencia,
+modelo, attester y timestamp). El provider la conserva en la medición
+canónica; el bridge de energía rechaza capacidad medida sin esa provenance.
+La atestación es auditable pero no criptográfica: no se descargan URLs ni se
+verifican claims durante el runtime, y nunca concede autorización de escritura.
+
+Para una composición despachable, el host debe suministrar además una
+`NominalCapacityTrustPolicy` server-owned con coincidencias exactas para el
+tipo de evidencia, el attester y la referencia revisada. El SDK no puede
+derivar esa policy de texto del proveedor ni de una entidad descubierta.
+`StateStoreBatteryProvider` la aplica únicamente al consumo de capacidad
+`provider_measurement` por un perfil con actuador; un perfil analysis-only y
+la capacidad estática `provider_config` conservan sus rutas explícitas sin
+convertirse por ello en autorización física. Esta policy tampoco es firma
+criptográfica ni activa wiring automático en `build_runtime`.
+
+La composición física debe utilizar el agregado tipado
+`DispatchableBatteryBinding`: enlaza provider/device, `BatteryProfile`,
+capacidad, actuador, feedback y la ruta canónica de reconciliación SOC. El
+host lo entrega explícitamente a
+`StateStoreBatteryProvider.from_binding()`; el SDK no crea ese binding a
+partir de nombres, áreas o entidades descubiertas. La disponibilidad y
+unicidad de las rutas continúan bajo `DeviceRegistry` y la validación de
+escenario.
+
+### Rutas HA explícitas para batería despachable (Spec 109)
+
+La configuración v1 puede declarar `battery_dispatch_bindings` como un mapa
+credential-free de rutas estáticas. Cada binding fija el `device_id` de
+Home Assistant, las entidades exactas de `battery.soc` (`%`),
+`battery.power` (`kW`) y `battery.capacity`, y tres rutas de comando
+`charge`/`discharge`/`stop` con su `entity_id` y `provider_command`.
+
+La carga exige que la entidad de capacidad ya tenga un
+`battery_capacity_bindings` compatible y que su `device_id` coincida. Se
+rechazan campos desconocidos, IDs que no cumplen el formato de entidad HA,
+comandos vacíos/duplicados y referencias cruzadas. No se aceptan tokens,
+payloads de servicio ni aliases por nombre, área o modelo.
+
+Este binding solo declara el lado HA del futuro wiring. No comprueba que las
+entidades existan en una instancia viva, que sean escribibles, que exista una
+ruta única en `DeviceRegistry` o que el readback de potencia/SOC converja.
+`build_runtime` lo parsea como configuración inerte: no instala
+`StateStoreBatteryProvider`, no crea `BatteryActuator` y no llama servicios.
+La composición posterior debe convertirlo explícitamente al contrato
+canónico de Spec 108 después de discovery, policy, safety y readback.
+
+Contrato detallado: [`specs/109-home-assistant-battery-route-binding/contracts/home-assistant-battery-route-binding.md`](../specs/109-home-assistant-battery-route-binding/contracts/home-assistant-battery-route-binding.md).
+
+### Validación read-only de rutas HA (Spec 110)
+
+Después de obtener un snapshot mediante `await provider.snapshot()`, el host
+puede ejecutar `provider.validate_battery_dispatch_routes(snapshot)`. La
+validación comprueba, sin refrescar ni escribir, que las entidades declaradas
+por Spec 109 pertenecen al `device_id` exacto, que SOC/potencia/capacidad son
+actuales, numéricas y tienen las unidades/semánticas esperadas, que la
+capacidad conserva `device_class=energy_storage` y que charge/discharge/stop
+apuntan a capabilities escribibles que exponen los comandos declarados.
+
+Además, cada comando debe ser traducible por el perfil de escritura existente
+del provider. Esto evita aceptar una capability `writable` que el provider
+todavía no puede convertir en una acción HA. La comprobación usa únicamente el
+traductor puro local: no consulta el registro de servicios ni llama a HA. Las
+rutas con parámetros (`set_position`, `set_brightness` o `set_temperature`)
+requieren un contrato explícito de parámetros y no pasan este binding v1 sin
+ese valor.
+
+El validator no prueba comandos llamando a Home Assistant, no elige entidades
+alternativas y no crea `BatteryActuator`, `EnergyContext` ni
+`StateStoreBatteryProvider`. Un éxito es únicamente un gate de disponibilidad
+de ruta; policy, aprobación, Safety Kernel, preconditions y readback siguen
+siendo gates posteriores.
+
+Contrato detallado: [`specs/110-home-assistant-battery-route-validation/contracts/home-assistant-battery-route-validation.md`](../specs/110-home-assistant-battery-route-validation/contracts/home-assistant-battery-route-validation.md).
+
+La Spec 111 añade el gate de traducibilidad. El binding de batería acepta en
+esta fase únicamente rutas cuyo comando ya tenga todos sus parámetros en el
+contrato; una capability declarada pero no traducible falla cerrado con
+`HomeAssistantMappingConfigurationError`.
+
+### Rutas numéricas y smoke HIL del inversor (Spec 114)
+
+Una ruta de batería puede declarar explícitamente `number.set_value` y una
+transformación `as_is`, `negate` o `zero`. `as_is` transmite el valor kW
+recibido, `negate` transmite su negación y `zero` transmite cero para parada.
+El provider proyecta la capability de comando `battery_control` en las
+entidades configuradas, sin crear telemetría. Para rutas numéricas exige
+unidad `kW`, límites finitos y que el dispositivo acepte cero. Una ruta legacy
+de cover/switch que reciba un valor numérico se rechaza antes de llamar a
+Home Assistant; nunca se descarta silenciosamente el setpoint.
+
+El test `test_home_assistant_inverter_hil_power_and_soc_converge` es un smoke
+físico opt-in. Requiere URL/token, mapping, perfil/evidencia, ID canónico,
+binding, dirección, potencia acotada, token de operador y la confirmación
+literal `I_UNDERSTAND_REAL_BATTERY_HIL`. Ejecuta un único probe aprobado,
+lee potencia y SOC con lecturas nuevas hasta obtener dos observaciones
+estables y siempre intenta `stop` en `finally`. El laboratorio virtual no
+certifica este escenario y la suite normal lo omite.
+
+### Composición explícita HA → binding canónico (Spec 112)
+
+El host puede convertir una declaración HA validada en el agregado canónico
+mediante `compose_home_assistant_dispatchable_battery_binding(...)`. La función
+recibe el provider, el `AdapterSnapshot` ya obtenido, el ID del binding, el
+`canonical_device_id` resuelto por el `DeviceRegistry`, un `BatteryProfile`
+server-owned, `BatteryCapacityEvidence` y, cuando procede, la
+`NominalCapacityTrustPolicy`.
+
+Antes de construir el agregado reutiliza la validación de rutas y comprueba que
+los tres comandos del `BatteryActuator`, su dispositivo, feedback
+`battery.power`/`kW`, reconciliación `battery.soc`, evidencia de capacidad y
+capability writable común coinciden con el documento HA. La ambigüedad o
+cualquier mismatch falla cerrado.
+
+El `device_id` del resultado es el ID canónico del runtime, no el `device_id`
+físico de Home Assistant. El binding HA conserva la identidad de fuente para
+validar las entidades, mientras `StateStore`/`Plan` usan el ID canónico. El
+resultado es únicamente un `DispatchableBatteryBinding`. La función no
+instala `StateStoreBatteryProvider`, no modifica `build_runtime`, no persiste,
+no refresca Home Assistant y no llama servicios. El host debe decidir
+explícitamente cuándo pasar el agregado a
+`StateStoreBatteryProvider.from_binding()` después de sus gates de registry,
+policy, safety y readback.
+
+### Instalación explícita en el runtime (Spec 113)
+
+Una vez completadas esas gates, un host confiable puede entregar el agregado a
+`build_runtime` mediante `dispatchable_battery_binding=...`. El composition
+root crea el `StateStoreBatteryProvider` usando el `StateStore` de ese runtime
+y lo pasa al `ComposedEnergyContextProvider` existente. La construcción es
+inercial: no refresca Home Assistant, no llama servicios y no escribe hardware.
+
+Si no se entrega el binding, el runtime conserva el comportamiento previo sin
+batería. Si se entrega con `energy_live=False`, falla cerrado antes de abrir
+SQLite o conectar el adapter. La presencia de
+`battery_dispatch_bindings` en el mapping HA por sí sola nunca activa este
+wiring.
+
 ### Perfil de escritura Home Assistant
 
 `HomeAssistantProvider` traduce comandos canónicos a servicios REST de Home
@@ -314,6 +453,14 @@ idempotencia. Nunca ejecuta commissioning, pairing, firmware, comandos
 vendor-specific ni acciones restringidas. La guía completa está en esta
 documentación y el contrato serializable en
 [`schemas/v1/adapter-manifest.schema.json`](../schemas/v1/adapter-manifest.schema.json).
+
+Las implementaciones pueden aceptar el `ExecutionContext` opcional como
+segundo argumento de `execute()`. El runtime siempre lo proporciona y el
+adapter debe reenviarlo a su provider/transport para conservar
+`plan_id`, `execution_attempt_id` y `adapter_request_id`. Las llamadas directas
+sin contexto siguen siendo válidas durante la migración; el harness de
+conformance ejercita la ruta context-aware para detectar adapters que aún no
+pueden participar en correlación end-to-end.
 
 Los smoke tests live siguen siendo opt-in: necesitan gateway, mapping,
 credenciales o servicios reales según el protocolo.

@@ -36,10 +36,12 @@ class DeviceRegistry:
     def load_persisted(self, devices: list[Device]) -> None:
         """Restore a readable-but-not-yet-executable inventory from persistence.
 
-        Only ``_devices`` and ``_source_entity_ids`` are populated; routes,
-        identity mappings and source-device mappings are rebuilt only by a
-        live ``apply_snapshot`` this session, so a restored device cannot be
-        resolved for execution until the runtime has reconfirmed it.
+        ``_source_entity_ids`` is restored as a durable identity anchor. Routes
+        and source-device mappings are rebuilt only by a live ``apply_snapshot``
+        this session, so a restored device cannot be resolved for execution
+        until the runtime has reconfirmed it. Persisted canonical IDs are also
+        reserved so a replacement source with the same friendly-name fallback
+        cannot silently merge into the old device during rehydration.
         """
 
         for device in devices:
@@ -234,11 +236,17 @@ class DeviceRegistry:
             external_type=str(entity.get("domain") or "unknown"),
         )
         existing = self._devices.get(canonical_id)
-        merged_capabilities = self._merge_capabilities(existing, capabilities, canonical_id)
+        same_source = existing is not None and any(
+            ref.adapter_id == source_ref.adapter_id and ref.external_id == source_ref.external_id
+            for ref in existing.source_refs
+        )
+        merged_capabilities = self._merge_capabilities(
+            existing, capabilities, canonical_id, same_source=same_source
+        )
         source_refs = self._merge_source_refs(existing, source_ref)
         source_protocols = {ref.adapter_id for ref in source_refs}
         semantic_type = DeviceType(str(entity.get("semantic_type", "unsupported")))
-        if existing is not None and existing.type is not semantic_type:
+        if existing is not None and existing.type is not semantic_type and not same_source:
             self._diagnostics.append(
                 {
                     "kind": "canonical_type_conflict",
@@ -247,19 +255,19 @@ class DeviceRegistry:
                 }
             )
             semantic_type = existing.type
+        if same_source:
+            area_id = str(entity.get("area_id")) if entity.get("area_id") else None
+        elif existing is not None and existing.area_id is not None:
+            area_id = existing.area_id
+        else:
+            area_id = str(entity.get("area_id")) if entity.get("area_id") else None
         device = Device(
             id=canonical_id,
             type=semantic_type,
             name=(
                 existing.name if existing is not None else str(entity.get("name") or canonical_id)
             ),
-            area_id=(
-                existing.area_id
-                if existing is not None and existing.area_id is not None
-                else str(entity.get("area_id"))
-                if entity.get("area_id")
-                else None
-            ),
+            area_id=area_id,
             manufacturer=(
                 existing.manufacturer
                 if existing is not None and existing.manufacturer is not None
@@ -299,7 +307,12 @@ class DeviceRegistry:
             )
             routes = self._routes.setdefault((canonical_id, capability.name), [])
             existing_route = next(
-                (index for index, item in enumerate(routes) if item.source_ref == route.source_ref),
+                (
+                    index
+                    for index, item in enumerate(routes)
+                    if item.source_ref.adapter_id == route.source_ref.adapter_id
+                    and item.source_ref.external_id == route.source_ref.external_id
+                ),
                 None,
             )
             if existing_route is None:
@@ -330,12 +343,18 @@ class DeviceRegistry:
             self._devices[canonical_id] = device.model_copy(update={"availability": availability})
 
     def _canonical_id_for(self, identity: SourceIdentity) -> str:
+        persisted = self._source_entity_ids.get(
+            (identity.adapter_id, identity.source_entity_id)
+        )
+        if persisted is not None:
+            self._identity_to_canonical[identity.identity_key] = persisted
+            return persisted
         existing = self._identity_to_canonical.get(identity.identity_key)
         if existing is not None:
             return existing
         canonical_id = identity.explicit_canonical_id or identity.local_canonical_id
         if identity.explicit_canonical_id is None:
-            claimed_ids = {
+            claimed_ids = set(self._devices) | {
                 candidate_id
                 for key, candidate_id in self._identity_to_canonical.items()
                 if key != identity.identity_key
@@ -354,6 +373,8 @@ class DeviceRegistry:
         existing: Device | None,
         capabilities: list[Capability],
         canonical_id: str,
+        *,
+        same_source: bool,
     ) -> list[Capability]:
         merged = {
             capability.name: capability
@@ -361,7 +382,7 @@ class DeviceRegistry:
         }
         for capability in capabilities:
             previous = merged.get(capability.name)
-            if previous is not None and previous != capability:
+            if previous is not None and previous != capability and not same_source:
                 self._diagnostics.append(
                     {
                         "kind": "capability_metadata_conflict",
@@ -377,9 +398,12 @@ class DeviceRegistry:
     @staticmethod
     def _merge_source_refs(existing: Device | None, source_ref: SourceRef) -> list[SourceRef]:
         refs = list(existing.source_refs if existing else [])
-        if not any(
-            ref.adapter_id == source_ref.adapter_id and ref.external_id == source_ref.external_id
-            for ref in refs
-        ):
-            refs.append(source_ref)
+        for index, ref in enumerate(refs):
+            if (
+                ref.adapter_id == source_ref.adapter_id
+                and ref.external_id == source_ref.external_id
+            ):
+                refs[index] = source_ref
+                return refs
+        refs.append(source_ref)
         return refs

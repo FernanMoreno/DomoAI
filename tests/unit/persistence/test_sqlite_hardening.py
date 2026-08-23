@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -109,11 +109,11 @@ async def test_interrupted_migration_recovers_fully_on_restart(tmp_path: Path) -
         "UPDATE widgets SET status = 'backfilled';\n"
     )
 
-    interrupted = SQLiteDatabase(db_path)
-    with patch("domoai.persistence.sqlite.datetime") as mock_datetime:
-        mock_datetime.now.side_effect = RuntimeError("simulated process crash mid-migration")
-        with pytest.raises(RuntimeError, match="simulated process crash"):
-            await interrupted.initialize(migrations_dir=migrations_dir)
+    failing_clock = Mock()
+    failing_clock.now.side_effect = RuntimeError("simulated process crash mid-migration")
+    interrupted = SQLiteDatabase(db_path, clock=failing_clock)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await interrupted.initialize(migrations_dir=migrations_dir)
     await interrupted.close()
 
     recovered = SQLiteDatabase(db_path)
@@ -128,6 +128,36 @@ async def test_interrupted_migration_recovers_fully_on_restart(tmp_path: Path) -
     assert row is not None
     assert row[0] == "backfilled"
     assert "002_widgets_status.sql" in ledger
+
+
+@pytest.mark.asyncio
+async def test_duplicate_column_recovery_still_runs_migration_backfill(tmp_path: Path) -> None:
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "001_widgets.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS widgets (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);"
+    )
+    db_path = tmp_path / "historical.sqlite3"
+
+    database = SQLiteDatabase(db_path)
+    await database.initialize(migrations_dir=migrations_dir)
+    database.connection.execute("INSERT INTO widgets (id, payload) VALUES (1, 'hello')")
+    database.connection.commit()
+    database.connection.execute("ALTER TABLE widgets ADD COLUMN status TEXT NOT NULL DEFAULT ''")
+    database.connection.commit()
+    await database.close()
+
+    (migrations_dir / "002_widgets_status.sql").write_text(
+        "ALTER TABLE widgets ADD COLUMN status TEXT NOT NULL DEFAULT '';\n"
+        "UPDATE widgets SET status = 'backfilled';\n"
+    )
+
+    recovered = SQLiteDatabase(db_path)
+    await recovered.initialize(migrations_dir=migrations_dir)
+    row = recovered.connection.execute("SELECT status FROM widgets WHERE id = 1").fetchone()
+    await recovered.close()
+
+    assert row == ("backfilled",)
 
 
 @pytest.mark.asyncio

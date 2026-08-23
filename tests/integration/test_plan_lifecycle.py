@@ -6,10 +6,11 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.errors import ErrorCode
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     AdapterSnapshot,
     Command,
+    CommandPostcondition,
     DeviceType,
     ExecutionStatus,
     Plan,
@@ -21,7 +22,11 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
-from domoai.persistence.repositories import PlanRepository, ScheduledPlanRepository
+from domoai.persistence.repositories import (
+    PlanRepository,
+    ScheduledPlanRepository,
+    StateSnapshotRepository,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.clock import FixedClock
@@ -31,11 +36,173 @@ from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.recovery import PlanRecoveryService
 from domoai.runtime.registry import DeviceRegistry
+from domoai.runtime.risk_classifier import RiskClassifier, RiskOverride
 from domoai.runtime.safety_kernel import SafetyKernel
 from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.failure_injection import FailureInjectingAdapter
 from tests.fixtures.multi_adapter import RecordingAdapter, entity, power_capability
+
+
+class SettlingFeedbackAdapter(RecordingAdapter):
+    def __init__(self, snapshot: AdapterSnapshot, feedback: list[object]) -> None:
+        super().__init__("fixture", snapshot)
+        self.feedback = feedback
+        self.read_count = 0
+
+    async def read_state(self, source_refs):
+        self.read_count += 1
+        step = self.feedback[min(self.read_count - 1, len(self.feedback) - 1)]
+        if isinstance(step, BaseException):
+            raise step
+        snapshots = await super().read_state(source_refs)
+        value, status = step
+        return [item.model_copy(update={"value": value, "status": status}) for item in snapshots]
+
+
+class PostWriteSocAdapter(RecordingAdapter):
+    def __init__(self, snapshot: AdapterSnapshot) -> None:
+        super().__init__("fixture", snapshot)
+        self.read_refs: list[list[str]] = []
+
+    async def read_state(self, source_refs):
+        self.read_refs.append([ref.external_id for ref in source_refs])
+        snapshots = await super().read_state(source_refs)
+        return [
+            item.model_copy(update={"value": 2.0})
+            if item.capability == "battery_power"
+            else item
+            for item in snapshots
+        ]
+
+
+class FailingStateSnapshotSink:
+    async def save(self, snapshot: StateSnapshot) -> None:
+        del snapshot
+        raise OSError("simulated state persistence failure")
+
+
+def reconciliable_battery_snapshot() -> AdapterSnapshot:
+    snapshot = settling_battery_snapshot()
+    snapshot.source_entities.append(
+        {
+            "entity_id": "battery.soc",
+            "device_id": "battery-device",
+            "canonical_id": "battery.home",
+            "identity_keys": ["fixture:battery-device"],
+            "connections": ["fixture:battery-device"],
+            "name": "Battery SOC",
+            "area_id": "garage",
+            "domain": "sensor",
+            "semantic_type": "sensor",
+            "capabilities": [
+                {
+                    "name": "battery.soc",
+                    "kind": "number",
+                    "unit": "%",
+                    "readable": True,
+                    "writable": False,
+                }
+            ],
+            "available": True,
+        }
+    )
+    snapshot.source_states.append(
+        {
+            "entity_id": "battery.soc",
+            "capability": "battery.soc",
+            "value": 57.0,
+            "unit": "%",
+            "available": True,
+        }
+    )
+    return snapshot
+
+
+def settling_battery_snapshot() -> AdapterSnapshot:
+    return AdapterSnapshot(
+        source_entities=[
+            {
+                "entity_id": "battery.command",
+                "device_id": "battery-device",
+                "canonical_id": "battery.home",
+                "identity_keys": ["fixture:battery-device"],
+                "connections": ["fixture:battery-device"],
+                "name": "Battery command",
+                "area_id": "garage",
+                "domain": "energy",
+                "semantic_type": "energy",
+                "capabilities": [
+                    {
+                        "name": "battery_control",
+                        "kind": "number",
+                        "unit": "kW",
+                        "readable": False,
+                        "writable": True,
+                        "commands": ["charge_battery"],
+                    }
+                ],
+                "available": True,
+            },
+            {
+                "entity_id": "battery.telemetry",
+                "device_id": "battery-device",
+                "canonical_id": "battery.home",
+                "identity_keys": ["fixture:battery-device"],
+                "connections": ["fixture:battery-device"],
+                "name": "Battery telemetry",
+                "area_id": "garage",
+                "domain": "sensor",
+                "semantic_type": "sensor",
+                "capabilities": [
+                    {
+                        "name": "battery_power",
+                        "kind": "number",
+                        "unit": "kW",
+                        "readable": True,
+                        "writable": False,
+                    }
+                ],
+                "available": True,
+            },
+        ],
+        source_states=[
+            {
+                "entity_id": "battery.telemetry",
+                "capability": "battery_power",
+                "value": 0.0,
+                "unit": "kW",
+                "available": True,
+            }
+        ],
+    )
+
+
+def settling_battery_plan(plan_service: PlanService) -> Plan:
+    return plan_service.validate(
+        Plan(
+            id="battery-feedback-settling",
+            commands=[
+                Command(
+                    id="battery-command-settling",
+                    device_id="battery.home",
+                    command="charge_battery",
+                    value=2.0,
+                    unit="kW",
+                    idempotency_key="battery-command-settling",
+                    postconditions=[
+                        CommandPostcondition(
+                            capability="battery_power",
+                            expected=2.0,
+                            tolerance=0.1,
+                            settle_timeout_seconds=5.0,
+                            poll_interval_seconds=0.25,
+                        )
+                    ],
+                )
+            ],
+        )
+    )
 
 
 async def build_plan_context() -> tuple[
@@ -104,6 +271,641 @@ async def test_valid_plan_previews_then_executes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_battery_feedback_readback_uses_its_own_canonical_route() -> None:
+    snapshot = AdapterSnapshot(
+        source_entities=[
+            {
+                "entity_id": "battery.command",
+                "device_id": "battery-device",
+                "canonical_id": "battery.home",
+                "identity_keys": ["fixture:battery-device"],
+                "connections": ["fixture:battery-device"],
+                "name": "Battery command",
+                "area_id": "garage",
+                "domain": "energy",
+                "semantic_type": "energy",
+                "capabilities": [
+                    {
+                        "name": "battery_control",
+                        "kind": "number",
+                        "unit": "kW",
+                        "readable": False,
+                        "writable": True,
+                        "commands": ["charge_battery"],
+                    }
+                ],
+                "available": True,
+            },
+            {
+                "entity_id": "battery.telemetry",
+                "device_id": "battery-device",
+                "canonical_id": "battery.home",
+                "identity_keys": ["fixture:battery-device"],
+                "connections": ["fixture:battery-device"],
+                "name": "Battery telemetry",
+                "area_id": "garage",
+                "domain": "sensor",
+                "semantic_type": "sensor",
+                "capabilities": [
+                    {
+                        "name": "battery_power",
+                        "kind": "number",
+                        "unit": "kW",
+                        "readable": True,
+                        "writable": False,
+                    }
+                ],
+                "available": True,
+            },
+        ],
+        source_states=[
+            {
+                "entity_id": "battery.telemetry",
+                "capability": "battery_power",
+                "value": 2.05,
+                "unit": "kW",
+                "available": True,
+            }
+        ],
+    )
+    adapter = RecordingAdapter("fixture", snapshot)
+    await adapter.connect()
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    state_store = StateStore()
+    audit = AuditLog()
+    plan_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [],
+            RiskClassifier(
+                overrides=(RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),)
+            ),
+        ),
+        audit,
+    )
+    executor = PlanExecutor(adapter, plan_service, audit)
+    plan = Plan(
+        id="battery-feedback-readback",
+        commands=[
+            Command(
+                id="battery-command",
+                device_id="battery.home",
+                command="charge_battery",
+                value=2.0,
+                unit="kW",
+                idempotency_key="battery-command",
+                postconditions=[
+                    CommandPostcondition(
+                        capability="battery_power", expected=2.0, tolerance=0.1
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert summary.outcomes[0].after_state is not None
+    assert summary.outcomes[0].after_state.source_ref.external_id == "battery.telemetry"
+
+
+@pytest.mark.asyncio
+async def test_post_write_soc_readback_is_persisted_without_replaying_write(tmp_path) -> None:
+    snapshot = reconciliable_battery_snapshot()
+    adapter = PostWriteSocAdapter(snapshot)
+    await adapter.connect()
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    state_store = StateStore()
+    audit = AuditLog()
+    plan_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [],
+            RiskClassifier(
+                overrides=(
+                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                )
+            ),
+        ),
+        audit,
+    )
+    database = SQLiteDatabase(tmp_path / "soc-reconciliation.sqlite3")
+    await database.initialize()
+    state_repository = StateSnapshotRepository(database)
+    executor = PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        state_snapshot_repository=state_repository,
+    )
+    plan = Plan(
+        id="battery-soc-reconciliation",
+        commands=[
+            Command(
+                id="battery-command-reconcile",
+                device_id="battery.home",
+                command="charge_battery",
+                value=2.0,
+                unit="kW",
+                idempotency_key="battery-command-reconcile",
+                postconditions=[
+                    CommandPostcondition(
+                        capability="battery_power",
+                        expected=2.0,
+                        tolerance=0.1,
+                        reconcile_capabilities=["battery.soc"],
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert len(adapter.writes) == 1
+    assert adapter.read_refs == [["battery.telemetry"], ["battery.soc"]]
+    persisted = await state_repository.list_all()
+    soc = next(item for item in persisted if item.capability == "battery.soc")
+    assert soc.value == 57.0
+    assert soc.status is StateStatus.CURRENT
+    restored_store = StateStore()
+    restored_store.load_persisted(persisted)
+    restored_soc = await restored_store.get("battery.home", "battery.soc")
+    assert restored_soc is not None
+    assert restored_soc.status is StateStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_explicit_soc_reconciliation_route_is_required_before_execution() -> None:
+    snapshot = settling_battery_snapshot()
+    adapter = PostWriteSocAdapter(snapshot)
+    await adapter.connect()
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    state_store = StateStore()
+    audit = AuditLog()
+    plan_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [],
+            RiskClassifier(
+                overrides=(
+                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                )
+            ),
+        ),
+        audit,
+    )
+    plan = Plan(
+        id="battery-soc-route-required",
+        commands=[
+            Command(
+                id="battery-command-route-required",
+                device_id="battery.home",
+                command="charge_battery",
+                value=2.0,
+                unit="kW",
+                idempotency_key="battery-command-route-required",
+                postconditions=[
+                    CommandPostcondition(
+                        capability="battery_power",
+                        expected=2.0,
+                        tolerance=0.1,
+                        reconcile_capabilities=["battery.soc"],
+                    )
+                ],
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+
+    assert any(
+        error.code in {ErrorCode.INVALID_CAPABILITY, ErrorCode.ROUTE_NOT_FOUND}
+        for error in validated.validation.errors
+    )
+    with pytest.raises(DomainError) as excinfo:
+        await PlanExecutor(adapter, plan_service, audit).execute(validated)
+    assert excinfo.value.code == ErrorCode.VALIDATION_ERROR
+    assert adapter.writes == []
+
+
+@pytest.mark.asyncio
+async def test_readback_persistence_failure_is_unknown_without_write_replay() -> None:
+    snapshot = settling_battery_snapshot()
+    adapter = PostWriteSocAdapter(snapshot)
+    await adapter.connect()
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    state_store = StateStore()
+    audit = AuditLog()
+    plan_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [],
+            RiskClassifier(
+                overrides=(
+                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                )
+            ),
+        ),
+        audit,
+    )
+    plan = Plan(
+        id="battery-readback-persistence-failure",
+        commands=[
+            Command(
+                id="battery-command-persistence-failure",
+                device_id="battery.home",
+                command="charge_battery",
+                value=2.0,
+                unit="kW",
+                idempotency_key="battery-command-persistence-failure",
+                postconditions=[
+                    CommandPostcondition(
+                        capability="battery_power",
+                        expected=2.0,
+                        tolerance=0.1,
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = await PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        state_snapshot_repository=FailingStateSnapshotSink(),
+    ).execute(plan_service.validate(plan))
+
+    assert summary.outcomes[0].status is ExecutionStatus.UNKNOWN
+    assert summary.outcomes[0].error is not None
+    assert summary.outcomes[0].error.code == ErrorCode.POST_WRITE_RECONCILIATION_FAILED
+    assert len(adapter.writes) == 1
+
+
+async def _build_settling_context(
+    feedback: list[object],
+    *,
+    sleep=None,
+) -> tuple[SettlingFeedbackAdapter, PlanService, PlanExecutor, FixedClock]:
+    snapshot = settling_battery_snapshot()
+    adapter = SettlingFeedbackAdapter(snapshot, feedback)
+    await adapter.connect()
+    registry = DeviceRegistry()
+    registry.apply_snapshot(snapshot, adapter.adapter_id)
+    state_store = StateStore()
+    audit = AuditLog()
+    plan_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [],
+            RiskClassifier(
+                overrides=(
+                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                )
+            ),
+        ),
+        audit,
+    )
+    clock = FixedClock(datetime.now(UTC))
+
+    async def advance(delay: float) -> None:
+        clock.set(clock.now() + timedelta(seconds=delay))
+
+    executor = PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        clock=clock,
+        sleep=sleep or advance,
+    )
+    return adapter, plan_service, executor, clock
+
+
+@pytest.mark.asyncio
+async def test_battery_feedback_settling_confirms_late_without_replaying_write() -> None:
+    old = (0.0, StateStatus.CURRENT)
+    matching = (2.05, StateStatus.CURRENT)
+    adapter, plan_service, executor, _clock = await _build_settling_context([old, matching])
+
+    summary = await executor.execute(settling_battery_plan(plan_service))
+
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert adapter.read_count == 2
+    assert len(adapter.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_battery_feedback_settling_deadline_preserves_latest_observation() -> None:
+    adapter, plan_service, executor, _clock = await _build_settling_context(
+        [(0.0, StateStatus.CURRENT)]
+    )
+
+    summary = await executor.execute(settling_battery_plan(plan_service))
+
+    assert summary.outcomes[0].status is ExecutionStatus.UNKNOWN
+    assert summary.outcomes[0].after_state is not None
+    assert summary.outcomes[0].after_state.value == 0.0
+    assert len(adapter.writes) == 1
+    assert adapter.read_count > 1
+
+
+@pytest.mark.asyncio
+async def test_battery_feedback_settling_retries_transient_readback_failure() -> None:
+    adapter, plan_service, executor, _clock = await _build_settling_context(
+        [TimeoutError("telemetry delayed"), (2.0, StateStatus.CURRENT)]
+    )
+
+    summary = await executor.execute(settling_battery_plan(plan_service))
+
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert adapter.read_count == 2
+    assert len(adapter.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_battery_feedback_settling_does_not_confirm_stale_feedback() -> None:
+    adapter, plan_service, executor, _clock = await _build_settling_context(
+        [(2.0, StateStatus.STALE)]
+    )
+
+    summary = await executor.execute(settling_battery_plan(plan_service))
+
+    assert summary.outcomes[0].status is ExecutionStatus.UNKNOWN
+    assert summary.outcomes[0].after_state is not None
+    assert summary.outcomes[0].after_state.status is StateStatus.STALE
+    assert len(adapter.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_battery_feedback_settling_propagates_cancellation_without_replay() -> None:
+    async def cancel(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    adapter, plan_service, executor, _clock = await _build_settling_context(
+        [(0.0, StateStatus.CURRENT)], sleep=cancel
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.execute(settling_battery_plan(plan_service))
+
+    assert len(adapter.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_preflight_rejects_later_safety_violation_before_first_write() -> None:
+    adapter, registry, _, audit, plan_service, _ = await build_plan_context()
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    plan = Plan(
+        id="plan-preflight-safety-1",
+        commands=[
+            Command(
+                id="command-preflight-safe-1",
+                device_id=switch_id,
+                command="turn_on",
+                idempotency_key="intent-preflight-safe-1",
+            ),
+            Command(
+                id="command-preflight-unsafe-1",
+                device_id=climate_id,
+                command="set_temperature",
+                value=25,
+                unit="°C",
+                idempotency_key="intent-preflight-unsafe-1",
+            ),
+        ],
+    )
+    validated = plan_service.validate(plan)
+    executor = PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        safety_kernel=SafetyKernel(
+            [
+                SafetyLimit(
+                    device_type=DeviceType.CLIMATE,
+                    capability="target_temperature",
+                    maximum=22,
+                )
+            ]
+        ),
+    )
+
+    summary = await executor.execute(validated)
+
+    assert adapter.calls == []
+    assert [outcome.status for outcome in summary.outcomes] == [
+        ExecutionStatus.REJECTED,
+        ExecutionStatus.REJECTED,
+    ]
+    assert summary.outcomes[1].error is not None
+    assert summary.outcomes[1].error.code == ErrorCode.SAFETY_LIMIT_EXCEEDED
+    assert any(event.event_type == "plan_preflight_rejected" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_plan_preflight_rejects_later_unmet_precondition_before_first_write() -> None:
+    adapter, registry, _, audit, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    plan = Plan(
+        id="plan-preflight-precondition-1",
+        commands=[
+            Command(
+                id="command-preflight-first-1",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-preflight-first-1",
+            ),
+            Command(
+                id="command-preflight-second-1",
+                device_id=light_id,
+                command="set_brightness",
+                value=70,
+                unit="%",
+                idempotency_key="intent-preflight-second-1",
+                preconditions=[
+                    Precondition(device_id=switch_id, capability="power", expected=True)
+                ],
+            ),
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert adapter.calls == []
+    assert [outcome.status for outcome in summary.outcomes] == [
+        ExecutionStatus.REJECTED,
+        ExecutionStatus.REJECTED,
+    ]
+    assert summary.outcomes[1].error is not None
+    assert summary.outcomes[1].error.code == ErrorCode.PRECONDITION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejection_is_persisted_terminal_and_not_replayed(tmp_path) -> None:
+    adapter, registry, _, audit, plan_service, _, plan_repository = (
+        await build_plan_context_with_repository(tmp_path)
+    )
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
+    plan = Plan(
+        id="plan-preflight-persisted-1",
+        commands=[
+            Command(
+                id="command-preflight-persisted-safe-1",
+                device_id=switch_id,
+                command="turn_on",
+                idempotency_key="intent-preflight-persisted-safe-1",
+            ),
+            Command(
+                id="command-preflight-persisted-unsafe-1",
+                device_id=climate_id,
+                command="set_temperature",
+                value=25,
+                unit="°C",
+                idempotency_key="intent-preflight-persisted-unsafe-1",
+            ),
+        ],
+    )
+    validated = plan_service.validate(plan)
+    executor = PlanExecutor(
+        adapter,
+        plan_service,
+        audit,
+        plan_repository=plan_repository,
+        safety_kernel=SafetyKernel(
+            [
+                SafetyLimit(
+                    device_type=DeviceType.CLIMATE,
+                    capability="target_temperature",
+                    maximum=22,
+                )
+            ]
+        ),
+    )
+
+    summary = await executor.execute(validated)
+
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.FAILED
+    assert persisted.execution == summary
+    with pytest.raises(ValueError, match="already|terminal"):
+        await executor.execute(validated)
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_preflight_preserves_deterministic_sequential_precondition() -> None:
+    adapter, registry, _, _, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    plan = Plan(
+        id="plan-preflight-sequence-1",
+        commands=[
+            Command(
+                id="command-preflight-sequence-on",
+                device_id=switch_id,
+                command="turn_on",
+                idempotency_key="intent-preflight-sequence-on",
+            ),
+            Command(
+                id="command-preflight-sequence-brightness",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-preflight-sequence-brightness",
+                preconditions=[
+                    Precondition(device_id=switch_id, capability="power", expected=True)
+                ],
+            ),
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert [outcome.status for outcome in summary.outcomes] == [
+        ExecutionStatus.CONFIRMED_SUCCESS,
+        ExecutionStatus.CONFIRMED_SUCCESS,
+    ]
+    assert [command.id for command in adapter.calls] == [
+        "command-preflight-sequence-on",
+        "command-preflight-sequence-brightness",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_just_in_time_precondition_still_blocks_state_race_after_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    switch_state = await state_store.get(switch_id, "power")
+    assert switch_state is not None
+    await state_store.save(switch_state.model_copy(update={"value": True}))
+    first_command_id = "command-preflight-race-first"
+    plan = Plan(
+        id="plan-preflight-race-1",
+        commands=[
+            Command(
+                id=first_command_id,
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-preflight-race-first",
+            ),
+            Command(
+                id="command-preflight-race-second",
+                device_id=light_id,
+                command="set_brightness",
+                value=70,
+                unit="%",
+                idempotency_key="intent-preflight-race-second",
+                preconditions=[
+                    Precondition(device_id=switch_id, capability="power", expected=True)
+                ],
+            ),
+        ],
+    )
+    original_execute = adapter.execute
+
+    async def execute_and_change_state(command: Command, execution_context=None):
+        acknowledgement = await original_execute(command, execution_context)
+        if command.id == first_command_id:
+            current = await state_store.get(switch_id, "power")
+            assert current is not None
+            await state_store.save(current.model_copy(update={"value": False}))
+        return acknowledgement
+
+    monkeypatch.setattr(adapter, "execute", execute_and_change_state)
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert [outcome.status for outcome in summary.outcomes] == [
+        ExecutionStatus.CONFIRMED_SUCCESS,
+        ExecutionStatus.REJECTED,
+    ]
+    assert [command.id for command in adapter.calls] == [first_command_id]
+
+
+@pytest.mark.asyncio
 async def test_out_of_range_command_is_rejected_before_adapter_call() -> None:
     adapter, registry, _, _, plan_service, executor = await build_plan_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
@@ -154,7 +956,9 @@ async def test_sensitive_command_requires_matching_operator_approval() -> None:
         await executor.execute(validated)
     assert adapter.calls == []
 
-    grant = ApprovalStore(operator_token="test-operator-secret").issue(
+    grant = ApprovalStore(
+        operator_token="test-operator-secret", allow_legacy_token=True
+    ).issue(
         validated, approved_by="local_operator", operator_token="test-operator-secret"
     )
     approved = plan_service.approve(validated, grant=grant)
@@ -186,6 +990,62 @@ async def test_changed_runtime_revision_requires_revalidation() -> None:
 
     with pytest.raises(ValueError, match="runtime revision"):
         await executor.execute(validated)
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_changed_capability_bound_requires_revalidation_before_adapter_write() -> None:
+    adapter, registry, state_store, audit, plan_service, executor = await build_plan_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    plan = Plan(
+        id="plan-capability-stale-1",
+        commands=[
+            Command(
+                id="command-capability-stale-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=90,
+                unit="%",
+                idempotency_key="intent-capability-stale-1",
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    next(entity for entity in adapter._entities if entity["entity_id"] == "light.living_room_main")[
+        "attributes"
+    ]["brightness_max"] = 50
+    await DiscoveryService(adapter, registry, state_store, audit).refresh()
+
+    with pytest.raises(ValueError, match="stale"):
+        await executor.execute(validated)
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_validation_without_dependency_evidence_fails_closed() -> None:
+    adapter, registry, _, _, plan_service, executor = await build_plan_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    plan = Plan(
+        id="plan-legacy-dependencies-1",
+        commands=[
+            Command(
+                id="command-legacy-dependencies-1",
+                device_id=device_id,
+                command="turn_on",
+                idempotency_key="intent-legacy-dependencies-1",
+            )
+        ],
+    )
+
+    validated = plan_service.validate(plan)
+    assert validated.validation is not None
+    legacy = validated.model_copy(
+        update={"validation": validated.validation.model_copy(update={"dependencies": None})}
+    )
+
+    with pytest.raises(ValueError, match="stale"):
+        await executor.execute(legacy)
     assert adapter.calls == []
 
 

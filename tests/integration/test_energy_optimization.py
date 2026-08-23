@@ -7,10 +7,11 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import PlanStatus
+from domoai.domain.models import AdapterSnapshot, Capability, CapabilityKind, PlanStatus
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import (
     BaseLoadPoint,
+    BatteryActuator,
     BatteryProfile,
     ConfidenceBand,
     EnergyContext,
@@ -43,6 +44,397 @@ async def build_context() -> tuple[SimulatedHomeAdapter, DeviceRegistry, Optimiz
     await DiscoveryService(adapter, registry, state_store, audit).refresh()
     plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
     return adapter, registry, OptimizationService(registry, plan_service, CpSatOptimizer(registry))
+
+
+def _battery_actuator(**overrides: object) -> BatteryActuator:
+    values: dict[str, object] = {
+        "device_id": "missing.home_battery",
+        "capability": "battery_power",
+        "charge_command": "charge_battery",
+        "discharge_command": "discharge_battery",
+        "stop_command": "stop_battery",
+        "power_feedback_capability": "battery_power",
+        "power_feedback_tolerance_kw": 0.1,
+    }
+    values.update(overrides)
+    return BatteryActuator.model_validate(values)
+
+
+def test_bound_battery_requires_a_current_canonical_route() -> None:
+    registry = DeviceRegistry()
+    context = energy_context_for()
+    assert context.battery is not None
+    context = context.model_copy(
+        update={"battery": context.battery.model_copy(update={"actuator": _battery_actuator()})}
+    )
+    scenario = OptimizationScenario(
+        id="battery-route-required-1",
+        horizon=context.horizon,
+        energy_context=context,
+    )
+
+    diagnostics = validate_scenario(scenario, registry)
+
+    assert any(item.code == "missing_device" for item in diagnostics)
+
+
+def test_bound_battery_requires_a_readable_power_feedback_capability() -> None:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "energy.battery",
+                    "device_id": "battery-device",
+                    "domain": "energy",
+                    "semantic_type": "energy",
+                    "name": "Home battery",
+                    "canonical_id": "battery.home",
+                    "capabilities": [
+                        {
+                            "name": "battery_control",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": False,
+                            "writable": True,
+                            "commands": ["charge_battery", "discharge_battery", "stop_battery"],
+                        }
+                    ],
+                    "identity_keys": ["fixture:device:battery-device"],
+                    "connections": ["fixture:battery-device"],
+                }
+            ]
+        ),
+        "fixture",
+    )
+    context = energy_context_for()
+    assert context.battery is not None
+    context = context.model_copy(
+        update={"battery": context.battery.model_copy(update={"actuator": _battery_actuator(
+            device_id="battery.home", capability="battery_control"
+        )})}
+    )
+
+    diagnostics = validate_scenario(
+        OptimizationScenario(
+            id="battery-feedback-required-1",
+            horizon=context.horizon,
+            energy_context=context,
+        ),
+        registry,
+    )
+
+    assert any(item.code == "missing_feedback_capability" for item in diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("feedback_capability", "diagnostic_code"),
+    [
+        (
+            {
+                "name": "battery_power",
+                "kind": "boolean",
+                "readable": True,
+                "writable": False,
+            },
+            "invalid_feedback_capability",
+        ),
+        (
+            {
+                "name": "battery_power",
+                "kind": "number",
+                "unit": "W",
+                "readable": True,
+                "writable": False,
+            },
+            "feedback_unit_mismatch",
+        ),
+    ],
+)
+def test_bound_battery_rejects_invalid_power_feedback_shape(
+    feedback_capability: dict[str, object], diagnostic_code: str
+) -> None:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "energy.battery",
+                    "device_id": "battery-device",
+                    "domain": "energy",
+                    "semantic_type": "energy",
+                    "name": "Home battery",
+                    "canonical_id": "battery.home",
+                    "capabilities": [
+                        {
+                            "name": "battery_control",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": False,
+                            "writable": True,
+                            "commands": ["charge_battery", "discharge_battery", "stop_battery"],
+                        },
+                        feedback_capability,
+                    ],
+                    "identity_keys": ["fixture:device:battery-device"],
+                    "connections": ["fixture:battery-device"],
+                }
+            ]
+        ),
+        "fixture",
+    )
+    context = energy_context_for()
+    assert context.battery is not None
+    actuator = _battery_actuator(device_id="battery.home", capability="battery_control")
+    context = context.model_copy(
+        update={"battery": context.battery.model_copy(update={"actuator": actuator})}
+    )
+
+    diagnostics = validate_scenario(
+        OptimizationScenario(
+            id="battery-feedback-shape-1",
+            horizon=context.horizon,
+            energy_context=context,
+        ),
+        registry,
+    )
+
+    assert any(item.code == diagnostic_code for item in diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("available", "diagnostic_code"),
+    [(False, "feedback_route_unavailable")],
+)
+def test_bound_battery_rejects_unavailable_power_feedback_route(
+    available: bool, diagnostic_code: str
+) -> None:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "energy.battery",
+                    "device_id": "battery-device",
+                    "domain": "energy",
+                    "semantic_type": "energy",
+                    "name": "Home battery",
+                    "canonical_id": "battery.home",
+                    "available": available,
+                    "capabilities": [
+                        {
+                            "name": "battery_control",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": True,
+                            "writable": True,
+                            "commands": ["charge_battery", "discharge_battery", "stop_battery"],
+                        }
+                    ],
+                    "identity_keys": ["fixture:device:battery-device"],
+                    "connections": ["fixture:battery-device"],
+                }
+            ]
+        ),
+        "fixture",
+    )
+    context = energy_context_for()
+    assert context.battery is not None
+    actuator = _battery_actuator(
+        device_id="battery.home",
+        capability="battery_control",
+        power_feedback_capability="battery_control",
+    )
+    context = context.model_copy(
+        update={"battery": context.battery.model_copy(update={"actuator": actuator})}
+    )
+
+    diagnostics = validate_scenario(
+        OptimizationScenario(
+            id="battery-feedback-route-1",
+            horizon=context.horizon,
+            energy_context=context,
+        ),
+        registry,
+    )
+
+    assert any(item.code == diagnostic_code for item in diagnostics)
+
+
+def test_bound_battery_rejects_ambiguous_power_feedback_route() -> None:
+    registry = DeviceRegistry()
+    capabilities = [
+        {
+            "name": "battery_control",
+            "kind": "number",
+            "unit": "kW",
+            "readable": True,
+            "writable": True,
+            "commands": ["charge_battery", "discharge_battery", "stop_battery"],
+        },
+        {
+            "name": "battery_power",
+            "kind": "number",
+            "unit": "kW",
+            "readable": True,
+            "writable": False,
+        }
+    ]
+    entities = [
+        {
+            "entity_id": f"energy.battery.telemetry.{suffix}",
+            "device_id": f"battery-device-{suffix}",
+            "domain": "sensor",
+            "semantic_type": "sensor",
+            "name": "Battery telemetry",
+            "canonical_id": "battery.home",
+            "capabilities": capabilities,
+            "identity_keys": [f"fixture:device:battery-device-{suffix}"],
+            "connections": [f"fixture:battery-device-{suffix}"],
+        }
+        for suffix in ("a", "b")
+    ]
+    registry.apply_snapshot(AdapterSnapshot(source_entities=entities), "fixture")
+    context = energy_context_for()
+    assert context.battery is not None
+    actuator = _battery_actuator(device_id="battery.home", capability="battery_control")
+    context = context.model_copy(
+        update={"battery": context.battery.model_copy(update={"actuator": actuator})}
+    )
+
+    diagnostics = validate_scenario(
+        OptimizationScenario(
+            id="battery-feedback-ambiguous-1",
+            horizon=context.horizon,
+            energy_context=context,
+        ),
+        registry,
+    )
+
+    assert any(item.code == "feedback_route_ambiguous" for item in diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_bound_battery_solver_dispatch_is_compiled_and_plan_validated() -> None:
+    registry = DeviceRegistry()
+    battery_capability = Capability(
+        name="battery_power",
+        kind=CapabilityKind.NUMBER,
+        unit="kW",
+        readable=True,
+        writable=True,
+        minimum=0,
+        maximum=2,
+        commands=["charge_battery", "discharge_battery", "stop_battery"],
+    )
+    load_capability = Capability(
+        name="power",
+        kind=CapabilityKind.NUMBER,
+        unit="kW",
+        readable=True,
+        writable=True,
+        minimum=0,
+        maximum=5,
+        commands=["turn_on"],
+    )
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "energy.battery",
+                    "device_id": "battery-device",
+                    "domain": "energy",
+                    "semantic_type": "energy",
+                    "name": "Home battery",
+                    "canonical_id": "battery.home",
+                    "capabilities": [battery_capability.model_dump(mode="json")],
+                    "identity_keys": ["fixture:device:battery-device"],
+                    "connections": ["fixture:battery-device"],
+                },
+                {
+                    "entity_id": "switch.load",
+                    "device_id": "load-device",
+                    "domain": "switch",
+                    "semantic_type": "switch",
+                    "name": "Flexible load",
+                    "canonical_id": "load.flexible",
+                    "capabilities": [load_capability.model_dump(mode="json")],
+                    "identity_keys": ["fixture:device:load-device"],
+                    "connections": ["fixture:load-device"],
+                },
+            ]
+        ),
+        "fixture",
+    )
+    horizon = energy_horizon(slots=2)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=1.00, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(slot=0, power=0.0),
+            SolarForecastPoint(slot=1, power=0.0),
+        ],
+        battery=BatteryProfile(
+            capacity_kwh=4,
+            initial_soc_kwh=2,
+            min_soc_kwh=0,
+            max_soc_kwh=4,
+            max_charge_kw=2,
+            max_discharge_kw=2,
+            charge_efficiency=1.0,
+            discharge_efficiency=1.0,
+            actuator=BatteryActuator(
+                device_id="battery.home",
+                capability="battery_power",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery_power",
+                power_feedback_tolerance_kw=0.1,
+            ),
+        ),
+        source_revision="bound-battery-e2e",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="bound-battery-e2e-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[
+            Load(
+                id="expensive-load",
+                device_id="load.flexible",
+                capability="power",
+                command="turn_on",
+                power=1.5,
+                power_unit="kW",
+                earliest_slot=1,
+                latest_slot=1,
+            )
+        ],
+        constraints=[Constraint(type="max_grid_import", value=2, unit="kW")],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+    plan_service = PlanService(registry, StateStore(), PolicyEngine([]), AuditLog())
+    service = OptimizationService(registry, plan_service, CpSatOptimizer(registry))
+
+    result = service.optimize(scenario)
+    dispatch = result.constraint_summary["slots"]
+    assert any(slot["battery_discharge_kw"] > 0 for slot in dispatch)
+    assert result.plans
+
+    validated = service.validate_proposal(result)
+    commands = [command for plan in validated.plans for command in plan.commands]
+    assert validated.status is not OptimizationStatus.INVALID
+    assert any(command.command == "discharge_battery" for command in commands)
+    assert any(command.command == "stop_battery" for command in commands)
+    assert all(
+        command.device_id != "load.flexible" or command.command == "turn_on"
+        for command in commands
+    )
 
 
 @pytest.mark.asyncio
@@ -728,6 +1120,8 @@ def _comfort_load(device_id: str, **overrides) -> ComfortLoad:
         "earliest_slot": 0,
         "deadline_slot": 8,
         "min_active_slots": 6,
+        "end_command": "set_temperature",
+        "end_value": 18,
     }
     fields.update(overrides)
     return ComfortLoad(**fields)
@@ -849,7 +1243,7 @@ async def test_comfort_load_active_in_at_least_minimum_slots() -> None:
         for command in plan.commands
         if command.device_id == device_id
     }
-    assert len(active_slots) >= 6
+    assert active_slots == {"scheduled_slot:0", "scheduled_slot:6"}
 
 
 def test_comfort_load_window_too_small_is_rejected_at_construction() -> None:
@@ -865,7 +1259,39 @@ def test_comfort_load_window_too_small_is_rejected_at_construction() -> None:
             earliest_slot=0,
             deadline_slot=4,
             min_active_slots=6,
+            end_command="set_temperature",
+            end_value=18,
         )
+
+
+@pytest.mark.asyncio
+async def test_comfort_load_requires_an_explicit_end_action() -> None:
+    _, registry, _ = await build_context()
+    context = energy_context_for(with_battery=False)
+    scenario = OptimizationScenario(
+        id="comfort-no-end",
+        horizon=context.horizon,
+        energy_context=context,
+        comfort_loads=[
+            ComfortLoad(
+                id="comfort-no-end",
+                device_id="ha-climate-1",
+                capability="target_temperature",
+                command="set_temperature",
+                value=21,
+                power=0.5,
+                power_unit="kW",
+                earliest_slot=0,
+                deadline_slot=4,
+                min_active_slots=1,
+            )
+        ],
+    )
+
+    diagnostics = validate_scenario(scenario, registry)
+
+    assert any(item.code == "missing_deactivation_command" for item in diagnostics)
+
 
 
 @pytest.mark.asyncio
@@ -1626,14 +2052,14 @@ async def test_ev_stop_at_zero_command_after_last_charging_slot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ev_charging_through_horizon_end_has_no_trailing_command() -> None:
+async def test_ev_charging_through_horizon_end_has_trailing_stop_command() -> None:
     # Exercises _proposal_plan directly with a charge schedule that reaches
     # the horizon's last slot: forcing CP-SAT itself to leave the EV's
     # deadline-constrained SOC check spanning exactly the final slot is not
     # expressible in the current solver model (the deadline_slot check only
     # ever counts charging strictly before the horizon's last slot), so this
-    # asserts the actual code under fix against a hand-built, unambiguous
-    # charge schedule instead.
+    # asserts the actual compiler against a hand-built, unambiguous charge
+    # schedule instead.
     from domoai.optimizer.cp_sat import _proposal_plan
 
     _, registry, _service = await build_context()
@@ -1656,8 +2082,9 @@ async def test_ev_charging_through_horizon_end_has_no_trailing_command() -> None
     ev_commands = [
         command for plan in plans for command in plan.commands if command.device_id == device_id
     ]
-    assert len(ev_commands) == 2
-    assert all(float(command.value) > 0 for command in ev_commands)
+    assert len(ev_commands) == 3
+    assert [float(command.value) for command in ev_commands] == [2.0, 3.0, 0.0]
+    assert ev_commands[-1].intent == "scheduled_slot:2"
     del registry
 
 
@@ -1838,3 +2265,145 @@ async def test_ev_deadline_hard_constraint_blocks_post_deadline_charging() -> No
         and float(command.value) > 0
     ]
     assert post_deadline_positive == []
+
+
+def test_generic_load_end_command_is_preserved_at_horizon_end() -> None:
+    from domoai.optimizer.cp_sat import _proposal_plan
+
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    load = Load(
+        id="load-at-horizon-end",
+        device_id="ha-switch-1",
+        capability="power",
+        command="turn_on",
+        value=True,
+        power=1.0,
+        power_unit="kW",
+        duration_slots=1,
+        earliest_slot=1,
+        latest_slot=1,
+        end_command="turn_off",
+        end_value=False,
+    )
+    scenario = OptimizationScenario(id="horizon-end-1", horizon=horizon, loads=[load])
+
+    plans = _proposal_plan(scenario, {"load-at-horizon-end": 1})
+
+    end_commands = [
+        command
+        for plan in plans
+        for command in plan.commands
+        if command.command == "turn_off"
+    ]
+    assert len(end_commands) == 1
+    assert end_commands[0].intent == "scheduled_slot:2"
+    assert plans[-1].execute_at == horizon.end
+
+
+def test_ev_compiler_emits_zero_for_gaps_and_at_horizon_end() -> None:
+    from domoai.optimizer.cp_sat import _proposal_plan
+
+    horizon = energy_horizon(slots=4, resolution_minutes=15)
+    ev_load = _ev_load(
+        "ha-cover-1",
+        deadline_slot=3,
+        command="set_position",
+    )
+    scenario = OptimizationScenario(id="ev-transition-1", horizon=horizon, ev_loads=[ev_load])
+
+    plans = _proposal_plan(
+        scenario,
+        selected_slots={},
+        ev_charge_slots={"ev-1": {0: 2.0, 2: 2.0, 3: 2.0}},
+        comfort_active_slots={},
+    )
+
+    commands = [
+        command
+        for plan in plans
+        for command in plan.commands
+        if command.device_id == "ha-cover-1"
+    ]
+    assert [float(command.value) for command in commands] == [2.0, 0.0, 2.0, 2.0, 0.0]
+    assert commands[-1].intent == "scheduled_slot:4"
+
+
+def test_comfort_compiler_emits_start_and_end_for_each_active_run() -> None:
+    from domoai.optimizer.cp_sat import _proposal_plan
+
+    horizon = energy_horizon(slots=4, resolution_minutes=15)
+    comfort_load = _comfort_load(
+        "ha-climate-1",
+        end_command="set_temperature",
+        end_value=18,
+        deadline_slot=4,
+        min_active_slots=1,
+    )
+    scenario = OptimizationScenario(
+        id="comfort-transition-1",
+        horizon=horizon,
+        comfort_loads=[comfort_load],
+    )
+
+    plans = _proposal_plan(
+        scenario,
+        selected_slots={},
+        ev_charge_slots={},
+        comfort_active_slots={"comfort-1": [0, 2]},
+    )
+
+    commands = [
+        command
+        for plan in plans
+        for command in plan.commands
+        if command.device_id == "ha-climate-1"
+    ]
+    assert [(command.intent, command.value) for command in commands] == [
+        ("scheduled_slot:0", 21),
+        ("scheduled_slot:1", 18),
+        ("scheduled_slot:2", 21),
+        ("scheduled_slot:3", 18),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_scenario_returns_a_successful_empty_proposal() -> None:
+    _, _registry, service = await build_context()
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    scenario = OptimizationScenario(
+        id="empty-proposal-1",
+        horizon=horizon,
+        energy_context=energy_context_for(horizon, with_battery=False),
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert result.plan is None
+    assert result.plans == []
+
+
+@pytest.mark.asyncio
+async def test_energy_minimize_start_maximize_direction_is_honored() -> None:
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    horizon = energy_horizon(slots=4, resolution_minutes=15)
+    scenario = OptimizationScenario(
+        id="maximize-start-1",
+        horizon=horizon,
+        energy_context=energy_context_for(horizon, with_battery=False),
+        loads=[flexible_load(device_id, earliest_slot=0, latest_slot=3)],
+        objectives=[Objective(name="minimize_start", direction="maximize")],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert result.plan is not None
+    assert result.plan.commands[0].intent == "scheduled_slot:3"

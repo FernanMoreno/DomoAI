@@ -5,6 +5,7 @@ import pytest
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.domain.models import Command, SourceRef, StateStatus
+from domoai.runtime.execution_context import ExecutionContext
 from tests.fixtures.home_assistant_provider import FakeHomeAssistantProviderClient
 from tests.fixtures.simulated_home import simulated_home_entities
 
@@ -72,3 +73,29 @@ async def test_bridge_sanitizes_provider_service_failures_as_unavailable() -> No
                 idempotency_key="bridge-failed-intent",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_bridge_forwards_execution_context_to_provider_client() -> None:
+    client = FakeHomeAssistantProviderClient(simulated_home_entities())
+    bridge = HomeAssistantProviderAdapter(HomeAssistantProvider(client))
+    await bridge.connect()
+    await bridge.discover()
+
+    context = ExecutionContext(
+        agent_request_id="agent-ha-1",
+        plan_id="plan-ha-1",
+        execution_attempt_id="attempt-ha-1",
+        adapter_request_id="adapter-ha-1",
+    )
+    await bridge.execute(
+        Command(
+            id="bridge-context-command",
+            device_id="living_room.living-room-main-light",
+            command="turn_on",
+            idempotency_key="bridge-context-intent",
+        ),
+        context,
+    )
+
+    assert client.service_call_contexts == [context]

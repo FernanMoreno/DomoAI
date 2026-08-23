@@ -6,8 +6,8 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from domoai.domain.models import ErrorDetail, ScalarValue, StrictModel
-from domoai.optimizer.energy import EnergyContext
+from domoai.domain.models import CapabilityKind, ErrorDetail, ScalarValue, StrictModel
+from domoai.optimizer.energy import BatteryActuator, EnergyContext
 from domoai.optimizer.horizon import Horizon
 from domoai.runtime.registry import DeviceRegistry
 
@@ -78,6 +78,10 @@ class ComfortLoad(StrictModel):
     earliest_slot: int = Field(ge=0)
     deadline_slot: int = Field(ge=0)
     min_active_slots: int = Field(gt=0)
+    # Keep parsing permissive so external payloads receive the normal
+    # structured scenario diagnostic instead of a raw model error.
+    end_command: str | None = Field(default=None, min_length=1)
+    end_value: ScalarValue | None = None
 
     @model_validator(mode="after")
     def validate_window(self) -> ComfortLoad:
@@ -242,6 +246,10 @@ def validate_scenario(
                 "EV charging and comfort loads require an energy context",
             )
         )
+    if scenario.energy_context is not None:
+        battery = scenario.energy_context.battery
+        if battery is not None and battery.actuator is not None:
+            errors.extend(_validate_battery_actuator(registry, battery.actuator))
     if scenario.conservative and scenario.energy_context is not None:
         if not all(
             point.confidence is not None for point in scenario.energy_context.solar_forecast
@@ -285,6 +293,23 @@ def validate_scenario(
                 comfort_load.unit,
             )
         )
+        if comfort_load.end_command is None:
+            errors.append(
+                _diagnostic(
+                    "missing_deactivation_command",
+                    f"Comfort load {comfort_load.id!r} must specify end_command",
+                )
+            )
+        else:
+            errors.extend(
+                _validate_device_capability_command(
+                    registry,
+                    comfort_load.device_id,
+                    comfort_load.capability,
+                    comfort_load.end_command,
+                    comfort_load.unit,
+                )
+            )
         if comfort_load.power_unit not in {"W", "kW"}:
             errors.append(
                 _diagnostic("invalid_unit", f"Unsupported power unit {comfort_load.power_unit!r}")
@@ -373,6 +398,128 @@ def _validate_device_capability_command(
         errors.append(
             _diagnostic("invalid_unit", f"Command unit {unit!r} does not match {capability.unit!r}")
         )
+    return errors
+
+
+def _validate_battery_actuator(
+    registry: DeviceRegistry, actuator: BatteryActuator
+) -> list[ErrorDetail]:
+    device = registry.get(actuator.device_id)
+    if device is None:
+        return [_diagnostic("missing_device", f"Unknown device {actuator.device_id}")]
+    capability = next(
+        (item for item in device.capabilities if item.name == actuator.capability),
+        None,
+    )
+    if capability is None or not capability.writable:
+        return [
+            _diagnostic(
+                "missing_capability",
+                f"Writable capability {actuator.capability!r} is not available on "
+                f"{actuator.device_id}",
+            )
+        ]
+
+    errors: list[ErrorDetail] = []
+    feedback_capability = next(
+        (item for item in device.capabilities if item.name == actuator.power_feedback_capability),
+        None,
+    )
+    if feedback_capability is None or not feedback_capability.readable:
+        errors.append(
+            _diagnostic(
+                "missing_feedback_capability",
+                f"Readable battery feedback capability {actuator.power_feedback_capability!r} "
+                f"is not available on {actuator.device_id}",
+            )
+        )
+    else:
+        if feedback_capability.kind is not CapabilityKind.NUMBER:
+            errors.append(
+                _diagnostic(
+                    "invalid_feedback_capability",
+                    "Battery power feedback capability must be numeric",
+                )
+            )
+        if feedback_capability.unit != actuator.power_unit:
+            errors.append(
+                _diagnostic(
+                    "feedback_unit_mismatch",
+                    f"Battery power feedback must use {actuator.power_unit}",
+                )
+            )
+        feedback_routes = registry.routes_for(
+            actuator.device_id, actuator.power_feedback_capability
+        )
+        available_feedback_routes = [route for route in feedback_routes if route.available]
+        if len(available_feedback_routes) > 1:
+            errors.append(
+                _diagnostic(
+                    "feedback_route_ambiguous",
+                    "Battery power feedback must have exactly one available route",
+                )
+            )
+        elif not available_feedback_routes:
+            errors.append(
+                _diagnostic(
+                    "feedback_route_unavailable",
+                    "No available route exists for battery power feedback",
+                )
+            )
+    if actuator.soc_reconciliation_capability is not None:
+        soc_capability = next(
+            (
+                item
+                for item in device.capabilities
+                if item.name == actuator.soc_reconciliation_capability
+            ),
+            None,
+        )
+        if soc_capability is None or not soc_capability.readable:
+            errors.append(
+                _diagnostic(
+                    "missing_soc_reconciliation_capability",
+                    "Readable SOC reconciliation capability is not available",
+                )
+            )
+        else:
+            soc_routes = registry.routes_for(
+                actuator.device_id, actuator.soc_reconciliation_capability
+            )
+            available_soc_routes = [route for route in soc_routes if route.available]
+            if len(available_soc_routes) > 1:
+                errors.append(
+                    _diagnostic(
+                        "soc_reconciliation_route_ambiguous",
+                        "SOC reconciliation must have exactly one available route",
+                    )
+                )
+            elif not available_soc_routes:
+                errors.append(
+                    _diagnostic(
+                        "soc_reconciliation_route_unavailable",
+                        "No available route exists for SOC reconciliation",
+                    )
+                )
+    for command, unit in (
+        (actuator.charge_command, actuator.power_unit),
+        (actuator.discharge_command, actuator.power_unit),
+        (actuator.stop_command, None),
+    ):
+        errors.extend(
+            _validate_device_capability_command(
+                registry, actuator.device_id, actuator.capability, command, unit
+            )
+        )
+        if command in capability.commands:
+            route = registry.resolve_command_route(actuator.device_id, command)
+            if route.route is None:
+                errors.append(
+                    _diagnostic(
+                        "route_unavailable",
+                        f"No executable route is available for battery command {command!r}",
+                    )
+                )
     return errors
 
 

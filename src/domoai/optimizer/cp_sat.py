@@ -11,7 +11,7 @@ from typing import Any
 import ortools
 from ortools.sat.python import cp_model
 
-from domoai.domain.models import Command, Plan
+from domoai.domain.models import Command, CommandPostcondition, Plan
 from domoai.optimizer.ports import (
     OptimizationResult,
     OptimizationStatus,
@@ -106,7 +106,7 @@ class CpSatOptimizer:
         return build_result(
             scenario_id=scenario.id,
             status=_status(status),
-            plan=plans[0],
+            plan=plans[0] if plans else None,
             plans=plans,
             objective_values={"start_slot_sum": float(sum(selected_slots.values()))},
             constraint_summary={"hard_satisfied": True, "soft_violations": []},
@@ -338,7 +338,22 @@ class CpSatOptimizer:
             ]
             for comfort_load in scenario.comfort_loads
         }
-        plans = _proposal_plan(scenario, selected_slots, ev_charge_slots, comfort_active_slots)
+        battery_dispatch_slots: dict[int, tuple[float, float]] | None = None
+        if battery is not None:
+            battery_dispatch_slots = {
+                slot: (
+                    solver.Value(charge_variables[slot]) / POWER_SCALE,
+                    solver.Value(discharge_variables[slot]) / POWER_SCALE,
+                )
+                for slot in range(horizon_slots)
+            }
+        plans = _proposal_plan(
+            scenario,
+            selected_slots,
+            ev_charge_slots,
+            comfort_active_slots,
+            battery_dispatch_slots,
+        )
         slots: list[dict[str, float | int]] = []
         energy_cost = 0.0
         export_revenue = 0.0
@@ -411,7 +426,7 @@ class CpSatOptimizer:
         return build_result(
             scenario_id=scenario.id,
             status=_status_for_tiers(status, degraded),
-            plan=plans[0],
+            plan=plans[0] if plans else None,
             plans=plans,
             objective_values={
                 "start_slot_sum": float(sum(selected_slots.values())),
@@ -425,6 +440,7 @@ class CpSatOptimizer:
             },
             constraint_summary={
                 "hard_satisfied": True,
+                "battery_actuator_bound": battery is not None and battery.actuator is not None,
                 "slots": slots,
                 "violations": [],
                 "soft_violations": _reported_soft_violations(solver, soft_violations),
@@ -539,7 +555,7 @@ def _objective_terms(
     weight = objective.weight
     terms: list[Any] = []
     if objective.name == "minimize_start":
-        coefficient = max(1, round(sign * weight))
+        coefficient = sign * max(1, round(weight))
         for variables in start_variables.values():
             for start, variable in variables.items():
                 terms.append(coefficient * start * variable)
@@ -728,6 +744,7 @@ def _proposal_plan(
     selected_slots: dict[str, int],
     ev_charge_slots: dict[str, dict[int, float]] | None = None,
     comfort_active_slots: dict[str, list[int]] | None = None,
+    battery_dispatch_slots: dict[int, tuple[float, float]] | None = None,
 ) -> list[Plan]:
     def _slot_execute_at(slot: int) -> datetime:
         return scenario.horizon.start + timedelta(
@@ -740,7 +757,7 @@ def _proposal_plan(
         groups.setdefault(_slot_execute_at(slot), []).append(load)
         if load.end_command is not None:
             end_slot = slot + load.duration_slots
-            if end_slot < scenario.horizon.slots:
+            if end_slot <= scenario.horizon.slots:
                 groups.setdefault(_slot_execute_at(end_slot), []).append(
                     Command(
                         id=f"{scenario.id}:{load.id}:end",
@@ -755,7 +772,13 @@ def _proposal_plan(
     ev_loads_by_id = {ev_load.id: ev_load for ev_load in scenario.ev_loads}
     for ev_id, slot_charges in (ev_charge_slots or {}).items():
         ev_load = ev_loads_by_id[ev_id]
-        for slot, charge_kw in slot_charges.items():
+        positive_slots = [slot for slot, charge_kw in slot_charges.items() if charge_kw > 0]
+        if not positive_slots:
+            continue
+        first_slot = min(positive_slots)
+        last_slot = max(positive_slots)
+        for slot in range(first_slot, last_slot + 1):
+            charge_kw = slot_charges.get(slot, 0.0)
             groups.setdefault(_slot_execute_at(slot), []).append(
                 Command(
                     id=f"{scenario.id}:{ev_load.id}:{slot}",
@@ -767,33 +790,143 @@ def _proposal_plan(
                     intent=f"scheduled_slot:{slot}",
                 )
             )
-        if slot_charges:
-            end_slot = max(slot_charges) + 1
-            if end_slot < scenario.horizon.slots:
-                groups.setdefault(_slot_execute_at(end_slot), []).append(
-                    Command(
-                        id=f"{scenario.id}:{ev_load.id}:end",
-                        device_id=ev_load.device_id,
-                        command=ev_load.command,
-                        value=0.0,
-                        unit="kW",
-                        idempotency_key=f"optimization:{scenario.id}:{ev_load.id}:end",
-                        intent=f"scheduled_slot:{end_slot}",
-                    )
-                )
+        end_slot = last_slot + 1
+        groups.setdefault(_slot_execute_at(end_slot), []).append(
+            Command(
+                id=f"{scenario.id}:{ev_load.id}:end",
+                device_id=ev_load.device_id,
+                command=ev_load.command,
+                value=0.0,
+                unit="kW",
+                idempotency_key=f"optimization:{scenario.id}:{ev_load.id}:end",
+                intent=f"scheduled_slot:{end_slot}",
+            )
+        )
     comfort_loads_by_id = {comfort_load.id: comfort_load for comfort_load in scenario.comfort_loads}
     for comfort_id, active_slots in (comfort_active_slots or {}).items():
         comfort_load = comfort_loads_by_id[comfort_id]
-        for slot in active_slots:
-            groups.setdefault(_slot_execute_at(slot), []).append(
+        sorted_slots = sorted(set(active_slots))
+        if not sorted_slots:
+            continue
+        run_start = sorted_slots[0]
+        previous_slot = sorted_slots[0]
+        runs: list[tuple[int, int]] = []
+        for slot in sorted_slots[1:]:
+            if slot != previous_slot + 1:
+                runs.append((run_start, previous_slot + 1))
+                run_start = slot
+            previous_slot = slot
+        runs.append((run_start, previous_slot + 1))
+        for run_start, run_end in runs:
+            assert comfort_load.end_command is not None
+            groups.setdefault(_slot_execute_at(run_start), []).append(
                 Command(
-                    id=f"{scenario.id}:{comfort_load.id}:{slot}",
+                    id=f"{scenario.id}:{comfort_load.id}:start:{run_start}",
                     device_id=comfort_load.device_id,
                     command=comfort_load.command,
                     value=comfort_load.value,
                     unit=comfort_load.unit,
-                    idempotency_key=f"optimization:{scenario.id}:{comfort_load.id}:{slot}",
+                    idempotency_key=(
+                        f"optimization:{scenario.id}:{comfort_load.id}:start:{run_start}"
+                    ),
+                    intent=f"scheduled_slot:{run_start}",
+                )
+            )
+            groups.setdefault(_slot_execute_at(run_end), []).append(
+                Command(
+                    id=f"{scenario.id}:{comfort_load.id}:end:{run_end}",
+                    device_id=comfort_load.device_id,
+                    command=comfort_load.end_command,
+                    value=comfort_load.end_value,
+                    unit=comfort_load.unit,
+                    idempotency_key=(
+                        f"optimization:{scenario.id}:{comfort_load.id}:end:{run_end}"
+                    ),
+                    intent=f"scheduled_slot:{run_end}",
+                )
+            )
+    battery = scenario.energy_context.battery if scenario.energy_context is not None else None
+    actuator = battery.actuator if battery is not None else None
+    if actuator is not None:
+        previous_state: tuple[str, float | None] = (actuator.stop_command, None)
+        for slot in range(scenario.horizon.slots):
+            charge_kw, discharge_kw = (battery_dispatch_slots or {}).get(slot, (0.0, 0.0))
+            if charge_kw > 0 and discharge_kw > 0:
+                raise ValueError("battery dispatch cannot charge and discharge simultaneously")
+            if charge_kw > 0:
+                state: tuple[str, float | None] = (actuator.charge_command, charge_kw)
+                unit = actuator.power_unit
+            elif discharge_kw > 0:
+                state = (actuator.discharge_command, discharge_kw)
+                unit = actuator.power_unit
+            else:
+                state = (actuator.stop_command, None)
+                unit = None
+            if state == previous_state:
+                continue
+            if state[1] is None:
+                feedback_value = 0.0
+            elif state[0] == actuator.charge_command:
+                feedback_value = state[1] * (
+                    1 if actuator.power_feedback_convention == "charge_positive" else -1
+                )
+            else:
+                feedback_value = state[1] * (
+                    -1 if actuator.power_feedback_convention == "charge_positive" else 1
+                )
+            groups.setdefault(_slot_execute_at(slot), []).append(
+                Command(
+                    id=f"{scenario.id}:battery:{slot}",
+                    device_id=actuator.device_id,
+                    command=state[0],
+                    value=state[1],
+                    unit=unit,
+                    idempotency_key=f"optimization:{scenario.id}:battery:{slot}",
                     intent=f"scheduled_slot:{slot}",
+                    postconditions=[
+                        CommandPostcondition(
+                            capability=actuator.power_feedback_capability,
+                            expected=feedback_value,
+                            tolerance=actuator.power_feedback_tolerance_kw,
+                            settle_timeout_seconds=(
+                                actuator.power_feedback_settle_timeout_seconds
+                            ),
+                            poll_interval_seconds=actuator.power_feedback_poll_interval_seconds,
+                            reconcile_capabilities=(
+                                [actuator.soc_reconciliation_capability]
+                                if actuator.soc_reconciliation_capability is not None
+                                else []
+                            ),
+                        )
+                    ],
+                )
+            )
+            previous_state = state
+        if previous_state[0] != actuator.stop_command:
+            horizon_slot = scenario.horizon.slots
+            groups.setdefault(_slot_execute_at(horizon_slot), []).append(
+                Command(
+                    id=f"{scenario.id}:battery:{horizon_slot}:end",
+                    device_id=actuator.device_id,
+                    command=actuator.stop_command,
+                    idempotency_key=f"optimization:{scenario.id}:battery:{horizon_slot}:end",
+                    intent=f"scheduled_slot:{horizon_slot}",
+                    postconditions=[
+                        CommandPostcondition(
+                            capability=actuator.power_feedback_capability,
+                            expected=0.0,
+                            tolerance=actuator.power_feedback_tolerance_kw,
+                            settle_timeout_seconds=(
+                                actuator.power_feedback_settle_timeout_seconds
+                            ),
+                            poll_interval_seconds=actuator.power_feedback_poll_interval_seconds,
+                            reconcile_capabilities=(
+                                [actuator.soc_reconciliation_capability]
+                                if actuator.soc_reconciliation_capability is not None
+                                else []
+                            ),
+                        )
+                    ],
                 )
             )
     ordered_times = sorted(groups)

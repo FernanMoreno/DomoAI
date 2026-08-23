@@ -30,6 +30,7 @@ def choose_policy(
     device_id: str,
     area_id: str | None,
     capability: str | None = None,
+    command: str | None = None,
     value: Any = None,
     risk_class: str | None = None,
 ) -> PolicyDecision:
@@ -37,6 +38,7 @@ def choose_policy(
         "device_id": device_id,
         "area_id": area_id,
         "capability": capability,
+        "command": command,
         "value": value,
         "risk_class": risk_class,
     }

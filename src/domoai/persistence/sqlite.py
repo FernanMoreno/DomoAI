@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+
+from domoai.runtime.clock import Clock, SystemClock
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -50,9 +51,12 @@ class _InstrumentedConnection:
 
 
 class SQLiteDatabase:
-    def __init__(self, path: Path, *, busy_timeout_ms: int = 5000) -> None:
+    def __init__(
+        self, path: Path, *, busy_timeout_ms: int = 5000, clock: Clock | None = None
+    ) -> None:
         self.path = path
         self._busy_timeout_ms = busy_timeout_ms
+        self._clock = clock or SystemClock()
         self._connection: sqlite3.Connection | None = None
         self._metrics = DbOperationMetrics()
 
@@ -81,23 +85,33 @@ class SQLiteDatabase:
             for migration in sorted((migrations_dir or MIGRATIONS_DIR).glob("*.sql")):
                 if migration.name in applied:
                     continue
+                migration_sql = migration.read_text(encoding="utf-8")
                 try:
-                    self._connection.executescript(migration.read_text(encoding="utf-8"))
+                    self._connection.executescript(migration_sql)
                 except sqlite3.OperationalError as error:
                     self._connection.rollback()
                     if "duplicate column name" not in str(error):
                         raise
                     # ALTER TABLE ... ADD COLUMN has no native "IF NOT EXISTS"
                     # form in SQLite; a duplicate-column failure here means
-                    # this migration's effect is already present (e.g. the
-                    # schema was reconstructed from a snapshot after the
-                    # ledger lost track of which migrations had run) —
-                    # equivalent to the CREATE TABLE IF NOT EXISTS
-                    # idempotency every other migration already relies on,
-                    # not a real failure.
+                    # this migration's structural step is already present
+                    # (e.g. the schema was reconstructed from a snapshot after
+                    # the ledger lost track of which migrations had run).
+                    # Re-run the remaining statements instead of merely
+                    # registering the migration: a following backfill must not
+                    # be lost in this historical-recovery path.
+                    for statement in migration_sql.split(";"):
+                        normalized = statement.strip()
+                        if not normalized:
+                            continue
+                        if normalized.upper().startswith("ALTER TABLE") and " ADD COLUMN " in (
+                            normalized.upper()
+                        ):
+                            continue
+                        self._connection.execute(normalized)
                 self._connection.execute(
                     "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
-                    (migration.name, datetime.now(UTC).isoformat()),
+                    (migration.name, self._clock.now().isoformat()),
                 )
                 self._connection.commit()
         finally:

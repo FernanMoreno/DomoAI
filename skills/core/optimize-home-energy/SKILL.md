@@ -1,7 +1,7 @@
 ---
 name: optimize-home-energy
 description: Coordinate semantic home reads and solver proposals while preserving runtime approval and execution safety.
-contract_version: v2
+contract_version: v3
 ---
 
 # Optimize home energy
@@ -12,7 +12,7 @@ does not grant authorization and it never calls a physical adapter directly.
 
 ## Contract metadata
 
-- Contract version: `v2`
+- Contract version: `v3`
 - Fixture reference: `tests/integration/test_core_skill.py`
 - Safety owner: DomoAI runtime policy and plan executor
 - Host mapping: every DomoAI operation uses one general `mcp` connection;
@@ -28,7 +28,7 @@ does not grant authorization and it never calls a physical adapter directly.
 - `validate_plan`
 - `explain_solution`
 - `operator_approval`
-- `execute_plan`
+- `commit_or_schedule_bundle`
 
 ## Operation bindings
 
@@ -39,7 +39,7 @@ does not grant authorization and it never calls a physical adapter directly.
 - `validate_plan` → `mcp.validate_plan` (`validation`)
 - `explain_solution` → `mcp.explain_solution` (`read`)
 - `operator_approval` → `operator.request_approval` (`approval`)
-- `execute_plan` → `mcp.execute_plan` (`mutation`)
+- `commit_or_schedule_bundle` → `mcp.commit_or_schedule_bundle` (`mutation`)
 
 ## Procedure
 
@@ -58,15 +58,43 @@ does not grant authorization and it never calls a physical adapter directly.
 6. `explain_solution` — explain selected slots, hard constraints, diagnostics and
    assumptions in user-facing language.
 7. `operator_approval` — if policy or risk requires confirmation, pause and ask
-   the operator. The skill cannot approve its own plan.
-8. `execute_plan` — execute only the validated plan with the matching digest and
-   approval. The runtime performs the final revision, policy and postcondition
-   checks.
+   the operator. For a bundle, approve the complete ordered `bundle_digest`
+   shown in the explanation; the skill cannot approve its own plan.
+8. `commit_or_schedule_bundle` — hand the complete ordered bundle to the
+   runtime-owned commit boundary with the bundle digest and per-member
+   approval ids. The runtime performs preflight, durable scheduling or
+   sequential physical execution, final revision/policy checks and recovery
+   bookkeeping. It never infers rollback for an already written member.
 
 ## Safety rules
 
 - A missing approval is a stop condition, not an invitation to retry execution.
 - A changed runtime revision or validation digest requires revalidation.
+- Battery telemetry or mathematical limits without an explicit actuator
+  binding are analysis-only. Non-zero battery dispatch must stop with
+  `battery_actuation_unbound` before approval, scheduling, or execution.
+- A bound battery must identify a canonical device/capability and distinct
+  charge, discharge, and stop commands. The runtime must revalidate those
+  commands against the live inventory and safety boundary; the skill never
+  infers a physical route from battery telemetry.
+- A dispatchable battery must also identify one readable numeric `kW`
+  `power_feedback_capability`, its `charge_positive`/`discharge_positive`
+  convention, and a positive tolerance. Compiled battery commands carry this
+  measured-power postcondition; missing, stale, unavailable, invalid, or
+  mismatching feedback is `UNKNOWN`, never confirmed success.
+- `BatteryState` is read-only planning evidence for initial SOC, not an
+  authorization or closed-loop post-execution guarantee. Inverter settling,
+  SOC reconciliation, and crash recovery remain separate contracts.
+- Plan execution performs a plan-wide safety preflight before the first
+  physical write. Known precondition or configured SafetyKernel failures
+  reject the attempt with no adapter call; sequential effects are projected
+  only for canonical deterministic commands, and just-in-time checks still
+  run before every write.
+- `bundle_digest` identifies the human-reviewed ordered bundle; each member's
+  `validation_digest` remains the runtime authority for MCP approval and
+  each bundle-bound approval grant is also checked against the same
+  `bundle_digest`. A successful workflow may therefore be `scheduled` without
+  meaning that physical execution has already happened.
 - The skill may explain or revise a proposal, but may not edit runtime policies.
 - Vendor APIs, adapter identifiers, extra MCP servers and arbitrary
   Python/solver code are outside this procedure.

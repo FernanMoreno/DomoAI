@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from domoai.domain.models import (
     AuditEvent,
+    BundleCommit,
+    BundleCommitStatus,
+    BundleMemberCommitStatus,
     Command,
     Device,
     ExecutionOutcome,
@@ -20,6 +23,7 @@ from domoai.domain.models import (
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import redact_payload
+from domoai.runtime.state_store import StateStoreMetadata
 
 _TABLES = {"devices", "policies", "plans"}
 
@@ -102,7 +106,7 @@ class AuditEventRepository:
     async def list_all(self) -> list[AuditEvent]:
         cursor = self.database.connection.execute(
             """SELECT id, event_type, actor, subject_id, payload, created_at
-               FROM audit_events ORDER BY created_at, id"""
+               FROM audit_events ORDER BY julianday(created_at), id"""
         )
         rows = cursor.fetchall()
         cursor.close()
@@ -137,8 +141,10 @@ class AuditEventRepository:
             clauses.append("subject_id = ?")
             params.append(subject_id)
         if since is not None:
-            clauses.append("created_at > ?")
-            params.append(since.isoformat())
+            if since.tzinfo is None or since.utcoffset() is None:
+                raise ValueError("since must be timezone-aware")
+            clauses.append("julianday(created_at) > julianday(?)")
+            params.append(since.astimezone(UTC).isoformat())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
         params.append(bounded_limit)
@@ -146,7 +152,7 @@ class AuditEventRepository:
         cursor = self.database.connection.execute(
             f"""SELECT id, event_type, actor, subject_id, payload, created_at
                 FROM audit_events {where}
-                ORDER BY created_at DESC, id DESC
+                ORDER BY julianday(created_at) DESC, id DESC
                 LIMIT ?""",
             params,
         )
@@ -190,10 +196,47 @@ class PlanRepository:
         payload = await self._repository.get(plan_id)
         return Plan.model_validate(payload) if payload is not None else None
 
+    async def mark_unknown_if_executing(self, plan_id: str) -> bool:
+        """Atomically settle orphan evidence without making it claimable again."""
+
+        row = self._repository.database.connection.execute(
+            "SELECT payload FROM plans WHERE id = ? AND status = ?",
+            (plan_id, PlanStatus.EXECUTING.value),
+        ).fetchone()
+        if row is None:
+            return False
+        payload = json.loads(row[0])
+        payload["status"] = PlanStatus.UNKNOWN.value
+        cursor = self._repository.database.connection.execute(
+            """UPDATE plans SET status = ?, payload = ?, updated_at = ?
+               WHERE id = ? AND status = ?""",
+            (
+                PlanStatus.UNKNOWN.value,
+                json.dumps(payload, sort_keys=True),
+                self.clock.now().isoformat(),
+                plan_id,
+                PlanStatus.EXECUTING.value,
+            ),
+        )
+        if cursor.rowcount == 0:
+            self._repository.database.connection.rollback()
+            return False
+        self._repository.database.connection.commit()
+        return True
+
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool:
-        placeholders = ",".join("?" for _ in allowed_statuses)
+        if plan.status is not PlanStatus.EXECUTING:
+            return False
+        claimable_statuses = frozenset(
+            status
+            for status in allowed_statuses
+            if status in {PlanStatus.READY, PlanStatus.APPROVED}
+        )
+        if not claimable_statuses:
+            return False
+        placeholders = ",".join("?" for _ in claimable_statuses)
         timestamp = self.clock.now().isoformat()
         cursor = self._repository.database.connection.execute(
             f"""INSERT INTO plans (id, payload, status, updated_at)
@@ -206,7 +249,7 @@ class PlanRepository:
                 json.dumps(plan.model_dump(mode="json"), sort_keys=True),
                 plan.status.value,
                 timestamp,
-                *(status.value for status in allowed_statuses),
+                *(status.value for status in claimable_statuses),
             ),
         )
         self._repository.database.connection.commit()
@@ -221,6 +264,120 @@ class PlanRepository:
         rows = cursor.fetchall()
         cursor.close()
         return [Plan.model_validate(json.loads(row[0])) for row in rows]
+
+
+class BundleCommitRepository:
+    """Durable aggregate state for one ordered bundle commit saga."""
+
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+        self.database = database
+        self.clock = clock or SystemClock()
+
+    async def save(self, bundle: BundleCommit) -> BundleCommit:
+        updated = bundle.model_copy(update={"updated_at": self.clock.now()})
+        self.database.connection.execute(
+            """INSERT INTO bundle_commits
+               (id, bundle_digest, status, payload, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               bundle_digest=excluded.bundle_digest,
+               status=excluded.status,
+               payload=excluded.payload,
+               updated_at=excluded.updated_at""",
+            (
+                updated.id,
+                updated.bundle_digest,
+                updated.status.value,
+                json.dumps(updated.model_dump(mode="json"), sort_keys=True),
+                updated.updated_at.isoformat(),
+            ),
+        )
+        self.database.connection.commit()
+        return updated
+
+    async def get(self, bundle_id: str) -> BundleCommit | None:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM bundle_commits WHERE id = ?", (bundle_id,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        return BundleCommit.model_validate(json.loads(row[0])) if row else None
+
+    async def get_by_digest(self, bundle_digest: str) -> BundleCommit | None:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM bundle_commits WHERE bundle_digest = ?", (bundle_digest,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        return BundleCommit.model_validate(json.loads(row[0])) if row else None
+
+    async def list_non_terminal(self) -> list[BundleCommit]:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM bundle_commits WHERE status = ? ORDER BY updated_at",
+            (BundleCommitStatus.COMMITTING.value,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [BundleCommit.model_validate(json.loads(row[0])) for row in rows]
+
+    async def schedule_members_transaction(
+        self,
+        bundle: BundleCommit,
+        plans: list[Plan],
+        member_indexes: list[int],
+        *,
+        final_status: BundleCommitStatus,
+    ) -> BundleCommit:
+        if len(plans) != len(member_indexes):
+            raise ValueError("plans and member_indexes must have the same length")
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN")
+            for plan in plans:
+                if plan.execute_at is None:
+                    raise ValueError("future bundle members require execute_at")
+                connection.execute(
+                    """INSERT INTO scheduled_plans
+                       (plan_id, execute_at, status, payload, updated_at)
+                       VALUES (?, ?, 'pending', ?, ?)""",
+                    (
+                        plan.id,
+                        plan.execute_at.isoformat(),
+                        json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                        self.clock.now().isoformat(),
+                    ),
+                )
+            members = list(bundle.members)
+            for index in member_indexes:
+                members[index] = members[index].model_copy(
+                    update={
+                        "status": BundleMemberCommitStatus.SCHEDULED,
+                        "scheduled": True,
+                    }
+                )
+            updated = bundle.model_copy(
+                update={
+                    "members": members,
+                    "status": final_status,
+                    "updated_at": self.clock.now(),
+                }
+            )
+            connection.execute(
+                """UPDATE bundle_commits
+                   SET status = ?, payload = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    updated.status.value,
+                    json.dumps(updated.model_dump(mode="json"), sort_keys=True),
+                    updated.updated_at.isoformat(),
+                    updated.id,
+                ),
+            )
+            connection.commit()
+            return updated
+        except Exception:
+            connection.rollback()
+            raise
 
 
 class DeviceRepository:
@@ -277,6 +434,77 @@ class StateSnapshotRepository:
         self.database.connection.commit()
 
 
+class RuntimeStateMetadataRepository:
+    """Persists StateStore's revision/version continuity across restarts."""
+
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+        self.database = database
+        self.clock = clock or SystemClock()
+
+    async def get(self) -> StateStoreMetadata | None:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM runtime_state_metadata WHERE id = 1"
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        state_versions: dict[tuple[str, str], int] = {}
+        raw_state_versions = payload.get("state_versions", {})
+        if not isinstance(raw_state_versions, dict):
+            raw_state_versions = {}
+        for key, version in raw_state_versions.items():
+            device_id, separator, capability = str(key).partition("::")
+            if (
+                separator
+                and device_id
+                and capability
+                and isinstance(version, int)
+                and not isinstance(version, bool)
+            ):
+                state_versions[(device_id, capability)] = version
+        inventory_revision = payload.get("inventory_revision", 0)
+        version_counter = payload.get("version_counter", 0)
+        if not isinstance(inventory_revision, int) or isinstance(inventory_revision, bool):
+            inventory_revision = 0
+        if not isinstance(version_counter, int) or isinstance(version_counter, bool):
+            version_counter = 0
+        inventory_fingerprint = payload.get("inventory_fingerprint")
+        if not isinstance(inventory_fingerprint, str) or not inventory_fingerprint:
+            inventory_fingerprint = None
+        return StateStoreMetadata(
+            inventory_revision=max(0, inventory_revision),
+            version_counter=max(0, version_counter),
+            state_versions=state_versions,
+            inventory_fingerprint=inventory_fingerprint,
+        )
+
+    async def save(self, metadata: StateStoreMetadata) -> None:
+        payload = {
+            "inventory_revision": metadata.inventory_revision,
+            "version_counter": metadata.version_counter,
+            "state_versions": {
+                f"{device_id}::{capability}": version
+                for (device_id, capability), version in metadata.state_versions.items()
+            },
+            "inventory_fingerprint": metadata.inventory_fingerprint,
+        }
+        self.database.connection.execute(
+            """INSERT INTO runtime_state_metadata (id, payload, updated_at)
+               VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               payload=excluded.payload, updated_at=excluded.updated_at""",
+            (json.dumps(payload, sort_keys=True), self.clock.now().isoformat()),
+        )
+        self.database.connection.commit()
+
+
 class ExecutionOutcomeRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
@@ -325,6 +553,8 @@ class ExecutionOutcomeRepository:
 
 
 class ScheduledPlanRepository:
+    _RECONCILABLE_STATUSES = frozenset({"executed", "failed", "unknown", "cancelled"})
+
     def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
         self.database = database
         self.clock = clock or SystemClock()
@@ -366,8 +596,17 @@ class ScheduledPlanRepository:
         cursor.close()
         return [Plan.model_validate(json.loads(row[0])) for row in rows]
 
-    async def mark_executed(self, plan_id: str) -> None:
-        await self._transition(plan_id, "executed")
+    async def mark_executed(self, plan_id: str) -> bool:
+        return await self.reconcile_terminal(plan_id, "executed")
+
+    async def reconcile_terminal(self, plan_id: str, status: str) -> bool:
+        """Converge a pending row to a terminal status without overwriting decisions."""
+        if status not in self._RECONCILABLE_STATUSES:
+            raise ValueError(f"Unsupported terminal scheduled-plan status: {status}")
+        if await self._transition(plan_id, status):
+            return True
+        existing = await self.get(plan_id)
+        return existing is not None and existing[1] == status
 
     async def mark_missed(self, plan_id: str) -> None:
         await self._transition(plan_id, "missed")

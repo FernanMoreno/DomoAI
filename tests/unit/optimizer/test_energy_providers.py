@@ -3,20 +3,87 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from domoai.optimizer.energy import TariffPoint
+from domoai.domain.models import SourceRef, StateSnapshot, StateStatus
+from domoai.domain.provider import (
+    Measurement,
+    MeasurementQuality,
+    NominalCapacityAttestation,
+)
+from domoai.optimizer.energy import (
+    BatteryActuator,
+    BatteryCapacityEvidence,
+    BatterySocObservation,
+    DispatchableBatteryBinding,
+    NominalCapacityTrustPolicy,
+    TariffPoint,
+)
 from domoai.optimizer.providers import (
     BatteryState,
     ComposedEnergyContextProvider,
     EnergyProviderError,
     SolarForecastSeries,
+    StateStoreBatteryProvider,
     StaticBatteryProvider,
     StaticSolarForecastProvider,
     StaticTariffProvider,
     TariffSeries,
+    battery_capacity_evidence_from_measurement,
+    battery_soc_observation_from_measurement,
+    battery_soc_observation_from_percentage_measurement,
+    validate_nominal_capacity_trust,
 )
+from domoai.runtime.state_store import StateStore
 from tests.fixtures.energy import energy_context_for
 
 NOW = datetime(2026, 8, 15, 12, 5, tzinfo=UTC)
+
+
+def nominal_capacity_attestation() -> NominalCapacityAttestation:
+    return NominalCapacityAttestation(
+        evidence_type="vendor_documentation",
+        reference="https://www.tesla.com/powerwall",
+        subject_model="Powerwall 2",
+        attested_by="operator",
+        attested_at=datetime(2026, 8, 22, 12, tzinfo=UTC),
+    )
+
+
+def dispatchable_battery_state(
+    *,
+    observation: BatterySocObservation | None = None,
+    source_id: str = "battery_fixture",
+) -> BatteryState:
+    context = energy_context_for()
+    assert context.battery is not None
+    observation = observation or BatterySocObservation(
+        provider_id=source_id,
+        device_id="battery.home",
+        value_kwh=context.battery.initial_soc_kwh,
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        source_ref=SourceRef(adapter_id=source_id, external_id="battery_entity"),
+    )
+    profile = context.battery.model_copy(
+        update={
+            "actuator": BatteryActuator(
+                device_id="battery.home",
+                capability="battery_power",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery_power",
+                power_feedback_tolerance_kw=0.1,
+            ),
+            "initial_soc_observation": observation,
+        }
+    )
+    return BatteryState(
+        horizon=context.horizon,
+        source_id=source_id,
+        source_revision="state-1",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        battery=profile,
+    )
 
 
 def provider_inputs() -> tuple[TariffSeries, SolarForecastSeries, BatteryState]:
@@ -54,6 +121,469 @@ def provider() -> ComposedEnergyContextProvider:
         StaticBatteryProvider(battery),
         now=lambda: NOW,
     )
+
+
+def _battery_snapshot(
+    value: object,
+    *,
+    unit: str | None = "kWh",
+    status: StateStatus = StateStatus.CURRENT,
+    provider_id: str = "battery_fixture",
+    device_id: str = "battery.home",
+    observed_at: datetime = datetime(2026, 8, 15, 12, tzinfo=UTC),
+) -> StateSnapshot:
+    return StateSnapshot(
+        device_id=device_id,
+        capability="battery.soc",
+        value=value,
+        unit=unit,
+        observed_at=observed_at,
+        received_at=observed_at,
+        status=status,
+        source_ref=SourceRef(adapter_id=provider_id, external_id="battery_entity"),
+    )
+
+
+async def _battery_store(snapshot: StateSnapshot) -> StateStore:
+    store = StateStore()
+    await store.save(snapshot)
+    return store
+
+
+def _battery_provider_profile():
+    context = energy_context_for()
+    assert context.battery is not None
+    return context.battery
+
+
+def _dispatchable_battery_provider_profile():
+    return _battery_provider_profile().model_copy(
+        update={
+            "actuator": BatteryActuator(
+                device_id="battery.home",
+                capability="battery_power",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery_power",
+                power_feedback_tolerance_kw=0.1,
+                soc_reconciliation_capability="battery.soc",
+            )
+        }
+    )
+
+
+def _measured_capacity_evidence() -> BatteryCapacityEvidence:
+    return BatteryCapacityEvidence(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        capacity_kwh=8.0,
+        capacity_source="provider_measurement",
+        source_ref=SourceRef(
+            adapter_id="battery_fixture", external_id="battery_capacity"
+        ),
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        nominal_capacity_attestation=nominal_capacity_attestation(),
+    )
+
+
+def _nominal_capacity_trust_policy() -> NominalCapacityTrustPolicy:
+    return NominalCapacityTrustPolicy(
+        allowed_evidence_types=["vendor_documentation"],
+        trusted_attesters=["operator"],
+        trusted_references=["https://www.tesla.com/powerwall"],
+    )
+
+
+def _complete_dispatchable_binding(
+    *, measured_capacity: bool = False, policy: NominalCapacityTrustPolicy | None = None
+) -> DispatchableBatteryBinding:
+    profile = _dispatchable_battery_provider_profile()
+    evidence = BatteryCapacityEvidence(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        capacity_kwh=profile.capacity_kwh,
+        capacity_source="provider_measurement" if measured_capacity else "provider_config",
+        source_ref=(
+            SourceRef(adapter_id="battery_fixture", external_id="battery_capacity")
+            if measured_capacity
+            else None
+        ),
+        observed_at=(datetime(2026, 8, 15, 12, tzinfo=UTC) if measured_capacity else None),
+        received_at=(datetime(2026, 8, 15, 12, tzinfo=UTC) if measured_capacity else None),
+        nominal_capacity_attestation=(
+            nominal_capacity_attestation() if measured_capacity else None
+        ),
+    )
+    return DispatchableBatteryBinding(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        profile=profile,
+        capacity_evidence=evidence,
+        capacity_trust_policy=policy,
+    )
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_composes_current_kwh_into_energy_context() -> None:
+    store = await _battery_store(_battery_snapshot(3.25))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+    )
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.battery is not None
+    assert state.battery.initial_soc_kwh == pytest.approx(3.25)
+    assert state.battery.initial_soc_observation is not None
+    assert state.battery.initial_soc_observation.value_kwh == pytest.approx(3.25)
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        provider,
+        now=lambda: NOW,
+    )
+    context = composed.get_context(energy_context_for().horizon)
+    assert context.battery is not None
+    assert context.battery.initial_soc_kwh == pytest.approx(3.25)
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_converts_percent_only_with_matching_capacity() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    capacity = BatteryCapacityEvidence(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        capacity_kwh=8.0,
+    )
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+        capacity_evidence=capacity,
+    )
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.battery is not None
+    assert state.battery.initial_soc_kwh == pytest.approx(4.0)
+    observation = state.battery.initial_soc_observation
+    assert observation is not None
+    assert observation.conversion_evidence is not None
+    assert observation.conversion_evidence.capacity == capacity
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_from_binding_is_explicit_and_complete() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    binding = _complete_dispatchable_binding()
+
+    provider = StateStoreBatteryProvider.from_binding(
+        state_store=store,
+        binding=binding,
+    )
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.battery is not None
+    assert state.battery.actuator is not None
+    assert state.battery.initial_soc_kwh == pytest.approx(3.0)
+
+
+def test_state_store_battery_provider_from_binding_checks_measured_trust_before_use() -> None:
+    binding = _complete_dispatchable_binding(
+        measured_capacity=True,
+        policy=_nominal_capacity_trust_policy(),
+    )
+    mismatched_policy = binding.capacity_trust_policy.model_copy(
+        update={"trusted_attesters": ["other-operator"]}
+    )
+    mismatched_binding = binding.model_copy(
+        update={"capacity_trust_policy": mismatched_policy}
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        StateStoreBatteryProvider.from_binding(
+            state_store=StateStore(),
+            binding=mismatched_binding,
+        )
+
+    assert raised.value.diagnostic.code == "nominal_capacity_attester_not_trusted"
+
+
+def test_nominal_capacity_trust_evaluator_requires_server_policy() -> None:
+    with pytest.raises(EnergyProviderError) as raised:
+        validate_nominal_capacity_trust(_measured_capacity_evidence(), None)
+
+    assert raised.value.diagnostic.code == "nominal_capacity_trust_required"
+    assert "tesla" not in str(raised.value).casefold()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        (
+            "allowed_evidence_types",
+            ["installer_attestation"],
+            "nominal_capacity_evidence_type_not_trusted",
+        ),
+        (
+            "trusted_attesters",
+            ["other-operator"],
+            "nominal_capacity_attester_not_trusted",
+        ),
+        (
+            "trusted_references",
+            ["other-reference"],
+            "nominal_capacity_reference_not_trusted",
+        ),
+    ],
+)
+def test_nominal_capacity_trust_evaluator_requires_all_exact_dimensions(
+    field: str, value: list[str], code: str
+) -> None:
+    policy = _nominal_capacity_trust_policy().model_copy(update={field: value})
+
+    with pytest.raises(EnergyProviderError) as raised:
+        validate_nominal_capacity_trust(_measured_capacity_evidence(), policy)
+
+    assert raised.value.diagnostic.code == code
+
+
+def test_nominal_capacity_trust_evaluator_accepts_exact_match() -> None:
+    validate_nominal_capacity_trust(
+        _measured_capacity_evidence(), _nominal_capacity_trust_policy()
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatchable_state_store_provider_requires_trust_for_measured_capacity() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_dispatchable_battery_provider_profile(),
+        capacity_evidence=_measured_capacity_evidence(),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "nominal_capacity_trust_required"
+
+
+@pytest.mark.asyncio
+async def test_dispatchable_state_store_provider_accepts_trusted_measured_capacity() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_dispatchable_battery_provider_profile(),
+        capacity_evidence=_measured_capacity_evidence(),
+        capacity_trust_policy=_nominal_capacity_trust_policy(),
+    )
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.battery is not None
+    assert state.battery.actuator is not None
+    assert state.battery.initial_soc_kwh == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_and_static_capacity_paths_do_not_require_trust_policy() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    analysis_provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+        capacity_evidence=_measured_capacity_evidence(),
+        capacity_trust_policy=_nominal_capacity_trust_policy(),
+    )
+    analysis_state = analysis_provider.get_state(energy_context_for().horizon)
+    assert analysis_state.battery is not None
+    assert analysis_state.battery.actuator is None
+
+    static_provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_dispatchable_battery_provider_profile(),
+        capacity_evidence=BatteryCapacityEvidence(
+            provider_id="battery_fixture",
+            device_id="battery.home",
+            capacity_kwh=8.0,
+        ),
+    )
+    static_state = static_provider.get_state(energy_context_for().horizon)
+    assert static_state.battery is not None
+    assert static_state.battery.actuator is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_soc_preserves_quality_and_rejects_dispatchable_profile() -> None:
+    store = await _battery_store(_battery_snapshot(3.0, status=StateStatus.STALE))
+    analysis_provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+    )
+    analysis_state = analysis_provider.get_state(energy_context_for().horizon)
+    assert analysis_state.battery is not None
+    assert analysis_state.battery.initial_soc_observation is not None
+    assert (
+        analysis_state.battery.initial_soc_observation.quality
+        is MeasurementQuality.STALE
+    )
+    profile = _battery_provider_profile().model_copy(
+        update={
+            "actuator": BatteryActuator(
+                device_id="battery.home",
+                capability="battery_power",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery_power",
+                power_feedback_tolerance_kw=0.1,
+            )
+        }
+    )
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=profile,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "battery_state_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "value", "unit", "code"),
+    [
+        (StateStatus.UNAVAILABLE, "unavailable", "kWh", "battery_soc_unavailable"),
+        (StateStatus.INVALID, None, "kWh", "battery_soc_invalid"),
+        (StateStatus.CURRENT, 3.0, "Wh", "unsupported_battery_soc_unit"),
+        (StateStatus.CURRENT, "three", "kWh", "invalid_battery_soc_measurement"),
+    ],
+)
+async def test_state_store_battery_provider_fails_closed_for_degraded_snapshots(
+    status: StateStatus, value: object, unit: str, code: str
+) -> None:
+    store = await _battery_store(_battery_snapshot(value, unit=unit, status=status))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == code
+    assert "three" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_rejects_cross_identity_snapshot() -> None:
+    store = await _battery_store(
+        _battery_snapshot(3.0, provider_id="other_provider", device_id="battery.home")
+    )
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "battery_soc_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_rejects_missing_or_bad_capacity() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "invalid_battery_capacity"
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_rejects_cross_identity_capacity() -> None:
+    store = await _battery_store(_battery_snapshot(50, unit="%"))
+    provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=_battery_provider_profile(),
+        capacity_evidence=BatteryCapacityEvidence(
+            provider_id="battery_fixture",
+            device_id="other.battery",
+            capacity_kwh=8.0,
+        ),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "invalid_battery_capacity"
+
+
+@pytest.mark.asyncio
+async def test_state_store_battery_provider_revision_changes_with_snapshot_value() -> None:
+    first_store = await _battery_store(_battery_snapshot(2.0))
+    second_store = await _battery_store(_battery_snapshot(2.5))
+    kwargs = {
+        "provider_id": "battery_fixture",
+        "device_id": "battery.home",
+        "soc_capability": "battery.soc",
+        "profile": _battery_provider_profile(),
+    }
+
+    first = StateStoreBatteryProvider(state_store=first_store, **kwargs).get_state(
+        energy_context_for().horizon
+    )
+    second = StateStoreBatteryProvider(state_store=second_store, **kwargs).get_state(
+        energy_context_for().horizon
+    )
+
+    assert first.source_revision != second.source_revision
 
 
 def test_composer_returns_complete_context_with_deterministic_revision() -> None:
@@ -112,6 +642,506 @@ def test_composer_rejects_a_different_horizon() -> None:
 
     assert raised.value.diagnostic.code == "horizon_mismatch"
     assert raised.value.diagnostic.provider_id == "tariff_fixture"
+
+
+def test_dispatchable_battery_preserves_soc_provenance() -> None:
+    tariffs, solar, _ = provider_inputs()
+    battery = dispatchable_battery_state()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        StaticBatteryProvider(battery),
+        now=lambda: NOW,
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    assert context.battery is not None
+    assert context.battery.initial_soc_observation is not None
+    assert context.battery.initial_soc_observation.device_id == "battery.home"
+    assert context.battery.initial_soc_observation.source_ref.external_id == "battery_entity"
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda profile: profile.model_copy(update={"initial_soc_observation": None}),
+        lambda profile: profile.model_copy(
+            update={
+                "initial_soc_observation": BatterySocObservation(
+                    provider_id="battery_fixture",
+                    device_id="other.battery",
+                    value_kwh=2.0,
+                    observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+                    received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+                    source_ref=SourceRef(
+                        adapter_id="battery_fixture", external_id="battery_entity"
+                    ),
+                )
+            }
+        ),
+        lambda profile: profile.model_copy(
+            update={
+                "initial_soc_observation": BatterySocObservation(
+                    provider_id="other_provider",
+                    device_id="battery.home",
+                    value_kwh=2.0,
+                    observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+                    received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+                    source_ref=SourceRef(adapter_id="other_provider", external_id="battery_entity"),
+                )
+            }
+        ),
+    ],
+)
+def test_dispatchable_battery_requires_coherent_soc_observation(mutator) -> None:
+    state = dispatchable_battery_state()
+    assert state.battery is not None
+    profile = mutator(state.battery)
+
+    with pytest.raises(ValidationError):
+        BatteryState.model_validate(state.model_copy(update={"battery": profile}).model_dump())
+
+
+def test_dispatchable_battery_rejects_non_good_soc_quality() -> None:
+    observation = BatterySocObservation(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        value_kwh=2.0,
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.STALE,
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+
+    with pytest.raises(ValidationError, match="GOOD"):
+        dispatchable_battery_state(observation=observation)
+
+
+def test_dispatchable_battery_rejects_stale_nested_soc_observation() -> None:
+    observation = BatterySocObservation(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        value_kwh=2.0,
+        observed_at=NOW - timedelta(seconds=61),
+        received_at=NOW - timedelta(seconds=60),
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+    tariffs, solar, _ = provider_inputs()
+    tariffs = tariffs.model_copy(update={"observed_at": NOW})
+    solar = solar.model_copy(update={"observed_at": NOW})
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        StaticBatteryProvider(dispatchable_battery_state(observation=observation)),
+        max_age_seconds=60,
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        composed.get_context(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "stale_provider_data"
+    assert raised.value.diagnostic.provider_id == "battery_fixture"
+
+
+def test_dispatchable_battery_rejects_future_nested_soc_observation() -> None:
+    observation = BatterySocObservation(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        value_kwh=2.0,
+        observed_at=NOW + timedelta(seconds=1),
+        received_at=NOW + timedelta(seconds=1),
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        StaticBatteryProvider(dispatchable_battery_state(observation=observation)),
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        composed.get_context(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "invalid_observed_at"
+
+
+def test_measurement_bridge_preserves_soc_provenance() -> None:
+    measurement = Measurement(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        metric="battery.soc",
+        value=2,
+        unit="kWh",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, 1, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+
+    observation = battery_soc_observation_from_measurement(measurement)
+
+    assert observation.model_dump(mode="json") == {
+        "schema_version": "v1",
+        "provider_id": "battery_fixture",
+        "device_id": "battery.home",
+        "metric": "battery.soc",
+        "value_kwh": 2.0,
+        "unit": "kWh",
+        "observed_at": "2026-08-15T12:00:00Z",
+        "received_at": "2026-08-15T12:01:00Z",
+        "quality": "good",
+        "source_ref": {
+            "adapter_id": "battery_fixture",
+            "external_id": "battery_entity",
+            "external_type": None,
+            "metadata_digest": None,
+        },
+        "conversion_evidence": None,
+    }
+
+
+def test_percentage_bridge_converts_and_records_capacity_evidence() -> None:
+    measurement = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.soc",
+        value=50.0,
+        unit="%",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, 1, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(adapter_id="home_assistant", external_id="sensor.battery_soc"),
+    )
+    capacity = BatteryCapacityEvidence(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        capacity_kwh=8.0,
+    )
+
+    observation = battery_soc_observation_from_percentage_measurement(measurement, capacity)
+
+    assert observation.value_kwh == 4.0
+    assert observation.unit == "kWh"
+    assert observation.conversion_evidence is not None
+    assert observation.conversion_evidence.source_value_percent == 50.0
+    assert observation.conversion_evidence.capacity == capacity
+    assert observation.conversion_evidence.method == "percentage_of_declared_capacity"
+
+
+def test_capacity_measurement_bridge_preserves_measured_provenance() -> None:
+    measurement = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.capacity",
+        value=8.0,
+        unit="kWh",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, 1, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(
+            adapter_id="home_assistant", external_id="sensor.battery_capacity"
+        ),
+        nominal_capacity_attestation=nominal_capacity_attestation(),
+    )
+
+    evidence = battery_capacity_evidence_from_measurement(measurement)
+
+    assert evidence.capacity_kwh == 8.0
+    assert evidence.capacity_source == "provider_measurement"
+    assert evidence.quality is MeasurementQuality.GOOD
+    assert evidence.source_ref == measurement.source_ref
+    assert evidence.observed_at == measurement.observed_at
+    assert evidence.received_at == measurement.received_at
+    assert evidence.nominal_capacity_attestation == measurement.nominal_capacity_attestation
+
+
+def test_percentage_bridge_accepts_good_measured_capacity() -> None:
+    soc = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.soc",
+        value=50.0,
+        unit="%",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        source_ref=SourceRef(adapter_id="home_assistant", external_id="sensor.battery_soc"),
+    )
+    capacity = battery_capacity_evidence_from_measurement(
+        Measurement(
+            provider_id="home_assistant",
+            device_id="ha-battery-1",
+            metric="battery.capacity",
+            value=8.0,
+            unit="kWh",
+            observed_at=soc.observed_at,
+            received_at=soc.received_at,
+            source_ref=SourceRef(
+                adapter_id="home_assistant", external_id="sensor.battery_capacity"
+            ),
+            nominal_capacity_attestation=nominal_capacity_attestation(),
+        )
+    )
+
+    observation = battery_soc_observation_from_percentage_measurement(soc, capacity)
+
+    assert observation.value_kwh == 4.0
+    assert observation.conversion_evidence is not None
+    assert observation.conversion_evidence.capacity.capacity_source == "provider_measurement"
+
+
+def test_capacity_measurement_bridge_rejects_non_good_quality() -> None:
+    measurement = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.capacity",
+        value=8.0,
+        unit="kWh",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.STALE,
+        source_ref=SourceRef(
+            adapter_id="home_assistant", external_id="sensor.battery_capacity"
+        ),
+        nominal_capacity_attestation=nominal_capacity_attestation(),
+    )
+
+    evidence = battery_capacity_evidence_from_measurement(measurement)
+    soc = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.soc",
+        value=50.0,
+        unit="%",
+        observed_at=measurement.observed_at,
+        received_at=measurement.received_at,
+        source_ref=SourceRef(adapter_id="home_assistant", external_id="sensor.battery_soc"),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_soc_observation_from_percentage_measurement(soc, evidence)
+
+    assert raised.value.diagnostic.code == "invalid_battery_capacity"
+
+
+def test_capacity_measurement_bridge_requires_nominal_attestation() -> None:
+    measurement = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.capacity",
+        value=8.0,
+        unit="kWh",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        source_ref=SourceRef(
+            adapter_id="home_assistant", external_id="sensor.battery_capacity"
+        ),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_capacity_evidence_from_measurement(measurement)
+
+    assert raised.value.diagnostic.code == "missing_nominal_capacity_attestation"
+
+
+def test_measurement_attestation_is_only_valid_for_capacity() -> None:
+    with pytest.raises(ValueError, match="battery.capacity"):
+        Measurement(
+            provider_id="home_assistant",
+            device_id="ha-battery-1",
+            metric="battery.soc",
+            value=50.0,
+            unit="%",
+            observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+            received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+            source_ref=SourceRef(
+                adapter_id="home_assistant", external_id="sensor.battery_soc"
+            ),
+            nominal_capacity_attestation=nominal_capacity_attestation(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("metric", "unit", "value", "code"),
+    [
+        ("battery.soc", "kWh", 8.0, "invalid_battery_capacity"),
+        ("battery.capacity", "%", 80.0, "unsupported_battery_capacity_unit"),
+        ("battery.capacity", "kWh", 0.0, "invalid_battery_capacity"),
+        ("battery.capacity", "kWh", -1.0, "invalid_battery_capacity"),
+        ("battery.capacity", "kWh", True, "invalid_battery_capacity"),
+        ("battery.capacity", "kWh", float("nan"), "invalid_battery_capacity"),
+    ],
+)
+def test_capacity_measurement_bridge_rejects_ambiguous_inputs(
+    metric: str, unit: str, value: object, code: str
+) -> None:
+    measurement = Measurement.model_construct(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric=metric,
+        value=value,
+        unit=unit,
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(
+            adapter_id="home_assistant", external_id="sensor.battery_capacity"
+        ),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_capacity_evidence_from_measurement(measurement)
+
+    assert raised.value.diagnostic.code == code
+
+
+@pytest.mark.parametrize(
+    ("measurement_value", "capacity_value", "code"),
+    [
+        (-0.1, 8.0, "invalid_battery_soc_percentage"),
+        (100.1, 8.0, "invalid_battery_soc_percentage"),
+        (float("nan"), 8.0, "invalid_battery_soc_percentage"),
+        (True, 8.0, "invalid_battery_soc_percentage"),
+        (50.0, 0.0, "invalid_battery_capacity"),
+        (50.0, -1.0, "invalid_battery_capacity"),
+        (50.0, float("nan"), "invalid_battery_capacity"),
+    ],
+)
+def test_percentage_bridge_rejects_invalid_values_and_capacity(
+    measurement_value: object,
+    capacity_value: float,
+    code: str,
+) -> None:
+    measurement = Measurement.model_construct(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.soc",
+        value=measurement_value,
+        unit="%",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(adapter_id="home_assistant", external_id="sensor.battery_soc"),
+    )
+    capacity = BatteryCapacityEvidence.model_construct(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        capacity_kwh=capacity_value,
+        capacity_source="provider_config",
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_soc_observation_from_percentage_measurement(measurement, capacity)
+
+    assert raised.value.diagnostic.code == code
+
+
+def test_percentage_bridge_rejects_capacity_from_another_device() -> None:
+    measurement = Measurement(
+        provider_id="home_assistant",
+        device_id="ha-battery-1",
+        metric="battery.soc",
+        value=50.0,
+        unit="%",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        source_ref=SourceRef(adapter_id="home_assistant", external_id="sensor.battery_soc"),
+    )
+    capacity = BatteryCapacityEvidence(
+        provider_id="home_assistant",
+        device_id="ha-battery-2",
+        capacity_kwh=8.0,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_soc_observation_from_percentage_measurement(measurement, capacity)
+
+    assert raised.value.diagnostic.code == "invalid_battery_capacity"
+
+
+def test_percentage_bridge_preserves_degraded_quality_for_dispatch_guard() -> None:
+    measurement = Measurement(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        metric="battery.soc",
+        value=50.0,
+        unit="%",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.STALE,
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+    capacity = BatteryCapacityEvidence(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        capacity_kwh=4.0,
+    )
+
+    observation = battery_soc_observation_from_percentage_measurement(measurement, capacity)
+
+    assert observation.quality is MeasurementQuality.STALE
+    assert observation.value_kwh == 2.0
+    with pytest.raises(ValidationError, match="GOOD"):
+        dispatchable_battery_state(observation=observation)
+
+
+@pytest.mark.parametrize(
+    ("metric", "unit", "value", "code"),
+    [
+        ("battery.power", "kWh", 2.0, "invalid_battery_soc_measurement"),
+        ("battery.soc", "%", 50.0, "unsupported_battery_soc_unit"),
+        ("battery.soc", "Wh", 2000.0, "unsupported_battery_soc_unit"),
+        ("battery.soc", None, 2.0, "unsupported_battery_soc_unit"),
+        ("battery.soc", "kWh", "2.0", "invalid_battery_soc_measurement"),
+        ("battery.soc", "kWh", True, "invalid_battery_soc_measurement"),
+        ("battery.soc", "kWh", float("nan"), "invalid_battery_soc_measurement"),
+    ],
+)
+def test_measurement_bridge_rejects_ambiguous_soc_telemetry(
+    metric: str,
+    unit: str | None,
+    value: object,
+    code: str,
+) -> None:
+    measurement = Measurement.model_construct(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        metric=metric,
+        value=value,
+        unit=unit,
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.GOOD,
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        battery_soc_observation_from_measurement(measurement)
+
+    assert raised.value.diagnostic.code == code
+    assert raised.value.diagnostic.provider_id == "battery_fixture"
+
+
+def test_measurement_bridge_preserves_non_good_quality_for_dispatch_guard() -> None:
+    measurement = Measurement(
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        metric="battery.soc",
+        value=2.0,
+        unit="kWh",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        received_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+        quality=MeasurementQuality.STALE,
+        source_ref=SourceRef(adapter_id="battery_fixture", external_id="battery_entity"),
+    )
+
+    observation = battery_soc_observation_from_measurement(measurement)
+
+    assert observation.quality is MeasurementQuality.STALE
+    with pytest.raises(ValidationError, match="GOOD"):
+        dispatchable_battery_state(observation=observation)
 
 
 def test_provider_failure_is_sanitized() -> None:

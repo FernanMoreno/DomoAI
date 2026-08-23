@@ -6,10 +6,12 @@ import asyncio
 import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Protocol
 
 from domoai.adapters.modbus.config import ModbusArea
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 RawValue = bool | int
 
@@ -29,6 +31,7 @@ class ModbusWrite:
     area: ModbusArea
     address: int
     values: tuple[RawValue, ...]
+    execution_context: ExecutionContext | None = None
 
 
 class ModbusTransport(Protocol):
@@ -46,6 +49,8 @@ class ModbusTransport(Protocol):
         area: ModbusArea,
         address: int,
         values: tuple[RawValue, ...],
+        *,
+        execution_context: ExecutionContext | None = None,
     ) -> None: ...
 
     async def health(self) -> bool: ...
@@ -54,8 +59,11 @@ class ModbusTransport(Protocol):
 class InMemoryModbusTransport:
     """Deterministic Modbus transport for contract and integration tests."""
 
-    def __init__(self, samples: Sequence[ModbusSample] | None = None) -> None:
+    def __init__(
+        self, samples: Sequence[ModbusSample] | None = None, *, clock: Clock | None = None
+    ) -> None:
         self.samples = list(samples or [])
+        self._clock = clock or SystemClock()
         self.reads: list[tuple[int, ModbusArea, int, int]] = []
         self.writes: list[ModbusWrite] = []
         self.connected = False
@@ -90,20 +98,22 @@ class InMemoryModbusTransport:
         area: ModbusArea,
         address: int,
         values: tuple[RawValue, ...],
+        *,
+        execution_context: ExecutionContext | None = None,
     ) -> None:
         self._require_connected()
         if not self.healthy:
             raise ConnectionError("Modbus fixture is unhealthy")
         if area not in {"coil", "holding_register"}:
             raise ValueError("Modbus fixture cannot write this area")
-        write = ModbusWrite(unit_id, area, address, values)
+        write = ModbusWrite(unit_id, area, address, values, execution_context)
         self.writes.append(write)
-        sample = ModbusSample(unit_id, area, address, values, datetime.now(UTC))
+        sample = ModbusSample(unit_id, area, address, values, self._clock.now())
         self._values[(unit_id, area, address)] = sample
         state_key = self.write_state_map.get((unit_id, area, address))
         if state_key is not None:
             self._values[state_key] = ModbusSample(
-                state_key[0], state_key[1], state_key[2], values, datetime.now(UTC)
+                state_key[0], state_key[1], state_key[2], values, self._clock.now()
             )
         self._waiter.set()
 
@@ -137,13 +147,16 @@ class PyModbusTcpTransport:
         port: int = 502,
         timeout: float = 5.0,
         client_factory: ClientFactory | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self._clock = clock or SystemClock()
         self._client_factory = client_factory
         self._client: Any = None
         self._lock = asyncio.Lock()
+        self.last_write_context: ExecutionContext | None = None
 
     async def connect(self) -> None:
         try:
@@ -193,7 +206,7 @@ class PyModbusTcpTransport:
                     values = tuple(bool(value) for value in response.bits[:count])
                 else:
                     values = tuple(int(value) for value in response.registers[:count])
-                return ModbusSample(unit_id, area, address, values, datetime.now(UTC))
+                return ModbusSample(unit_id, area, address, values, self._clock.now())
             except (ConnectionError, OSError, TimeoutError, ValueError) as error:
                 raise ConnectionError("Modbus read failed") from error
             except Exception as error:
@@ -205,6 +218,8 @@ class PyModbusTcpTransport:
         area: ModbusArea,
         address: int,
         values: tuple[RawValue, ...],
+        *,
+        execution_context: ExecutionContext | None = None,
     ) -> None:
         async with self._lock:
             client = self._require_client()
@@ -232,6 +247,7 @@ class PyModbusTcpTransport:
                     raise ValueError("Modbus writes are limited to coil and holding_register")
                 if response is not None and response.isError():
                     raise ConnectionError("Modbus server returned a write exception")
+                self.last_write_context = execution_context
             except (ConnectionError, OSError, TimeoutError, ValueError) as error:
                 raise ConnectionError("Modbus write failed") from error
             except Exception as error:

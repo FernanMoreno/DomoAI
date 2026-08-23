@@ -4,6 +4,7 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.domain.models import (
+    AdapterSnapshot,
     AvailabilityStatus,
     Capability,
     CapabilityKind,
@@ -84,6 +85,42 @@ def test_live_rediscovery_after_load_persisted_makes_device_executable() -> None
 
     resolution = registry.resolve_command_route("living_room.main_light", "turn_on")
     assert resolution.route is not None
+
+
+def test_rehydrated_identity_does_not_merge_replacement_with_same_local_name() -> None:
+    registry = DeviceRegistry()
+    registry.load_persisted(
+        [
+            Device(
+                id="unassigned.lamp",
+                type=DeviceType.LIGHT,
+                name="Lamp",
+                protocol="fixture",
+                capabilities=[_power_capability()],
+                source_refs=[SourceRef(adapter_id="fixture", external_id="old-lamp")],
+            )
+        ]
+    )
+
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "new-lamp",
+                    "device_id": "new-device",
+                    "name": "Lamp",
+                    "semantic_type": "light",
+                    "capabilities": [_power_capability().model_dump(mode="json")],
+                }
+            ]
+        ),
+        "fixture",
+    )
+
+    replacement_id = registry.canonical_id_for_source("fixture", "new-lamp")
+    assert replacement_id == "unassigned.lamp-2"
+    assert registry.get("unassigned.lamp") is None
+    assert len(registry.devices) == 1
 
 
 @pytest.mark.asyncio

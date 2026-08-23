@@ -7,10 +7,16 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from domoai.adapters.home_assistant.config import (
+    HomeAssistantBatteryCommandRoute,
+    HomeAssistantDispatchableBatteryBinding,
+)
 from domoai.adapters.sdk import AdapterManifest
 from domoai.domain.models import (
     Area,
     AuditEvent,
+    BundleCommit,
+    BundleMemberCommit,
     Capability,
     Command,
     Device,
@@ -26,6 +32,7 @@ from domoai.domain.models import (
 from domoai.domain.provider import (
     DeviceDescriptor,
     Measurement,
+    NominalCapacityAttestation,
     ProviderCollectionResult,
     ProviderCommand,
     ProviderDiagnostic,
@@ -36,8 +43,13 @@ from domoai.domain.provider import (
 from domoai.domain.solar import SolarInstallationProfile
 from domoai.mcp.ortools_server import OptimizationExplanation
 from domoai.optimizer.energy import (
+    BatteryCapacityEvidence,
     BatteryProfile,
+    BatterySocConversionEvidence,
+    BatterySocObservation,
+    DispatchableBatteryBinding,
     EnergyContext,
+    NominalCapacityTrustPolicy,
     SolarForecastPoint,
     TariffPoint,
 )
@@ -58,6 +70,8 @@ OUTPUT = ROOT / "schemas" / "v1"
 MODELS: dict[str, type[BaseModel]] = {
     "area": Area,
     "audit-event": AuditEvent,
+    "bundle-commit": BundleCommit,
+    "bundle-member-commit": BundleMemberCommit,
     "capability": Capability,
     "command": Command,
     "device": Device,
@@ -76,6 +90,13 @@ MODELS: dict[str, type[BaseModel]] = {
     "tariff-point": TariffPoint,
     "solar-forecast-point": SolarForecastPoint,
     "battery-profile": BatteryProfile,
+    "battery-capacity-evidence": BatteryCapacityEvidence,
+    "nominal-capacity-trust-policy": NominalCapacityTrustPolicy,
+    "battery-soc-observation": BatterySocObservation,
+    "battery-soc-conversion-evidence": BatterySocConversionEvidence,
+    "dispatchable-battery-binding": DispatchableBatteryBinding,
+    "home-assistant-battery-command-route": HomeAssistantBatteryCommandRoute,
+    "home-assistant-dispatchable-battery-binding": HomeAssistantDispatchableBatteryBinding,
     "energy-context": EnergyContext,
     "tariff-series": TariffSeries,
     "solar-forecast-series": SolarForecastSeries,
@@ -87,6 +108,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "provider-manifest": ProviderManifest,
     "device-descriptor": DeviceDescriptor,
     "measurement": Measurement,
+    "nominal-capacity-attestation": NominalCapacityAttestation,
     "provider-command": ProviderCommand,
     "provider-execution-result": ProviderExecutionResult,
     "provider-diagnostic": ProviderDiagnostic,

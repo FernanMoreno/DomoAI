@@ -17,6 +17,7 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.execution_context import ExecutionContext
 
 
 def entity(
@@ -178,6 +179,7 @@ class RecordingAdapter:
         self.connected = False
         self.available = True
         self.writes: list[tuple[str, Command]] = []
+        self.execution_contexts: list[ExecutionContext | None] = []
         self.events: list[SourceEvent] = []
 
     async def connect(self) -> None:
@@ -211,10 +213,18 @@ class RecordingAdapter:
             if state["entity_id"] in wanted
         ]
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
-        return await self.execute_source(command, command.device_id)
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
+        return await self.execute_source(command, command.device_id, execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
+        self.execution_contexts.append(execution_context)
         if not self.connected or not self.available:
             return AdapterExecutionAck(accepted=False, message="Fixture source unavailable")
         self.writes.append((source_entity_id, command))

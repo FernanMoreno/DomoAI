@@ -16,6 +16,7 @@ def normalized(payload: object) -> str:
         plan = value.get("plan")
         if isinstance(plan, dict):
             plan.pop("created_at", None)
+            plan.pop("expires_at", None)
             validation = plan.get("validation")
             if isinstance(validation, dict):
                 validation.pop("validated_at", None)
@@ -27,6 +28,7 @@ def normalized(payload: object) -> str:
             for item in plans:
                 if isinstance(item, dict):
                     item.pop("created_at", None)
+                    item.pop("expires_at", None)
                     item_validation = item.get("validation")
                     if isinstance(item_validation, dict):
                         item_validation.pop("validated_at", None)

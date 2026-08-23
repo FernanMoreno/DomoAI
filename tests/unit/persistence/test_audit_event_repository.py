@@ -149,6 +149,41 @@ async def test_list_events_since_in_the_future_returns_empty(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_list_events_since_compares_absolute_instants_across_offsets(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.append(
+        event_id="before",
+        event_type="test",
+        actor="system",
+        subject_id="plan-1",
+        payload={},
+        created_at="2026-08-21T10:00:00+02:00",  # 08:00 UTC
+    )
+    await repository.append(
+        event_id="after",
+        event_type="test",
+        actor="system",
+        subject_id="plan-1",
+        payload={},
+        created_at="2026-08-21T09:30:00+00:00",
+    )
+
+    events = await repository.list_events(since=datetime(2026, 8, 21, 9, 0, tzinfo=UTC))
+
+    assert [event.id for event in events] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_list_events_rejects_naive_since(tmp_path: Path) -> None:
+    repository = await _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repository.list_events(since=datetime(2026, 8, 21, 9, 0))
+
+
+@pytest.mark.asyncio
 async def test_list_events_caps_at_hard_maximum(tmp_path: Path) -> None:
     repository = await _repository(tmp_path)
     base = datetime.now(UTC)

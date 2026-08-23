@@ -22,6 +22,7 @@ from domoai.persistence.repositories import (
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.clock import FixedClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
@@ -89,11 +90,24 @@ async def test_snapshot_has_every_key_with_defaults_on_a_fresh_runtime(tmp_path:
     assert snapshot["scheduler_alive"] is False
     assert snapshot["event_queue_depth"] == {"bulk": 0, "priority": 0}
     assert snapshot["dropped_events_total"] == 0
+    assert snapshot["dropped_events_by_adapter"] == {}
+    assert snapshot["dropped_events_by_kind"] == {}
+    assert snapshot["coalesced_events_total"] == 0
     assert snapshot["stale_state_count"] == 0
     assert snapshot["plans_by_status"] == {"pending": 0, "executing": 0, "unknown": 0}
     assert snapshot["optimizer_last_wall_time_seconds"] is None
     assert snapshot["db_operation_count"] >= 0
     assert snapshot["db_busy_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_uses_injected_clock_for_generated_at(tmp_path: Path) -> None:
+    collector, *_ = await _build_collector(tmp_path)
+    collector.clock = FixedClock(datetime(2026, 8, 23, 12, tzinfo=UTC))
+
+    snapshot = await collector.snapshot()
+
+    assert snapshot["generated_at"] == "2026-08-23T12:00:00+00:00"
 
 
 @pytest.mark.asyncio
@@ -223,3 +237,6 @@ async def test_composite_adapter_reports_queue_depth_and_dropped_events(tmp_path
 
     assert snapshot["event_queue_depth"] == {"bulk": 0, "priority": 0}
     assert snapshot["dropped_events_total"] == 0
+    assert snapshot["dropped_events_by_adapter"] == {}
+    assert snapshot["dropped_events_by_kind"] == {}
+    assert snapshot["coalesced_events_total"] == 0

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
-from collections.abc import Awaitable, Mapping
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Mapping, Sequence
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol, cast
 
@@ -13,7 +15,32 @@ from pydantic import Field, ValidationError
 from domoai.domain.models import Plan, StrictModel
 from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.scenario import OptimizationScenario
-from domoai.skills.validator import V1_OPERATION_BINDINGS, V2_OPERATION_BINDINGS
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.skills.validator import (
+    V1_OPERATION_BINDINGS,
+    V2_OPERATION_BINDINGS,
+    V3_OPERATION_BINDINGS,
+)
+
+
+def bundle_approval_digest(scenario_id: str, bundle: Sequence[Mapping[str, Any]]) -> str:
+    """Return the canonical identity of one ordered, validated plan bundle."""
+
+    payload = {
+        "schema": "bundle-approval-v1",
+        "scenario_id": scenario_id,
+        "members": [
+            {
+                "plan_id": member["plan_id"],
+                "validation_digest": member["validation_digest"],
+                "execute_at": member.get("execute_at"),
+            }
+            for member in bundle
+        ],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 class WorkflowStatus(StrEnum):
@@ -21,6 +48,9 @@ class WorkflowStatus(StrEnum):
 
     AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
+    SCHEDULED = "scheduled"
+    PARTIALLY_COMMITTED = "partially_committed"
+    UNKNOWN = "unknown"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -55,6 +85,7 @@ class ApprovalDecision(StrictModel):
 
     approved: bool
     approved_by: str | None = None
+    bundle_digest: str | None = None
     validation_digest: str | None = None
     reason: str | None = None
     operator_token: str | None = None
@@ -78,10 +109,15 @@ class SkillRunResult(StrictModel):
     stage_history: list[WorkflowStage] = Field(min_length=1)
     completed_operations: list[str] = Field(default_factory=list)
     runtime_revision: str | None = None
+    scenario_id: str | None = None
     plan_id: str | None = None
+    bundle_digest: str | None = None
+    bundle_commit_id: str | None = None
+    bundle_commit_status: str | None = None
     validation_digest: str | None = None
     plan_ids: list[str] = Field(default_factory=list)
     validation_digests: list[str] = Field(default_factory=list)
+    member_outcomes: list[dict[str, Any]] = Field(default_factory=list)
     scheduled_plan_ids: list[str] = Field(default_factory=list)
     bundle: list[dict[str, Any]] = Field(default_factory=list)
     proposal: dict[str, Any] | None = None
@@ -134,14 +170,25 @@ class EnergySkillWorkflow:
         approval: ApprovalPort,
         *,
         operation_bindings: Mapping[str, tuple[str, str, str]] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         selected_bindings = dict(operation_bindings or V2_OPERATION_BINDINGS)
-        if selected_bindings not in (V1_OPERATION_BINDINGS, V2_OPERATION_BINDINGS):
-            raise ValueError("workflow bindings must match the portable v1 or v2 routes")
+        if selected_bindings not in (
+            V1_OPERATION_BINDINGS,
+            V2_OPERATION_BINDINGS,
+            V3_OPERATION_BINDINGS,
+        ):
+            raise ValueError(
+                "workflow bindings must match the portable v1 or v2 routes, or the v3 route"
+            )
         self.router = router
         self.approval = approval
+        self.clock = clock or SystemClock()
         self._operation_bindings = selected_bindings
-        self._requires_energy_context = selected_bindings == V2_OPERATION_BINDINGS
+        self._requires_energy_context = selected_bindings in (
+            V2_OPERATION_BINDINGS,
+            V3_OPERATION_BINDINGS,
+        )
         self._runs: dict[str, SkillRunResult] = {}
         self._consumed_runs: dict[str, SkillRunResult] = {}
 
@@ -174,6 +221,7 @@ class EnergySkillWorkflow:
         proposal: dict[str, Any] | None = None
         explanation: dict[str, Any] | None = None
         plan_id: str | None = None
+        bundle_digest: str | None = None
         validation_digest: str | None = None
 
         try:
@@ -283,7 +331,9 @@ class EnergySkillWorkflow:
             self._transition(history, WorkflowStage.VALIDATED)
 
             plan_id = bundle[0]["plan_id"]
-            validation_digest = bundle[0]["validation_digest"]
+            bundle_digest = bundle_approval_digest(parsed_request.scenario.id, bundle)
+            # Preserve the legacy field as an alias for workflow approval.
+            validation_digest = bundle_digest
 
             explanation = await self._call(
                 "explain_solution",
@@ -291,6 +341,12 @@ class EnergySkillWorkflow:
                 stage=WorkflowStage.VALIDATED,
             )
             self._check_explanation(explanation, parsed_request.scenario.id)
+            explanation = {
+                **explanation,
+                "scenario_id": parsed_request.scenario.id,
+                "bundle_digest": bundle_digest,
+                "bundle": [dict(member) for member in bundle],
+            }
             completed.append("explain_solution")
 
             requires_confirmation = any(entry["requires_confirmation"] for entry in bundle)
@@ -310,8 +366,10 @@ class EnergySkillWorkflow:
                             history=history,
                             completed=completed,
                             runtime_revision=runtime_revision,
+                            scenario_id=parsed_request.scenario.id,
                             plan_id=plan_id,
                             validation_digest=validation_digest,
+                            bundle_digest=bundle_digest,
                             bundle=bundle,
                             proposal=proposal,
                             explanation=explanation,
@@ -326,8 +384,10 @@ class EnergySkillWorkflow:
                             history=self._with_stage(history, WorkflowStage.CANCELLED),
                             completed=completed,
                             runtime_revision=runtime_revision,
+                            scenario_id=parsed_request.scenario.id,
                             plan_id=plan_id,
                             validation_digest=validation_digest,
+                            bundle_digest=bundle_digest,
                             bundle=bundle,
                             proposal=proposal,
                             explanation=explanation,
@@ -340,17 +400,17 @@ class EnergySkillWorkflow:
                             ],
                         )
                     )
-                self._validate_approval(
-                    decision, validation_digest, WorkflowStage.AWAITING_APPROVAL
-                )
+                self._validate_approval(decision, bundle_digest, WorkflowStage.AWAITING_APPROVAL)
                 return await self._execute(
                     run_id=run_id,
                     history=history,
                     completed=completed,
                     runtime_revision=runtime_revision,
+                    scenario_id=parsed_request.scenario.id,
                     bundle=bundle,
                     proposal=proposal,
                     explanation=explanation,
+                    bundle_digest=bundle_digest,
                     approval=decision,
                 )
 
@@ -359,9 +419,11 @@ class EnergySkillWorkflow:
                 history=history,
                 completed=completed,
                 runtime_revision=runtime_revision,
+                scenario_id=parsed_request.scenario.id,
                 bundle=bundle,
                 proposal=proposal,
                 explanation=explanation,
+                bundle_digest=bundle_digest,
                 approval=None,
             )
         except _WorkflowFailure as failure:
@@ -423,7 +485,9 @@ class EnergySkillWorkflow:
             return self._store(result)
         try:
             self._validate_approval(
-                decision, stored.validation_digest, WorkflowStage.AWAITING_APPROVAL
+                decision,
+                stored.bundle_digest or stored.validation_digest,
+                WorkflowStage.AWAITING_APPROVAL,
             )
             current_revision = self.router.current_revision("mcp")
             if current_revision is None:
@@ -445,9 +509,16 @@ class EnergySkillWorkflow:
                 history=list(stored.stage_history),
                 completed=list(stored.completed_operations),
                 runtime_revision=stored.runtime_revision,
+                scenario_id=(
+                    stored.scenario_id
+                    or str(stored.explanation.get("scenario_id", ""))
+                    if stored.explanation
+                    else None
+                ),
                 bundle=list(stored.bundle),
                 proposal=stored.proposal,
                 explanation=stored.explanation,
+                bundle_digest=stored.bundle_digest or stored.validation_digest,
                 approval=decision,
             )
         except _WorkflowFailure as failure:
@@ -469,9 +540,11 @@ class EnergySkillWorkflow:
         history: list[WorkflowStage],
         completed: list[str],
         runtime_revision: str | None,
+        scenario_id: str | None,
         bundle: list[dict[str, Any]],
         proposal: dict[str, Any] | None,
         explanation: dict[str, Any] | None,
+        bundle_digest: str | None,
         approval: ApprovalDecision | None,
     ) -> SkillRunResult:
         if not bundle or not runtime_revision:
@@ -487,6 +560,7 @@ class EnergySkillWorkflow:
                         bundle=bundle,
                         proposal=proposal,
                         explanation=explanation,
+                        bundle_digest=bundle_digest,
                     ),
                     "missing_execution_boundary",
                     "A validated plan bundle and runtime revision are required",
@@ -508,8 +582,21 @@ class EnergySkillWorkflow:
                     code="runtime_revision_changed",
                     message="Runtime revision changed before execution",
                 )
+            if "commit_or_schedule_bundle" in self._operation_bindings:
+                return await self._execute_v3_bundle(
+                    run_id=run_id,
+                    history=history,
+                    completed=completed,
+                    runtime_revision=runtime_revision,
+                    scenario_id=scenario_id,
+                    bundle=bundle,
+                    proposal=proposal,
+                    explanation=explanation,
+                    bundle_digest=bundle_digest,
+                    approval=approval,
+                )
             self._transition(history, WorkflowStage.EXECUTING)
-            now = datetime.now(UTC)
+            now = self.clock.now()
             scheduled_plan_ids: list[str] = []
             outcomes: list[Any] = []
             for entry in bundle:
@@ -530,8 +617,8 @@ class EnergySkillWorkflow:
                         {
                             "plan_id": member_plan_id,
                             "validation_digest": member_digest,
-                            "approved_by": approval.approved_by or "operator",
                             "operator_token": approval.operator_token or "",
+                            "bundle_digest": bundle_digest,
                         },
                         stage=WorkflowStage.EXECUTING,
                     )
@@ -548,6 +635,7 @@ class EnergySkillWorkflow:
                     }
                     if approval_id is not None:
                         arguments["approval_id"] = approval_id
+                        arguments["bundle_digest"] = bundle_digest
                     response = await self._call(
                         "execute_plan", arguments, stage=WorkflowStage.EXECUTING
                     )
@@ -580,6 +668,7 @@ class EnergySkillWorkflow:
                     }
                     if approval_id is not None:
                         schedule_arguments["approval_id"] = approval_id
+                        schedule_arguments["bundle_digest"] = bundle_digest
                     await self._call_tool(
                         "mcp", "schedule_plan", schedule_arguments, stage=WorkflowStage.EXECUTING
                     )
@@ -594,15 +683,21 @@ class EnergySkillWorkflow:
                 )
             result = self._result(
                 run_id=run_id,
-                status=WorkflowStatus.COMPLETED,
+                status=(
+                    WorkflowStatus.SCHEDULED
+                    if scheduled_plan_ids
+                    else WorkflowStatus.COMPLETED
+                ),
                 stage=WorkflowStage.COMPLETED,
                 history=self._with_stage(history, WorkflowStage.COMPLETED),
                 completed=completed,
                 runtime_revision=runtime_revision,
+                scenario_id=scenario_id,
                 bundle=bundle,
                 scheduled_plan_ids=scheduled_plan_ids,
                 proposal=proposal,
                 explanation=explanation,
+                bundle_digest=bundle_digest,
             )
             return self._consume(result)
         except _WorkflowFailure as failure:
@@ -613,9 +708,11 @@ class EnergySkillWorkflow:
                 history=self._with_stage(history, failure.stage),
                 completed=completed,
                 runtime_revision=runtime_revision,
+                scenario_id=scenario_id,
                 bundle=bundle,
                 proposal=proposal,
                 explanation=explanation,
+                bundle_digest=bundle_digest,
                 diagnostics=[
                     WorkflowDiagnostic(
                         stage=failure.stage,
@@ -626,6 +723,140 @@ class EnergySkillWorkflow:
                 ],
             )
             return self._consume(result)
+
+    async def _execute_v3_bundle(
+        self,
+        *,
+        run_id: str,
+        history: list[WorkflowStage],
+        completed: list[str],
+        runtime_revision: str | None,
+        scenario_id: str | None,
+        bundle: list[dict[str, Any]],
+        proposal: dict[str, Any] | None,
+        explanation: dict[str, Any] | None,
+        bundle_digest: str | None,
+        approval: ApprovalDecision | None,
+    ) -> SkillRunResult:
+        if bundle_digest is None or scenario_id is None:
+            raise _WorkflowFailure(
+                status=WorkflowStatus.BLOCKED,
+                stage=WorkflowStage.VALIDATED,
+                code="missing_bundle_identity",
+                message="A v3 bundle commit requires scenario and bundle identities",
+            )
+        self._transition(history, WorkflowStage.EXECUTING)
+        member_requests: list[dict[str, Any]] = []
+        for entry in bundle:
+            approval_id: str | None = None
+            if entry["requires_confirmation"]:
+                if approval is None:
+                    raise _WorkflowFailure(
+                        status=WorkflowStatus.BLOCKED,
+                        stage=WorkflowStage.EXECUTING,
+                        code="approval_required",
+                        message="A bundle member requires confirmation but none was granted",
+                    )
+                approval_response = await self._call_tool(
+                    "mcp",
+                    "request_approval",
+                    {
+                        "plan_id": entry["plan_id"],
+                        "validation_digest": entry["validation_digest"],
+                        "operator_token": approval.operator_token or "",
+                        "bundle_digest": bundle_digest,
+                    },
+                    stage=WorkflowStage.EXECUTING,
+                )
+                approval_id = self._required_string(
+                    approval_response, "approval_id", "bundle approval issuance"
+                )
+                completed.append("request_approval")
+            member_requests.append(
+                {
+                    "plan_id": entry["plan_id"],
+                    "validation_digest": entry["validation_digest"],
+                    "execute_at": entry["execute_at"],
+                    "approval_id": approval_id,
+                }
+            )
+        response = await self._call(
+            "commit_or_schedule_bundle",
+            {
+                "bundle_digest": bundle_digest,
+                "scenario_id": scenario_id,
+                "members": member_requests,
+            },
+            stage=WorkflowStage.EXECUTING,
+        )
+        raw_status = response.get("status")
+        if not isinstance(raw_status, str):
+            raise _WorkflowFailure(
+                status=WorkflowStatus.FAILED,
+                stage=WorkflowStage.FAILED,
+                code="malformed_bundle_commit_result",
+                message="Bundle commit returned no aggregate status",
+            )
+        status_map = {
+            "completed": WorkflowStatus.COMPLETED,
+            "scheduled": WorkflowStatus.SCHEDULED,
+            "partially_committed": WorkflowStatus.PARTIALLY_COMMITTED,
+            "failed": WorkflowStatus.FAILED,
+            "unknown": WorkflowStatus.UNKNOWN,
+        }
+        workflow_status = status_map.get(raw_status)
+        if workflow_status is None:
+            raise _WorkflowFailure(
+                status=WorkflowStatus.FAILED,
+                stage=WorkflowStage.FAILED,
+                code="malformed_bundle_commit_result",
+                message="Bundle commit returned an unknown aggregate status",
+            )
+        member_outcomes = response.get("members")
+        if not isinstance(member_outcomes, list) or not all(
+            isinstance(member, dict) for member in member_outcomes
+        ):
+            raise _WorkflowFailure(
+                status=WorkflowStatus.FAILED,
+                stage=WorkflowStage.FAILED,
+                code="malformed_bundle_commit_result",
+                message="Bundle commit returned no member outcomes",
+            )
+        scheduled_plan_ids = [
+            str(member["plan_id"])
+            for member in member_outcomes
+            if member.get("status") == "scheduled" and member.get("plan_id")
+        ]
+        if workflow_status is WorkflowStatus.COMPLETED and scheduled_plan_ids:
+            workflow_status = WorkflowStatus.SCHEDULED
+        completed.append("commit_or_schedule_bundle")
+        terminal_stage = (
+            WorkflowStage.COMPLETED
+            if workflow_status in {WorkflowStatus.COMPLETED, WorkflowStatus.SCHEDULED}
+            else WorkflowStage.FAILED
+        )
+        result = self._result(
+            run_id=run_id,
+            status=workflow_status,
+            stage=terminal_stage,
+            history=history,
+            completed=completed,
+            runtime_revision=runtime_revision,
+            scenario_id=scenario_id,
+            bundle=bundle,
+            scheduled_plan_ids=scheduled_plan_ids,
+            proposal=proposal,
+            explanation=explanation,
+            bundle_digest=bundle_digest,
+            bundle_commit_id=(
+                str(response["bundle_commit_id"])
+                if response.get("bundle_commit_id")
+                else None
+            ),
+            bundle_commit_status=raw_status,
+            member_outcomes=member_outcomes,
+        )
+        return self._consume(result)
 
     async def _call(
         self,
@@ -910,7 +1141,16 @@ class EnergySkillWorkflow:
                 code="approval_declined",
                 message="Operator declined the validated plan",
             )
-        if not decision.approved_by or decision.validation_digest != validation_digest:
+        if decision.bundle_digest and decision.validation_digest:
+            if decision.bundle_digest != decision.validation_digest:
+                raise _WorkflowFailure(
+                    status=WorkflowStatus.BLOCKED,
+                    stage=stage,
+                    code="approval_mismatch",
+                    message="Approval contains conflicting bundle digests",
+                )
+        provided_digest = decision.bundle_digest or decision.validation_digest
+        if not decision.approved_by or provided_digest != validation_digest:
             raise _WorkflowFailure(
                 status=WorkflowStatus.BLOCKED,
                 stage=stage,
@@ -958,17 +1198,23 @@ class EnergySkillWorkflow:
         history: list[WorkflowStage],
         completed: list[str] | None = None,
         runtime_revision: str | None = None,
+        scenario_id: str | None = None,
         plan_id: str | None = None,
         validation_digest: str | None = None,
+        bundle_digest: str | None = None,
+        bundle_commit_id: str | None = None,
+        bundle_commit_status: str | None = None,
         bundle: list[dict[str, Any]] | None = None,
         scheduled_plan_ids: list[str] | None = None,
+        member_outcomes: list[dict[str, Any]] | None = None,
         proposal: dict[str, Any] | None = None,
         explanation: dict[str, Any] | None = None,
         diagnostics: list[WorkflowDiagnostic] | None = None,
     ) -> SkillRunResult:
         resolved_bundle = list(bundle or [])
         resolved_plan_id = plan_id or (resolved_bundle[0]["plan_id"] if resolved_bundle else None)
-        resolved_digest = validation_digest or (
+        resolved_bundle_digest = bundle_digest
+        resolved_digest = resolved_bundle_digest or validation_digest or (
             resolved_bundle[0]["validation_digest"] if resolved_bundle else None
         )
         return SkillRunResult(
@@ -978,11 +1224,16 @@ class EnergySkillWorkflow:
             stage_history=EnergySkillWorkflow._with_stage(history, stage),
             completed_operations=list(completed or []),
             runtime_revision=runtime_revision,
+            scenario_id=scenario_id,
             plan_id=resolved_plan_id,
             validation_digest=resolved_digest,
+            bundle_digest=resolved_bundle_digest,
+            bundle_commit_id=bundle_commit_id,
+            bundle_commit_status=bundle_commit_status,
             plan_ids=[entry["plan_id"] for entry in resolved_bundle],
             validation_digests=[entry["validation_digest"] for entry in resolved_bundle],
             scheduled_plan_ids=list(scheduled_plan_ids or []),
+            member_outcomes=list(member_outcomes or []),
             bundle=resolved_bundle,
             proposal=proposal,
             explanation=explanation,
@@ -1015,9 +1266,14 @@ class EnergySkillWorkflow:
             history=list(pending.stage_history),
             completed=list(pending.completed_operations),
             runtime_revision=pending.runtime_revision,
+            scenario_id=pending.scenario_id,
             plan_id=pending.plan_id,
             validation_digest=pending.validation_digest,
+            bundle_digest=pending.bundle_digest,
+            bundle_commit_id=pending.bundle_commit_id,
+            bundle_commit_status=pending.bundle_commit_status,
             bundle=list(pending.bundle),
+            member_outcomes=list(pending.member_outcomes),
             proposal=pending.proposal,
             explanation=pending.explanation,
             diagnostics=[

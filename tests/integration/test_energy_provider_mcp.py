@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 
 import pytest
 
+from domoai.domain.models import SourceRef, StateSnapshot, StateStatus
 from domoai.domain.solar import SolarInstallationProfile
 from domoai.mcp.domotics_server import create_domotics_server
+from domoai.optimizer.energy import BatterySocObservation
 from domoai.optimizer.omie import OmieDayAheadFile, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
     OpenMeteoForecastFile,
@@ -16,11 +18,13 @@ from domoai.optimizer.providers import (
     EnergyProviderDiagnostic,
     EnergyProviderError,
     SolarForecastSeries,
+    StateStoreBatteryProvider,
     StaticBatteryProvider,
     StaticSolarForecastProvider,
     StaticTariffProvider,
     TariffSeries,
 )
+from domoai.runtime.state_store import StateStore
 from tests.contract.test_domotics_mcp_contract import build_context, structured
 from tests.fixtures.energy import (
     energy_context_for,
@@ -47,12 +51,27 @@ def composed_provider() -> ComposedEnergyContextProvider:
         observed_at=observed_at,
         points=context.solar_forecast,
     )
+    assert context.battery is not None
+    battery_profile = context.battery.model_copy(
+        update={
+            "initial_soc_observation": BatterySocObservation(
+                provider_id="battery_fixture",
+                device_id="battery.home",
+                value_kwh=context.battery.initial_soc_kwh,
+                observed_at=observed_at,
+                received_at=observed_at,
+                source_ref=SourceRef(
+                    adapter_id="battery_fixture", external_id="battery_entity"
+                ),
+            )
+        }
+    )
     battery = BatteryState(
         horizon=context.horizon,
         source_id="battery_fixture",
         source_revision="mcp-1",
         observed_at=observed_at,
-        battery=context.battery,
+        battery=battery_profile,
     )
     return ComposedEnergyContextProvider(
         StaticTariffProvider(tariffs),
@@ -79,6 +98,74 @@ async def test_mcp_consumes_composed_provider_without_surface_changes() -> None:
     assert result["schema_version"] == "v1"
     assert result["context"]["source_revision"].startswith("tariff:tariff_fixture@")
     assert result["context"]["battery"] is not None
+    assert result["context"]["battery"]["initial_soc_observation"]["unit"] == "kWh"
+    assert (
+        result["context"]["battery"]["initial_soc_observation"]["source_ref"]["external_id"]
+        == "battery_entity"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_consumes_reconciled_state_store_battery_snapshot() -> None:
+    energy_context = energy_context_for()
+    assert energy_context.battery is not None
+    mcp_context = await build_context()
+    store = StateStore()
+    observed_at = datetime(2026, 8, 15, 12, tzinfo=UTC)
+    await store.save(
+        StateSnapshot(
+            device_id="battery.home",
+            capability="battery.soc",
+            value=3.25,
+            unit="kWh",
+            observed_at=observed_at,
+            received_at=observed_at,
+            status=StateStatus.CURRENT,
+            source_ref=SourceRef(
+                adapter_id="battery_fixture", external_id="battery_entity"
+            ),
+        )
+    )
+    battery_provider = StateStoreBatteryProvider(
+        state_store=store,
+        provider_id="battery_fixture",
+        device_id="battery.home",
+        soc_capability="battery.soc",
+        profile=energy_context.battery,
+    )
+    tariffs = TariffSeries(
+        horizon=energy_context.horizon,
+        source_id="tariff_fixture",
+        source_revision="reconciled-1",
+        observed_at=observed_at,
+        points=energy_context.tariffs,
+    )
+    solar = SolarForecastSeries(
+        horizon=energy_context.horizon,
+        source_id="solar_fixture",
+        source_revision="reconciled-1",
+        observed_at=observed_at,
+        points=energy_context.solar_forecast,
+    )
+    mcp_context.energy_context_provider = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        battery_provider,
+        now=lambda: datetime(2026, 8, 15, 12, 5, tzinfo=UTC),
+    )
+
+    result = structured(
+        await create_domotics_server(mcp_context).call_tool(
+            "get_energy_context",
+            {"horizon": energy_context.horizon.model_dump(mode="json")},
+        )
+    )
+
+    assert result["context"]["battery"]["initial_soc_kwh"] == pytest.approx(3.25)
+    assert (
+        result["context"]["battery"]["initial_soc_observation"]["source_ref"]["external_id"]
+        == "battery_entity"
+    )
 
 
 @pytest.mark.asyncio

@@ -133,3 +133,64 @@ async def test_last_wall_time_seconds_set_after_one_call_and_updated_after_a_sec
     service.optimizer = _FixedOptimizer(_result_with_wall_time(2.5))
     service.optimize(scenario)  # type: ignore[arg-type]
     assert service.last_wall_time_seconds == 2.5
+
+
+@pytest.mark.asyncio
+async def test_validate_proposal_rejects_nonzero_unbound_battery_dispatch() -> None:
+    registry, plan_service = await build_service()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    plan = _plan("battery-unbound-plan", device_id, "battery-unbound-command")
+    result = OptimizationResult(
+        scenario_id="battery-unbound-scenario",
+        status=OptimizationStatus.OPTIMAL,
+        solver="fake",
+        plan=plan,
+        plans=[plan],
+        constraint_summary={
+            "slots": [
+                {
+                    "slot": 0,
+                    "battery_charge_kw": 1.0,
+                    "battery_discharge_kw": 0.0,
+                }
+            ]
+        },
+    )
+    service = OptimizationService(registry, plan_service, _FixedOptimizer(result))
+
+    validated = service.validate_proposal(result)
+
+    assert validated.status is OptimizationStatus.INVALID
+    assert validated.plan is None
+    assert validated.plans == []
+    assert [item.code for item in validated.diagnostics] == ["battery_actuation_unbound"]
+
+
+@pytest.mark.asyncio
+async def test_validate_proposal_allows_zero_battery_dispatch() -> None:
+    registry, plan_service = await build_service()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    plan = _plan("battery-zero-plan", device_id, "battery-zero-command")
+    result = OptimizationResult(
+        scenario_id="battery-zero-scenario",
+        status=OptimizationStatus.OPTIMAL,
+        solver="fake",
+        plan=plan,
+        plans=[plan],
+        constraint_summary={
+            "slots": [
+                {
+                    "slot": 0,
+                    "battery_charge_kw": 0.0,
+                    "battery_discharge_kw": 0.0,
+                }
+            ]
+        },
+    )
+    service = OptimizationService(registry, plan_service, _FixedOptimizer(result))
+
+    validated = service.validate_proposal(result)
+
+    assert validated.status is OptimizationStatus.OPTIMAL
+    assert len(validated.plans) == 1
+    assert validated.plans[0].validation is not None

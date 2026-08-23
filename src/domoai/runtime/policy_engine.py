@@ -1,4 +1,11 @@
-"""Central policy and risk evaluation."""
+"""Central policy and risk evaluation.
+
+``RESTRICTED`` is deliberately a confirmation gate in this runtime, not an
+implicit denial. An explicit ``DENY`` policy is still required to refuse the
+command outright; an ``ALLOW`` policy cannot bypass the confirmation gate.
+Keeping that distinction here makes the trust boundary auditable and avoids
+depending on the caller's risk label.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +47,7 @@ class PolicyEngine:
             device_id=device.id,
             area_id=device.area_id,
             capability=capability,
+            command=command.command,
             value=command.value,
             risk_class=effective_risk.value,
         )
@@ -47,6 +55,8 @@ class PolicyEngine:
             return PolicyDecision(
                 policy_id=decision.policy_id,
                 action=PolicyAction.CONFIRM,
-                reason=f"Risk class {effective_risk.value} requires operator confirmation",
+                reason=(
+                    f"Risk class {effective_risk.value} requires explicit operator confirmation"
+                ),
             )
         return decision

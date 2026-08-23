@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "description": "Server-owned exact allowlist for measured nominal capacity evidence.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "allowed_evidence_types": {
+      "items": {
+        "enum": [
+          "vendor_documentation",
+          "installer_attestation"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "title": "Allowed Evidence Types",
+      "type": "array"
+    },
+    "trusted_attesters": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "title": "Trusted Attesters",
+      "type": "array"
+    },
+    "trusted_references": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "title": "Trusted References",
+      "type": "array"
+    }
+  },
+  "required": [
+    "allowed_evidence_types",
+    "trusted_attesters",
+    "trusted_references"
+  ],
+  "title": "NominalCapacityTrustPolicy",
+  "type": "object"
+}

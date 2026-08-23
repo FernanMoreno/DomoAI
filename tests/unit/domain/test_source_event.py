@@ -33,6 +33,42 @@ def test_each_variant_defaults_payload_to_empty_dict(cls: type) -> None:
     assert event.payload == {}
 
 
+def test_state_event_decodes_legacy_semantic_fields() -> None:
+    event = StateChangedEvent(
+        payload={
+            "source_adapter_id": "zigbee2mqtt",
+            "friendly_name": "lamp",
+            "capability": "brightness",
+            "value": 42,
+            "unit": "%",
+            "available": True,
+        }
+    )
+    assert event.source_adapter_id == "zigbee2mqtt"
+    assert event.external_id == "lamp"
+    assert event.capability == "brightness"
+    assert event.value == 42
+    assert event.unit == "%"
+    assert event.available is True
+
+
+@pytest.mark.parametrize(
+    ("cls", "payload", "expected"),
+    [
+        (AvailabilityChangedEvent, {"friendly_name": "lamp", "available": False}, "lamp"),
+        (DeviceMembershipChangedEvent, {"node_id": "node-1"}, "node-1"),
+        (MetadataChangedEvent, {"entity_id": "light.one", "friendly_name": "One"}, "light.one"),
+        (AdapterDiagnosticEvent, {"reason": "timeout"}, "timeout"),
+    ],
+)
+def test_structural_events_decode_variant_fields(cls: type, payload: dict, expected: str) -> None:
+    event = cls(payload=payload)
+    if cls is AdapterDiagnosticEvent:
+        assert event.message == expected
+    else:
+        assert event.external_id == expected
+
+
 def test_literal_mismatch_is_rejected() -> None:
     with pytest.raises(ValidationError):
         StateChangedEvent(kind="availability_changed")

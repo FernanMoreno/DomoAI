@@ -52,6 +52,47 @@ def test_policy_choice_uses_the_first_matching_rule() -> None:
     assert decision.action is PolicyAction.CONFIRM
 
 
+def test_policy_choice_can_match_command_within_one_capability() -> None:
+    policies = load_policies(
+        {
+            "policies": [
+                {
+                    "id": "garage-close-allow",
+                    "target": {"device_id": "cover.garage_main", "command": "close"},
+                    "action": "allow",
+                    "priority": 100,
+                },
+                {
+                    "id": "garage-open-confirm",
+                    "target": {"device_id": "cover.garage_main", "command": "open"},
+                    "action": "confirm",
+                    "priority": 100,
+                },
+            ]
+        }
+    )
+
+    close = choose_policy(
+        policies,
+        device_id="cover.garage_main",
+        area_id=None,
+        capability="position",
+        command="close",
+    )
+    open_ = choose_policy(
+        policies,
+        device_id="cover.garage_main",
+        area_id=None,
+        capability="position",
+        command="open",
+    )
+
+    assert close.policy_id == "garage-close-allow"
+    assert close.action is PolicyAction.ALLOW
+    assert open_.policy_id == "garage-open-confirm"
+    assert open_.action is PolicyAction.CONFIRM
+
+
 def _device(device_id: str, device_type: DeviceType) -> Device:
     return Device(
         id=device_id,
@@ -91,6 +132,7 @@ def test_caller_supplied_safe_cannot_downgrade_classifier_restricted() -> None:
     decision = engine.evaluate(_command(risk_class=RiskClass.SAFE), device, "power")
 
     assert decision.action is PolicyAction.CONFIRM
+    assert "explicit operator confirmation" in decision.reason
 
 
 def test_caller_supplied_restricted_is_kept_even_when_classifier_says_safe() -> None:
@@ -124,3 +166,36 @@ def test_matching_allow_policy_cannot_downgrade_effective_risk_below_confirm() -
     decision = engine.evaluate(_command(risk_class=RiskClass.SAFE), device, "power")
 
     assert decision.action is PolicyAction.CONFIRM
+
+
+def test_policy_engine_passes_command_to_policy_context() -> None:
+    policies = load_policies(
+        {
+            "policies": [
+                {
+                    "id": "garage-open-deny",
+                    "target": {"device_id": "cover.garage_main", "command": "open"},
+                    "action": "deny",
+                    "priority": 100,
+                },
+                {
+                    "id": "garage-close-allow",
+                    "target": {"device_id": "cover.garage_main", "command": "close"},
+                    "action": "allow",
+                    "priority": 100,
+                },
+            ]
+        }
+    )
+    engine = PolicyEngine(
+        policies,
+        RiskClassifier(
+            overrides=(RiskOverride(device_id="cover.garage_main", risk_class=RiskClass.SAFE),)
+        ),
+    )
+    device = _device("cover.garage_main", DeviceType.COVER)
+
+    decision = engine.evaluate(_command(), device, "position")
+
+    assert decision.policy_id == "garage-open-deny"
+    assert decision.action is PolicyAction.DENY

@@ -71,32 +71,41 @@ class RuntimeEventConsumer:
         try:
             delay = reconnect_delay
             while True:
-                health = await self.adapter.health()
-                degraded = not health.connected or (
-                    health.components is not None
-                    and any(not component.connected for component in health.components)
-                )
+                try:
+                    health = await self.adapter.health()
+                    degraded = not health.connected or (
+                        health.components is not None
+                        and any(not component.connected for component in health.components)
+                    )
+                except Exception as error:
+                    await self._mark_unavailable(error)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, max_reconnect_delay)
+                    continue
+
                 if degraded:
                     try:
                         await self.adapter.connect()
                         await self.discovery.refresh()
-                    except (ConnectionError, OSError) as error:
+                    except Exception as error:
                         await self._mark_unavailable(error)
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, max_reconnect_delay)
                         continue
+                    delay = reconnect_delay
+                else:
                     delay = reconnect_delay
 
                 try:
                     async for event in self.adapter.subscribe_events():
                         try:
                             await self._apply_event(event)
-                        except (ConnectionError, OSError) as error:
+                        except Exception as error:
                             await self._mark_unavailable(error)
                             break
                     else:
-                        return
-                except (ConnectionError, OSError) as error:
+                        await self._mark_stream_ended()
+                except Exception as error:
                     await self._mark_unavailable(error)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, max_reconnect_delay)
@@ -112,11 +121,23 @@ class RuntimeEventConsumer:
             await self.discovery.refresh()
 
     async def _apply_state_only(self, event: StateChangedEvent) -> None:
-        source_adapter_id = event.payload.get("source_adapter_id", self.adapter.adapter_id)
+        source_adapter_id = event.source_adapter_id or event.payload.get(
+            "source_adapter_id", self.adapter.adapter_id
+        )
         source_refs = self._known_source_refs(source_adapter_id)
+        if event.external_id is not None:
+            source_refs = [
+                source_ref
+                for source_ref in source_refs
+                if source_ref.external_id == event.external_id
+            ]
         if not source_refs:
             return
         snapshots = await self.adapter.read_state(source_refs)
+        if event.capability is not None:
+            snapshots = [
+                snapshot for snapshot in snapshots if snapshot.capability == event.capability
+            ]
         registry = self.discovery.registry
         for snapshot in snapshots:
             canonical_id = registry.canonical_id_for_source(
@@ -136,10 +157,31 @@ class RuntimeEventConsumer:
         ]
 
     async def _mark_unavailable(self, error: Exception) -> None:
-        stale = await self.state_store.mark_all_stale()
+        await self._mark_source_unavailable(
+            event_type="source_event_stream_unavailable", error=error
+        )
+
+    async def _mark_stream_ended(self) -> None:
+        await self._mark_source_unavailable(
+            event_type="source_event_stream_ended",
+            error=ConnectionError("Adapter event stream ended normally"),
+        )
+
+    async def _mark_source_unavailable(self, *, event_type: str, error: Exception) -> None:
+        try:
+            stale = await self.state_store.mark_all_stale()
+        except Exception as stale_error:
+            stale = []
+            error = RuntimeError(f"{error}; stale-state marking failed: {stale_error}")
+        payload = {
+            "error": str(error)[:200],
+            "stale_states": len(stale),
+        }
+        if event_type == "source_event_stream_ended":
+            payload["reason"] = "stream_completed"
         self.audit.append(
-            event_type="source_event_stream_unavailable",
+            event_type=event_type,
             actor="runtime",
             subject_id=self.adapter.adapter_id,
-            payload={"error": str(error), "stale_states": len(stale)},
+            payload=payload,
         )

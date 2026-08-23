@@ -57,6 +57,10 @@ async def test_configured_server_reports_a_well_formed_metrics_snapshot(tmp_path
         assert payload["available"] is True
         assert payload["schema_version"] == "v1"
         assert "adapter_health" in payload
+        assert payload["event_queue_depth"] == {"bulk": 0, "priority": 0}
+        assert payload["dropped_events_by_adapter"] == {}
+        assert payload["dropped_events_by_kind"] == {}
+        assert payload["coalesced_events_total"] == 0
         assert payload["event_consumer_alive"] is False
         assert payload["scheduler_alive"] is False
         assert payload["plans_by_status"] == {"pending": 0, "executing": 0, "unknown": 0}

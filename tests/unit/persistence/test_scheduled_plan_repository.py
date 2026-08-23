@@ -87,3 +87,31 @@ async def test_pending_schedule_survives_a_fresh_repository_instance(tmp_path) -
 
     pending = await restarted_repository.list_pending()
     assert [item.id for item in pending] == [plan.id]
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconciliation_is_idempotent_and_does_not_overwrite(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = ScheduledPlanRepository(database)
+    plan = _scheduled_plan(plan_id="plan-reconcile-1")
+    await repository.schedule(plan)
+
+    assert await repository.reconcile_terminal(plan.id, "executed") is True
+    assert await repository.reconcile_terminal(plan.id, "executed") is True
+    assert await repository.reconcile_terminal(plan.id, "failed") is False
+
+    _, status = await repository.get(plan.id)
+    assert status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_mark_executed_reports_existing_terminal_state(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = ScheduledPlanRepository(database)
+    plan = _scheduled_plan(plan_id="plan-reconcile-2")
+    await repository.schedule(plan)
+
+    assert await repository.mark_executed(plan.id) is True
+    assert await repository.mark_executed(plan.id) is True

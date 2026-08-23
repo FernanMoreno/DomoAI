@@ -16,6 +16,7 @@ DEFAULT_OPERATIONS = frozenset(
         "explain_solution",
         "operator_approval",
         "execute_plan",
+        "commit_or_schedule_bundle",
     }
 )
 
@@ -32,6 +33,11 @@ V1_OPERATION_BINDINGS: dict[str, tuple[str, str, str]] = {
 V2_OPERATION_BINDINGS: dict[str, tuple[str, str, str]] = {
     **V1_OPERATION_BINDINGS,
     "get_energy_context": ("mcp", "get_energy_context", "read"),
+}
+
+V3_OPERATION_BINDINGS: dict[str, tuple[str, str, str]] = {
+    **{key: value for key, value in V2_OPERATION_BINDINGS.items() if key != "execute_plan"},
+    "commit_or_schedule_bundle": ("mcp", "commit_or_schedule_bundle", "mutation"),
 }
 
 _BINDING_PATTERN = re.compile(
@@ -87,13 +93,19 @@ def validate_skill(
         raise SkillContractError("procedure operations must match declared operations")
     if len(operations) != len(set(operations)):
         raise SkillContractError("procedure operations must not repeat")
-    if "execute_plan" not in operations:
+    if contract_version == "v3":
+        if "commit_or_schedule_bundle" not in operations:
+            raise SkillContractError("v3 procedure must include commit_or_schedule_bundle")
+    elif "execute_plan" not in operations:
         raise SkillContractError("procedure must include execute_plan")
     if "operator_approval" not in operations:
         raise SkillContractError("procedure requires an explicit approval boundary")
-    if operations.index("operator_approval") > operations.index("execute_plan"):
-        raise SkillContractError("approval must happen before execute_plan")
-    if contract_version == "v2":
+    commit_operation = (
+        "commit_or_schedule_bundle" if contract_version == "v3" else "execute_plan"
+    )
+    if operations.index("operator_approval") > operations.index(commit_operation):
+        raise SkillContractError(f"approval must happen before {commit_operation}")
+    if contract_version in {"v2", "v3"}:
         if "get_energy_context" not in operations:
             raise SkillContractError("v2 procedure must gather get_energy_context")
         if operations.index("get_energy_context") < operations.index("get_state"):
@@ -102,10 +114,15 @@ def validate_skill(
             raise SkillContractError("get_energy_context must precede optimize_scenario")
     elif contract_version != "v1":
         raise SkillContractError(f"unsupported contract version: {contract_version}")
+    expected_bindings = (
+        V3_OPERATION_BINDINGS
+        if contract_version == "v3"
+        else (V2_OPERATION_BINDINGS if contract_version == "v2" else V1_OPERATION_BINDINGS)
+    )
     bindings = _validate_bindings(
         body,
         operations,
-        V2_OPERATION_BINDINGS if contract_version == "v2" else V1_OPERATION_BINDINGS,
+        expected_bindings,
     )
     return SkillProcedure(
         name=name,

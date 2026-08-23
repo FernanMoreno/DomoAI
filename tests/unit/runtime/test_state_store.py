@@ -4,7 +4,7 @@ import pytest
 
 from domoai.domain.models import SourceRef, StateSnapshot, StateStatus
 from domoai.runtime.clock import FixedClock
-from domoai.runtime.state_store import StateStore
+from domoai.runtime.state_store import StateStore, StateStoreMetadata
 
 
 def _snapshot(value: object, *, status: StateStatus = StateStatus.CURRENT) -> StateSnapshot:
@@ -24,6 +24,17 @@ async def test_state_version_starts_at_zero_for_unknown_key() -> None:
     store = StateStore()
 
     assert store.state_version("light.kitchen", "brightness") == 0
+
+
+@pytest.mark.asyncio
+async def test_peek_returns_cached_snapshot_without_async_or_adapter_access() -> None:
+    store = StateStore()
+    snapshot = _snapshot(50)
+
+    await store.save(snapshot)
+
+    assert store.peek("light.kitchen", "brightness") == snapshot
+    assert store.peek("light.kitchen", "missing") is None
 
 
 @pytest.mark.asyncio
@@ -84,6 +95,47 @@ async def test_load_persisted_seeds_state_version() -> None:
     store.load_persisted([_snapshot(50)])
 
     assert store.state_version("light.kitchen", "brightness") > 0
+
+
+@pytest.mark.asyncio
+async def test_equivalent_startup_reconfirmation_preserves_restored_metadata() -> None:
+    store = StateStore()
+    store.restore_metadata(
+        StateStoreMetadata(
+            inventory_revision=7,
+            version_counter=12,
+            state_versions={("light.kitchen", "brightness"): 12},
+        )
+    )
+    snapshot = _snapshot(50)
+
+    store.load_persisted([snapshot])
+    assert store.runtime_revision == "rev-7"
+    assert store.state_version("light.kitchen", "brightness") == 12
+    restored = await store.get("light.kitchen", "brightness")
+    assert restored is not None
+    assert restored.status is StateStatus.STALE
+
+    await store.save(snapshot)
+
+    assert store.state_version("light.kitchen", "brightness") == 12
+
+
+@pytest.mark.asyncio
+async def test_changed_startup_reconfirmation_advances_restored_metadata() -> None:
+    store = StateStore()
+    store.restore_metadata(
+        StateStoreMetadata(
+            inventory_revision=7,
+            version_counter=12,
+            state_versions={("light.kitchen", "brightness"): 12},
+        )
+    )
+    store.load_persisted([_snapshot(50)])
+
+    await store.save(_snapshot(75))
+
+    assert store.state_version("light.kitchen", "brightness") == 13
 
 
 @pytest.mark.asyncio

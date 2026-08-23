@@ -1,8 +1,13 @@
 """Optimization ports, models and implementations."""
 
 from domoai.optimizer.energy import (
+    BatteryCapacityEvidence,
     BatteryProfile,
+    BatterySocConversionEvidence,
+    BatterySocObservation,
+    DispatchableBatteryBinding,
     EnergyContext,
+    NominalCapacityTrustPolicy,
     SolarForecastPoint,
     StaticEnergyContextProvider,
     TariffPoint,
@@ -15,9 +20,23 @@ from domoai.optimizer.open_meteo import (
     OpenMeteoSolarProvider,
 )
 from domoai.optimizer.ports import EnergyContextProvider
+from domoai.optimizer.providers import (
+    StateStoreBatteryProvider,
+    battery_capacity_evidence_from_measurement,
+    battery_soc_observation_from_measurement,
+    battery_soc_observation_from_percentage_measurement,
+    validate_nominal_capacity_trust,
+)
 
 __all__ = [
+    "BatteryCapacityEvidence",
     "BatteryProfile",
+    "BatterySocConversionEvidence",
+    "BatterySocObservation",
+    "DispatchableBatteryBinding",
+    "battery_capacity_evidence_from_measurement",
+    "battery_soc_observation_from_measurement",
+    "battery_soc_observation_from_percentage_measurement",
     "EnergyContext",
     "EnergyContextProvider",
     "Horizon",
@@ -28,5 +47,8 @@ __all__ = [
     "OpenMeteoSolarProvider",
     "SolarForecastPoint",
     "StaticEnergyContextProvider",
+    "StateStoreBatteryProvider",
     "TariffPoint",
+    "NominalCapacityTrustPolicy",
+    "validate_nominal_capacity_trust",
 ]

@@ -24,6 +24,7 @@ from domoai.optimizer.providers import (
     EnergyProviderError,
     TariffSeries,
 )
+from domoai.runtime.clock import Clock, SystemClock
 
 OMIE_BASE_URL = "https://www.omie.es"
 OMIE_TIMEZONE = ZoneInfo("Europe/Madrid")
@@ -56,6 +57,7 @@ class OmieTariffHttpClient:
         timeout: float = 10.0,
         file_version: str = "1",
         transport: httpx.BaseTransport | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9]+", file_version):
             raise ValueError("OMIE file_version must contain only letters and digits")
@@ -66,6 +68,7 @@ class OmieTariffHttpClient:
             follow_redirects=True,
         )
         self._file_version = file_version
+        self._clock = clock or SystemClock()
 
     def fetch_day(self, session_date: date) -> OmieDayAheadFile:
         filename = f"marginalpdbc_{session_date:%Y%m%d}.{self._file_version}"
@@ -79,7 +82,7 @@ class OmieTariffHttpClient:
         return OmieDayAheadFile(
             body=response.content,
             source_revision=filename,
-            observed_at=datetime.now(UTC),
+            observed_at=self._clock.now(),
         )
 
     def close(self) -> None:

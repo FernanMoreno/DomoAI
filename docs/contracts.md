@@ -40,6 +40,51 @@ domotics://energy
 domotics://policies
 ```
 
+## Bundle commit boundary v3 (2026-08-21)
+
+La Skill energética v3 sustituye la ejecución/programación miembro a miembro
+por `commit_or_schedule_bundle`. La tool recibe el `bundle_digest`, el
+`scenario_id` y todos los miembros ordenados con su `validation_digest`,
+`execute_at` y, cuando corresponde, el `approval_id` emitido por
+`request_approval`.
+
+El runtime persiste un agregado `BundleCommit` antes de mutar el mundo físico:
+
+- todos los miembros se someten a preflight antes de la primera escritura;
+- si todos son futuros, las filas de scheduling y el estado agregado se
+  confirman en una única transacción SQLite;
+- los miembros físicos se ejecutan secuencialmente y un fallo posterior queda
+  expresamente como `partially_committed`, `failed` o `unknown` según la
+  evidencia disponible;
+- la recuperación al arrancar reconcilia planes y schedules persistidos, no
+  vuelve a ejecutar acciones y no promete rollback automático.
+
+La auditoría registra `bundle_commit_started`, `bundle_commit_completed` y
+`bundle_commit_recovered` con el `bundle_commit_id`, el escenario, el número de
+miembros, el estado agregado y `replayed: false` en recuperación. La resource
+`domotics://metrics` mantiene los contadores operativos existentes; el estado
+durable del agregado y sus miembros es la fuente autoritativa de progreso.
+
+## Composite event backpressure (2026-08-21)
+
+`CompositeAdapter` mantiene las lanes `bulk` y `priority` acotadas por
+`event_queue_max_size`. Los eventos estructurales aplican backpressure al
+productor cuando la lane prioritaria está llena; no se descartan mientras el
+consumer siga drenando. Los `state_changed` repetidos con identidad segura
+usan latest-wins; el overflow restante se agrega en contadores.
+
+La resource `domotics://metrics` expone, además de `event_queue_depth` y
+`dropped_events_total`, `dropped_events_by_adapter`,
+`dropped_events_by_kind` y `coalesced_events_total`. Los diagnósticos de fallo
+del adapter se conservan en una ventana de memoria acotada; el audit durable
+no se modifica.
+
+`completed` significa que el commit agregado terminó; `scheduled` significa que
+las acciones futuras quedaron duraderamente registradas. Ninguno debe
+interpretarse como confirmación de que una acción futura ya se ejecutó.
+
+Contrato detallado: [`specs/087-bundle-commit-saga/contracts/bundle-commit-v3.md`](../specs/087-bundle-commit-saga/contracts/bundle-commit-v3.md).
+
 ## Runtime safety hardening (2026-08-18)
 
 Cierra el trust boundary MCP-agente descrito en
@@ -84,6 +129,31 @@ un plan validado por un `runtime_revision` global único.
 - `ValidationResult.runtime_revision` mantiene su forma/significado
   anterior (compatibilidad con `EnergySkillWorkflow`); `dependencies` es
   aditivo, no lo reemplaza.
+
+### Fingerprints de semántica ejecutable (2026-08-21)
+
+La revisión de inventario ya no observa solo nombres de capabilities y
+disponibilidad. `DiscoveryService` canoniza y hashea la semántica que puede
+alterar una escritura física: tipo/área/disponibilidad/protocolo del device,
+kind/unidad/permisos/bounds/enums/commands/constraints de la capability y
+metadata de todas sus rutas y `SourceRef`. Nombres de presentación y
+`last_seen_at` quedan fuera para evitar churn cosmético.
+
+`PlanDependencies.capability_fingerprints` es un mapa aditivo por
+`device_id::command`. `PlanService.assert_executable()` compara esa evidencia
+con el registry actual antes de reclamar o escribir un plan. Un plan persistido
+con dependencias antiguas sin fingerprints falla cerrado y exige revalidación.
+
+El mismo fingerprint global se persiste en la metadata JSON de runtime junto a
+`inventory_revision`. Tras un restart sirve de baseline para la primera
+rediscovery, evitando que la ausencia temporal de rutas en el registry
+rehidratado genere un `rev-*` falso; una metadata histórica sin el campo se
+reconfirma de forma conservadora.
+
+El registry reemplaza metadata cuando la misma source identity se actualiza,
+pero conserva el diagnóstico y la postura conservadora ante metadata
+incompatible de otra fuente. No se añade migration SQLite: los planes son JSON
+y el campo nuevo tiene default vacío.
 
 ## Event pipeline incremental (2026-08-18)
 
@@ -433,6 +503,11 @@ ya, no en el slot elegido.
   server). El loop de fondo (`Scheduler.run()`) sigue el mismo patrón ya
   establecido por `RuntimeEventConsumer.run()` (Spec 023/026), arrancado
   en `run_stdio()`.
+- La frontera MCP parsea `execute_at` con una única función que exige una
+  zona horaria explícita para `schedule_plan` y `reschedule_plan`. No se usa
+  `model_copy(update=...)` como sustituto de validación: un timestamp naive
+  se rechaza antes de persistir y un `reschedule_plan` inválido conserva la
+  fila pendiente anterior.
 - **Fallout real detectado y corregido**: tres tests preexistentes
   hardcodeaban la lista exacta de tools MCP (`test_domotics_mcp_contract.py`,
   `test_unified_mcp_contract.py`, `test_home_assistant_provider_runtime.py`)
@@ -625,6 +700,9 @@ cliente SQL crudo.
   (`readOnlyHint=True, destructiveHint=False`, mismo patrón que
   `discover_devices`/`get_state`) con parámetros opcionales
   `event_type`, `subject_id`, `since`, `limit`.
+- `since`, cuando se proporciona, exige una zona horaria explícita. El filtro
+  y el orden comparan instantes absolutos, no el orden lexicográfico de ISO;
+  offsets equivalentes no pueden cambiar qué eventos devuelve la consulta.
 - `DomoticsMcpContext` gana `audit_repository: AuditEventRepository |
   None = None` (mismo patrón que `energy_context_provider`/`scheduler`)
   — `None` en el path fixture en memoria sin persistencia, poblado
@@ -933,7 +1011,7 @@ encontraba `ci.yml`), así que ni los SHAs fijados (una vez fijados) ni
 las dependencias Python de `uv.lock` recibían nunca propuestas de
 actualización automatizadas. Tercer hueco verificado: ningún job de CI
 ni mecanismo alguno escaneaba el conjunto de dependencias bloqueado
-contra vulnerabilidades conocidas — `uvx pip-audit --local` ejecutado
+contra vulnerabilidades conocidas — `uv run --with pip-audit pip-audit --local` ejecutado
 contra el entorno real sincronizado confirmó cero vulnerabilidades
 conocidas hoy (confirmado, no asumido) — esta spec añade el mecanismo
 de detección que faltaba, no corrige una vulnerabilidad ya presente.
@@ -958,7 +1036,7 @@ de detección que faltaba, no corrige una vulnerabilidad ya presente.
   propuestas quedan para revisión humana, comportamiento por defecto
   de GitHub sin configuración adicional).
 - Nuevo job `dependency-audit` en `ci.yml`: mismo patrón de setup que
-  cada otro job (`uv sync`), ejecuta `uvx pip-audit --local` contra el
+  cada otro job (`uv sync`), ejecuta `uv run --with pip-audit pip-audit --local` contra el
   entorno sincronizado — falla el job si encuentra cualquier
   vulnerabilidad conocida. `pip-audit` invocado vía `uvx` (no añadido
   a `pyproject.toml`) — herramienta de solo-CI, no dependencia del
@@ -966,7 +1044,7 @@ de detección que faltaba, no corrige una vulnerabilidad ya presente.
 - Probado: grep confirma cero referencias `@v4`/`@v3` mutables
   restantes en todo el fichero; el fichero sigue siendo YAML válido;
   `dependabot.yml` es YAML válido con ambos ecosistemas presentes;
-  `uv sync && uvx pip-audit --local` ejecutado de verdad contra el
+  `uv sync && uv run --with pip-audit pip-audit --local` ejecutado de verdad contra el
   entorno real sincronizado de este repositorio, reportando su
   resultado real actual ("No known vulnerabilities found", 57
   paquetes verificados). `uv.lock` ya pinaba versiones exactas con
@@ -1411,6 +1489,483 @@ mypy limpios (93 ficheros fuente). `schemas/v1/
 optimization-scenario.schema.json` regenerado — solo cambio aditivo
 (dos nuevas definiciones de modelo, dos nuevos campos opcionales en
 `OptimizationScenario`), ningún campo existente cambia de forma.
+
+## Fidelidad de actuación del optimizador y límite de batería (2026-08-21)
+
+La compilación de propuestas trata ahora las decisiones por slot como un
+timeline físico completo, no como una lista de slots positivos:
+
+- Un `Load` con `end_command` conserva su acción de fin incluso cuando cae
+  exactamente en `horizon.end`.
+- EV emite también `0 kW` durante huecos de carga y una parada final en el
+  primer instante posterior al último slot positivo, incluyendo
+  `horizon.end`.
+- `ComfortLoad` exige `end_command`/ `end_value` explícitos y compila una
+  acción de inicio y otra de fin para cada tramo activo contiguo. El runtime no
+  inventa si el termostato debe restaurar, volver a automático o apagarse.
+- Un escenario válido sin acciones devuelve una propuesta vacía
+  (`plan=null`, `plans=[]`) y no un error de indexación. La dirección
+  declarada de `minimize_start` se respeta también en el camino energético.
+
+`BatteryProfile` conserva el contexto matemático y gana un binding opcional
+`actuator` con `device_id`, `capability`, `charge_command`,
+`discharge_command`, `stop_command` y `power_unit="kW"`. Los tres comandos
+deben ser distintos: la semántica v1 usa magnitudes positivas y no infiere
+inversores de setpoint firmado.
+
+Cuando el binding existe, `_proposal_plan()` compila las decisiones de
+`battery_charge_kw`/`battery_discharge_kw` como transiciones físicas: emite
+la orden de carga o descarga al cambiar dirección/valor, una parada al pasar
+a cero y otra exactamente en `horizon.end` si el último estado sigue activo.
+Los comandos generados atraviesan la validación normal de registry,
+capability, route, policy, fingerprints, safety y preconditions; el binding no
+crea ni autoriza una ruta por sí mismo.
+
+Cuando el binding falta, el proveedor puede seguir entregando contexto para
+análisis, pero una propuesta con carga o descarga no nula conserva el guard
+fail-closed: `OptimizationService.validate_proposal()` devuelve
+`status=invalid`, diagnóstico `battery_actuation_unbound` y ningún plan. Ese
+resultado no entra en aprobación, scheduling ni ejecución.
+
+El binding dispatchable también debe declarar `power_feedback_capability`,
+`power_feedback_convention` (`charge_positive` o `discharge_positive`) y una
+`power_feedback_tolerance_kw` estrictamente positiva. La capability debe ser
+numérica, legible, estar expresada en `kW` y tener exactamente una ruta
+canónica disponible; el binding no crea esa ruta. `BatteryState` sigue siendo
+evidencia de planificación de solo lectura y conserva la procedencia inicial
+del SOC, no una autorización ni una reconciliación post-ejecución.
+
+Cada comando de carga, descarga y parada lleva un único
+`CommandPostcondition` sobre esa capability medida. El optimizador conserva
+magnitudes positivas internamente y las traduce al signo declarado: con
+`charge_positive`, cargar es positivo, descargar negativo y parar es `0`; con
+`discharge_positive`, los signos se invierten. Después de la aceptación del
+adapter, `PlanExecutor` lee la ruta de feedback —que puede ser distinta de la
+ruta de escritura—, persiste la observación y solo confirma si está `CURRENT`
+y cae dentro de la tolerancia absoluta. Falta de lectura, estado stale,
+unavailable/invalid o discrepancia producen `UNKNOWN`.
+
+Los comandos custom sin postcondition tipado también son fail-closed: ya no se
+confirman por la mera existencia de una snapshot. Este contrato no pretende
+resolver todavía el settling del SOC, control en lazo cerrado, protocolo de
+un inversor concreto ni recuperación de un write ambiguo.
+
+## Settling bounded del feedback físico (2026-08-22)
+
+La confirmación de una postcondition de feedback puede declarar ahora una
+ventana acotada de estabilización:
+
+- `settle_timeout_seconds` es opcional, no negativo y está limitado a 120 s;
+  omitido o igual a cero conserva la confirmación inmediata de una sola
+  lectura.
+- `poll_interval_seconds` es positivo, está limitado a 10 s y, cuando existe
+  una ventana positiva, no puede superarla.
+- `BatteryActuator` lleva la misma política en
+  `power_feedback_settle_timeout_seconds` y
+  `power_feedback_poll_interval_seconds`; CP-SAT la copia a los comandos de
+  carga, descarga y parada.
+
+Después de que el adapter acepte, `PlanExecutor` mantiene una sola escritura
+física y repite únicamente el `read_state()` de la ruta canónica de feedback.
+Sale inmediatamente cuando encuentra una observación `CURRENT` dentro de la
+tolerancia. Si el plazo termina, conserva la última observación persistida y
+devuelve `UNKNOWN`/`UNAVAILABLE`; nunca reenvía automáticamente la orden.
+Errores transitorios de lectura pueden reintentarse dentro del presupuesto y
+`CancelledError` sigue propagándose.
+
+Este contrato resuelve el settling de la medición de potencia, no el settling
+del SOC. No añade proveedor/inversor de vendor, estimación o reconciliación de
+SOC, control en lazo cerrado, reconciliación de writes ambiguos ni recovery
+post-crash. Contrato detallado: [`specs/098-battery-feedback-settling/contracts/battery-feedback-settling.md`](../specs/098-battery-feedback-settling/contracts/battery-feedback-settling.md).
+
+## Provenance del SOC inicial (2026-08-22)
+
+`BatteryProfile.initial_soc_kwh` sigue siendo el único valor numérico que
+consume CP-SAT, pero ahora puede llevar `initial_soc_observation` con la
+evidencia que lo respalda: `provider_id`, `device_id`, valor canónico en `kWh`,
+`MeasurementQuality`, `observed_at`, `received_at` y `SourceRef`. El valor
+observado debe coincidir con `initial_soc_kwh` dentro de `1e-6 kWh`; los dos
+campos no representan dos SOC independientes.
+
+La `BatteryState` despachable —un perfil con `actuator`— falla cerrado si no
+tiene observación, si la calidad no es `GOOD`, si el proveedor o el dispositivo
+no coincide, o si la observación está fuera de la ventana de frescura del
+`ComposedEnergyContextProvider`. Las observaciones futuras, stale, unavailable
+o invalid no llegan al `EnergyContext`. Un perfil sin actuador puede seguir
+siendo análisis-only sin telemetría live.
+
+Esta provenance permanece en el contexto serializado y permite diagnóstico,
+pero no es autorización, claim de ejecución, postcondition de potencia ni
+reconciliación posterior al write. La Spec 099 no convierte porcentajes,
+estima SOC, integra un inversor concreto ni actualiza el SOC después de una
+actuación.
+Contrato detallado: [`specs/099-battery-soc-provenance/contracts/battery-soc-provenance.md`](../specs/099-battery-soc-provenance/contracts/battery-soc-provenance.md).
+
+## Bridge de telemetría SOC (2026-08-22)
+
+El provider boundary expone ahora un bridge único desde el `Measurement` del
+Provider SDK hacia `BatterySocObservation`. Solo acepta la métrica exacta
+`battery.soc` con valor numérico no booleano y unidad canónica `kWh`; copia sin
+pérdida `provider_id`, `device_id`, métrica, unidad, valor, calidad,
+`observed_at`, `received_at` y `SourceRef`.
+
+Una medición `battery.soc` en `%`, `Wh`, sin unidad, textual, booleana o con
+otra métrica se rechaza con un `EnergyProviderDiagnostic` sanitizado. No se
+infieren capacidad/reserva, no se convierten porcentajes y no se elige entre
+fuentes concurrentes. `STALE`, `UNAVAILABLE` e `INVALID` se conservan como
+evidencia y siguen siendo rechazados por la guardia de `BatteryState` cuando el
+perfil es despachable.
+
+El bridge es puro y de solo lectura: no llama adapters, no muta `StateStore`,
+no autoriza comandos y no reconcilia SOC después de un write. Contrato
+detallado: [`specs/100-battery-soc-measurement-bridge/contracts/battery-soc-measurement-bridge.md`](../specs/100-battery-soc-measurement-bridge/contracts/battery-soc-measurement-bridge.md).
+
+## Conversión explícita de SOC porcentual (2026-08-22)
+
+La Spec 101 añade una segunda frontera explícita para proveedores que entregan
+`battery.soc` en `%`. La conversión solo acepta valores finitos entre `0` y
+`100`, capacidad positiva y finita declarada por configuración, y evidencia de
+capacidad ligada al mismo `provider_id` y `device_id`. El resultado es:
+
+```text
+value_kwh = source_value_percent / 100 * capacity_kwh
+```
+
+`BatterySocObservation` conserva `conversion_evidence` con el porcentaje
+original, la capacidad y el método fijo
+`percentage_of_declared_capacity`. La provenance, timestamps y
+`MeasurementQuality` se copian sin elevar calidad; una observación `STALE`,
+`UNAVAILABLE` o `INVALID` sigue sin ser despachable.
+
+Home Assistant continúa publicando la medición raw en `%`; el Provider SDK no
+adivina capacidad ni convierte automáticamente. Un proveedor específico debe
+invocar esta frontera con evidencia explícita. Unidades distintas, porcentajes
+fuera de rango, capacidad ausente/inválida o identidad cruzada fallan cerrado
+con diagnósticos sanitizados. La conversión no llama adapters, no muta
+`StateStore`, no autoriza ni ejecuta planes y no reconcilia SOC post-write.
+Contrato detallado: [`specs/101-battery-soc-percent-conversion/contracts/battery-soc-percent-conversion.md`](../specs/101-battery-soc-percent-conversion/contracts/battery-soc-percent-conversion.md).
+
+## Binding explícito de capacidad Home Assistant (2026-08-22)
+
+La Spec 102 añade a la configuración v1 un mapa opcional de bindings de
+capacidad nominal. Cada entrada usa el `entity_id` exacto de Home Assistant y
+el `device_id` esperado del registro; no se acepta emparejamiento por nombre,
+área, `friendly_name` ni fuzzy matching. Una entidad configurada cuyo
+`device_id` real no coincide hace fallar cerrado la lectura de capacidad.
+
+Cuando la entidad coincide, el provider la proyecta como medición read-only
+`battery.capacity` en `kWh`, conservando provider/device, `SourceRef`, calidad
+y timestamps. La configuración declara explícitamente que el valor es
+capacidad nominal; energía restante y flujo acumulado son semánticas distintas
+y no se autodetectan.
+
+El bridge `battery_capacity_evidence_from_measurement()` acepta únicamente
+`battery.capacity`/`kWh` con valor numérico positivo y finito y crea
+`BatteryCapacityEvidence` con `capacity_source="provider_measurement"`. La
+evidencia conserva `SourceRef`, `observed_at`, `received_at` y
+`MeasurementQuality`. La conversión `% → kWh` de Spec 101 acepta esa fuente
+solo con calidad `GOOD` y misma identidad provider/device; la evidencia
+`provider_config` anterior sigue siendo compatible.
+
+Sin binding, Home Assistant mantiene su SOC raw en `%` y el runtime no fabrica
+capacidad ni habilita dispatch. No se añaden descubrimiento vendor, conversión
+automática de unidades, StateStore, comandos, aprobación ni reconciliación
+post-write. Contrato detallado: [`specs/102-home-assistant-battery-capacity/contracts/home-assistant-battery-capacity.md`](../specs/102-home-assistant-battery-capacity/contracts/home-assistant-battery-capacity.md).
+
+### Gate mínimo de clase de dispositivo (Spec 105)
+
+Antes de proyectar un binding como `battery.capacity`, el provider exige que
+los atributos normalizados de esa entidad declaren exactamente
+`device_class=energy_storage`. La ausencia de la clase o una clase distinta
+produce `HomeAssistantMappingConfigurationError` sanitizado; no se elige otra
+entidad ni se continúa con la medición.
+
+Este gate es comprobable, pero no es una prueba universal de capacidad
+nominal: Home Assistant usa `energy_storage` tanto para energía almacenada como
+para capacidad. Por eso `semantics=nominal_capacity` sigue siendo una
+atestación explícita del operador/proveedor y no se infiere por nombre, unidad,
+área, modelo o integración. La documentación oficial de Powerwall también
+describe diferencias entre modelos en la disponibilidad de sensores de
+Capacity/Remaining.
+
+Contrato detallado: [`specs/105-ha-capacity-device-class-gate/contracts/home-assistant-capacity-gate.md`](../specs/105-ha-capacity-device-class-gate/contracts/home-assistant-capacity-gate.md).
+
+### Attestation de capacidad nominal (Spec 106)
+
+Un binding de capacidad nominal de Home Assistant exige ahora una
+`NominalCapacityAttestation` no secreta con `evidence_type`, referencia,
+modelo/subject, attester y `attested_at` timezone-aware. La atestación viaja
+sin pérdida desde el binding a la `Measurement` `battery.capacity` y a
+`BatteryCapacityEvidence`.
+
+La frontera de `provider_measurement` falla cerrado si la medición no lleva esa
+atestación; el diagnóstico es `missing_nominal_capacity_attestation`. La ruta
+`provider_config` sigue siendo válida para perfiles estáticos explícitos.
+Esto es provenance auditable, no autenticidad criptográfica: el runtime no
+descarga la referencia ni verifica online al attester. La atestación no
+autoriza comandos, no habilita `build_runtime` y no activa dispatch.
+
+Contrato detallado: [`specs/106-nominal-capacity-attestation/contracts/nominal-capacity-attestation.md`](../specs/106-nominal-capacity-attestation/contracts/nominal-capacity-attestation.md).
+
+### Trust policy de capacidad nominal (Spec 107)
+
+La atestación de Spec 106 es provenance del proveedor, no identidad
+autenticada. `NominalCapacityTrustPolicy` es configuración server-owned y
+exige allowlists no secretas, no vacías y sin duplicados para el tipo de
+evidencia, `attested_by` y la referencia exacta del documento revisado. El
+runtime no descarga la referencia ni acepta prefijos de URL.
+
+`StateStoreBatteryProvider` aplica el gate solo cuando el perfil tiene un
+actuador y consume `BatteryCapacityEvidence` de tipo
+`provider_measurement`. Falta de policy o cualquier mismatch produce un
+diagnóstico sanitizado (`nominal_capacity_trust_required`,
+`nominal_capacity_evidence_type_not_trusted`,
+`nominal_capacity_attester_not_trusted` o
+`nominal_capacity_reference_not_trusted`) antes de construir el estado
+despachable. El perfil analysis-only puede seguir usando evidencia explícita,
+y `provider_config` conserva su compatibilidad estática; ninguna de las dos
+rutas crea un actuador ni habilita `build_runtime`.
+
+Contrato detallado: [`specs/107-nominal-capacity-trust-policy/contracts/nominal-capacity-trust-policy.md`](../specs/107-nominal-capacity-trust-policy/contracts/nominal-capacity-trust-policy.md).
+
+### Binding completo de batería despachable (Spec 108)
+
+`DispatchableBatteryBinding` agrupa el `provider_id`, `device_id`, la
+capability canónica `battery.soc`, el `BatteryProfile`, la evidencia explícita
+de capacidad y la policy de trust cuando la capacidad proviene de medición.
+Falla cerrado si falta el actuador, si su dispositivo no coincide, si no
+declara `soc_reconciliation_capability="battery.soc"`, si la evidencia
+cruza provider/device, si no coincide con `profile.capacity_kwh` o si una
+medición no es `GOOD`/no lleva policy.
+
+`StateStoreBatteryProvider.from_binding()` es la composición explícita que
+acepta ese agregado y evalúa la policy antes de devolver el provider. La
+disponibilidad y ambigüedad de las rutas de comandos, feedback de potencia y
+SOC siguen siendo responsabilidad de `DeviceRegistry`/`validate_scenario`;
+este modelo no infiere rutas por nombre, área o modelo. `build_runtime` no
+instala el provider ni activa hardware automáticamente.
+
+Contrato detallado: [`specs/108-dispatchable-battery-binding/contracts/dispatchable-battery-binding.md`](../specs/108-dispatchable-battery-binding/contracts/dispatchable-battery-binding.md).
+
+### Binding de rutas Home Assistant para batería (Spec 109)
+
+`HomeAssistantMappingDocument` acepta ahora opcionalmente
+`battery_dispatch_bindings`. `HomeAssistantDispatchableBatteryBinding` es un
+contrato específico del adapter que preserva los IDs exactos de Home
+Assistant, pero mantiene los semánticos canónicos fijos:
+
+| Dato | Semántica | Unidad |
+| --- | --- | --- |
+| `soc_entity_id` | `battery.soc` | `%` |
+| `power_feedback_entity_id` | `battery.power` | `kW` |
+| `capacity_entity_id` | `battery.capacity` | `kWh` |
+
+Las rutas `charge`, `discharge` y `stop` declaran cada una un `entity_id` y
+un `provider_command`; los nombres de comando deben ser distintos. La
+capacidad debe referenciar un binding nominal existente con el mismo
+`device_id`, por lo que no se puede construir accidentalmente un perfil con
+capacidad de otra batería.
+
+La validación es estática y sin efectos laterales. No hace discovery, no
+consulta Home Assistant, no comprueba disponibilidad/escritura/readback y no
+contiene secretos o payloads de servicio. `build_runtime` continúa sin
+instalar un `StateStoreBatteryProvider` ni habilitar dispatch por la mera
+presencia de este campo. El futuro wiring debe verificar registry, capability,
+policy, safety y convergencia de potencia/SOC antes de crear el
+`DispatchableBatteryBinding` canónico.
+
+Contrato detallado: [`specs/109-home-assistant-battery-route-binding/contracts/home-assistant-battery-route-binding.md`](../specs/109-home-assistant-battery-route-binding/contracts/home-assistant-battery-route-binding.md).
+
+### Validación de rutas HA contra snapshot (Spec 110)
+
+La declaración estática de Spec 109 puede validarse contra un
+`AdapterSnapshot` ya obtenido:
+
+```python
+snapshot = await provider.snapshot()
+provider.validate_battery_dispatch_routes(snapshot)
+```
+
+La operación es síncrona y side-effect-free sobre ese snapshot. Exige
+identidad exacta de cada entidad, SOC `battery.soc`/`%`, feedback
+`battery.power`/`kW`, capacidad `battery.capacity`/`kWh` con binding nominal y
+clase `energy_storage`, además de capabilities escribibles para las tres
+rutas de comando. Falta, disponibilidad negativa, unidad incompatible,
+capacidad incorrecta, device cruzado o comando no expuesto producen
+`HomeAssistantMappingConfigurationError` sanitizado.
+
+La validación no hace un refresh implícito, no llama `call_service`, no hace
+fallback por nombre/área/modelo y no instala batería despachable. El snapshot
+lo adquiere el caller mediante el límite read-only existente; el resultado
+solo habilita una futura comprobación de registry/policy/safety/readback.
+
+Contrato detallado: [`specs/110-home-assistant-battery-route-validation/contracts/home-assistant-battery-route-validation.md`](../specs/110-home-assistant-battery-route-validation/contracts/home-assistant-battery-route-validation.md).
+
+### Gate de traducibilidad de comandos HA (Spec 111)
+
+La validación de rutas de batería no se detiene en comprobar que una
+capability sea `writable` y exponga el nombre declarado. También reutiliza el
+traductor puro de `HomeAssistantProvider` con un `ProviderCommand` sintético,
+sin ejecutar el comando. Si el traductor no puede producir una acción HA
+soportada —por ejemplo, `set_position` sin `params["value"]`— la validación
+falla con `HomeAssistantMappingConfigurationError`.
+
+Este gate no hace discovery ni consulta servicios live, no añade nombres de
+servicio arbitrarios y no crea batería despachable. Las rutas value-bearing
+legacy siguen rechazándose; las rutas numéricas explícitas de Spec 114 son la
+única ampliación aceptada para transportar un setpoint.
+
+Contrato: `specs/111-home-assistant-battery-translation-gate/`.
+
+### Rutas numéricas y smoke HIL del inversor (Spec 114)
+
+La ampliación de Spec 114 permite que `HomeAssistantBatteryCommandRoute`
+declare únicamente el servicio numérico `number.set_value` y una transformación
+explícita `as_is`, `negate` o `zero`. El provider añade `battery_control` como
+metadata de comandos en el snapshot, obtiene límites `min`/`max` y unidad de
+la entidad numérica, y envía el `value` resultante. Una ruta sin capacidad de
+representar el valor es rechazada antes de `call_service`; no se convierte un
+setpoint en un `open`/`close` implícito.
+
+El smoke físico de
+`tests/integration/test_home_assistant_provider_hil_smoke.py` continúa
+separado del laboratorio virtual. Está deshabilitado por defecto y exige
+credenciales, mapping, perfil/evidencia, identidad canónica, probe positivo
+limitado por el perfil, token de aprobación y confirmación exacta del
+operador. Tras un único comando de carga o descarga, usa lecturas independientes
+de potencia y SOC para comprobar estado actual, signo, tolerancia y estabilidad;
+la respuesta del servicio y el `after_state` del executor no son evidencia
+suficiente. Si el probe llegó a iniciarse, la parada aprobada se intenta en
+`finally` aunque falle la aserción de convergencia. Sin todos los gates el test
+se salta antes de construir el runtime y no escribe en ningún dispositivo.
+
+### Composición HA a binding canónico (Spec 112)
+
+`compose_home_assistant_dispatchable_battery_binding(...)` vive en la capa de
+aplicación y une, sin I/O, un `HomeAssistantDispatchableBatteryBinding`
+validado con un `BatteryProfile`, evidencia de capacidad y policy suministrados
+por el host, además del `canonical_device_id` resuelto por `DeviceRegistry`.
+Reutiliza la gate de rutas de Specs 110/111 y exige coherencia de
+provider/device de fuente, dispositivo canónico, comandos de
+carga/descarga/parada, capability writable común, feedback `battery.power`/`kW`,
+reconciliación `battery.soc`, observación SOC y capacidad.
+
+La función devuelve el `DispatchableBatteryBinding` canónico con el ID de
+dispositivo que usan `DeviceRegistry`, `StateStore` y `Plan`; no copia el
+`device_id` físico HA al contrato canónico. No crea
+`StateStoreBatteryProvider`, no cambia `build_runtime`, no persiste y no llama
+servicios. La instalación sigue siendo una decisión explícita del host a
+través de `StateStoreBatteryProvider.from_binding()`.
+
+Contrato: `specs/112-home-assistant-dispatchable-composition/`.
+
+### Instalación explícita del provider en runtime (Spec 113)
+
+El host que ya posee un `DispatchableBatteryBinding` completo puede pasarlo a
+`build_runtime(..., dispatchable_battery_binding=binding)`. El composition root
+lo convierte mediante `StateStoreBatteryProvider.from_binding()` usando el
+`StateStore` de esa instancia y lo inyecta en el
+`ComposedEnergyContextProvider`. El runtime expone el provider instalado en
+`RuntimeComposition.battery_provider` para diagnóstico y validación de
+composición.
+
+Este parámetro es opcional y no reconstruye el binding desde settings,
+discovery, nombres o mapping HA. Con `energy_live=False` se rechaza antes de
+inicializar SQLite; sin binding no cambia la semántica de energía opcional.
+La instalación no hace refresh ni service calls y no concede por sí misma
+aprobación, policy, safety ni autoridad de ejecución física.
+
+Contrato: `specs/113-explicit-runtime-battery-composition/`.
+
+## Reconciliación durable de SOC después de writes físicos (2026-08-22)
+
+La Spec 103 cierra la frontera entre el readback que obtiene `PlanExecutor` y
+el estado que sobrevive a un restart. Cada `StateSnapshot` normalizado durante
+un readback se guarda tanto en `StateStore` como en el
+`StateSnapshotRepository` SQLite existente antes de devolver el resultado.
+
+`BatteryActuator` puede declarar explícitamente
+`soc_reconciliation_capability`. El compilador propaga esa declaración al
+`CommandPostcondition`; después de confirmar el feedback de potencia, el
+executor lee exactamente una vez la ruta única y disponible, verifica que la
+observación sea `CURRENT` y la persiste con su `SourceRef`, unidad, valor y
+timestamps.
+
+Si la ruta falta, es ambigua, está unavailable/stale o falla la persistencia,
+el write físico ya aceptado termina como `UNKNOWN`, se audita con un mensaje
+sanitizado y nunca se reenvía el comando. La ausencia del campo conserva el
+comportamiento anterior y no provoca selección implícita de `battery.soc`.
+El runtime no estima SOC desde potencia/tiempo/eficiencia ni convierte el
+snapshot directamente en `BatterySocObservation`; esa composición sigue siendo
+responsabilidad del provider. Contrato detallado: [`specs/103-battery-soc-reconciliation/contracts/battery-soc-reconciliation.md`](../specs/103-battery-soc-reconciliation/contracts/battery-soc-reconciliation.md).
+
+## Preflight de seguridad del plan (2026-08-21)
+
+`PlanExecutor` mantiene el claim durable como barrera de concurrencia, pero
+después del claim inspecciona todos los comandos antes de llamar por primera
+vez a `AdapterPort.execute()`. El preflight comprueba preconditions actuales y
+los límites configurados por `SafetyKernel`; si encuentra una violación,
+devuelve outcomes `REJECTED` para el intento, persiste el resultado terminal y
+no produce ningún write físico.
+
+Los planes secuenciales conservan su semántica: para evaluar un precondition
+posterior solo se proyectan localmente los efectos deterministas ya definidos
+(`turn_on`, `turn_off`, `open`, `close` y `set_*` con valor). Esa proyección no
+se escribe en `StateStore`, no es readback y no se aplica a comandos
+desconocidos. Antes de cada write siguen ejecutándose los checks
+just-in-time de preconditions y SafetyKernel, porque un cambio de estado
+posterior al preflight todavía puede producir una saga parcial honesta.
+
+Los bundles atraviesan la misma frontera mediante `PlanExecutor`; el bundle
+no duplica ni relaja las reglas físicas. Una preflight rejection no contiene
+credenciales, conserva `execution_attempt_id` y deja `adapter_request_id` en
+`null`, porque nunca existió una request al adapter. Esto ordena la seguridad
+conocida antes del hardware, pero no promete atomicidad física ni compensación.
+
+## Correlación end-to-end de una ejecución física (2026-08-21)
+
+`PlanExecutor` crea un `ExecutionContext` inmutable para cada comando que va a
+llegar al adapter. El contexto contiene únicamente
+`agent_request_id` (si existe), `plan_id`, `execution_attempt_id` y
+`adapter_request_id`; no contiene tokens, credenciales ni el payload mutable
+del comando. El mismo objeto se reenvía por `AdapterPort`, `CompositeAdapter`,
+los bridges de provider y los transportes nativos.
+
+Las llamadas directas a adapters/providers sin contexto siguen permitidas para
+diagnóstico y fixtures, pero una ejecución originada por el executor siempre
+debe llevarlo. El executor sigue siendo el único componente que genera
+`adapter_request_id`; routing y providers no crean una segunda línea de
+correlación.
+
+Home Assistant propaga los identificadores no secretos al boundary HTTP como
+cabeceras `X-DomoAI-*`. Matter, MQTT, KNX y Modbus reciben el contexto en su
+boundary de transporte y lo conservan en request records/logging sin alterar
+el payload o valor físico de protocolos que no ofrecen un canal de metadata.
+Un transport failure conserva el mismo ID en el outcome `UNAVAILABLE` y en la
+auditoría. Esto mejora la trazabilidad, pero no sustituye el claim durable,
+la policy, el SafetyKernel ni la idempotencia.
+
+## Aprobación de bundles por digest completo (2026-08-21)
+
+El workflow energético separa ahora dos autoridades:
+
+- `bundle_digest`: digest canónico del escenario y del bundle ordenado de
+  miembros ya validados (`plan_id`, digest de validación de miembro y
+  `execute_at`), que identifica lo que revisa y aprueba el operador.
+- `validation_digest`: digest individual que continúa usando cada llamada MCP
+  `request_approval`, `execute_plan` y `schedule_plan`; es la autoridad del
+  runtime para ese `Plan` concreto.
+- Cuando la aprobación pertenece a un bundle, el `ApprovalGrant` también
+  conserva `bundle_digest`; el commit rechaza cualquier grant emitido para
+  otro bundle, aunque el digest individual del plan coincida.
+
+La explicación que recibe el host de aprobación incluye `bundle_digest` y el
+resumen ordenado del bundle. El campo existente `validation_digest` del
+resultado del workflow queda como alias compatible del digest de aprobación;
+los hosts nuevos deben usar `bundle_digest`. Cambiar el orden, un miembro, su
+digest o su timestamp cambia el digest y bloquea antes de emitir grants o
+ejecutar. Esta corrección no promete atomicidad física ni rollback del bundle;
+eso pertenece a una saga posterior.
 
 ## Tarifa de exportación como ingreso en el optimizador (2026-08-19)
 
@@ -2154,6 +2709,64 @@ holding registers de brightness declarados, después de pasar por
 `PlanService`, `PolicyEngine`, `PlanExecutor`, idempotencia y postcondición de
 readback. La especificación, el mapping y el contrato están cubiertos por los
 schemas y tests de contrato del adapter.
+
+## Composición de SOC reconciliado desde StateStore (Spec 104)
+
+`StateStoreBatteryProvider` conecta explícitamente un snapshot normalizado del
+cache de `StateStore` con el provider de energía:
+
+```text
+StateStore.peek(device, capability)
+        ↓
+Measurement canónica
+        ↓
+BatterySocObservation con provenance
+        ↓
+BatteryProfile validado
+        ↓
+BatteryState → EnergyContext → MCP
+```
+
+La consulta es síncrona, read-only y no llama al adapter ni a SQLite. Un
+snapshot `kWh` se conserva directamente; un snapshot `%` solo se convierte
+con `BatteryCapacityEvidence` explícita, positiva, `GOOD` y ligada al mismo
+provider y dispositivo. `STALE` conserva calidad degradada y no puede activar
+un perfil despachable; `UNAVAILABLE`, `INVALID`, identidades cruzadas, valores
+no numéricos o unidades no soportadas fallan cerrado con diagnósticos
+sanitizados.
+
+El provider no se auto-instala en `build_runtime`: todavía no existe una
+configuración segura y completa de binding de perfil, actuador y capacidad
+nominal para habilitar batería live. Esta frontera evita convertir una entidad
+ambigua de Home Assistant u otro proveedor en autorización de despacho.
+
+## Lifecycle durable de planes MCP (Spec 115)
+
+En el runtime configurado, `validate_plan` y `validate_command` persisten el
+plan validado en `PlanRepository`. Un contexto MCP nuevo resuelve primero el
+cache en memoria y, si no encuentra el ID, consulta SQLite; el cuerpo completo
+del plan, su digest, dependencias, expiry y estado se recuperan desde el
+registro durable. Los contextos de fixtures sin repositorio siguen siendo
+deliberadamente process-local.
+
+La validación sin `expires_at` recibe un TTL finito del servidor. Para planes
+con `execute_at` futuro, el TTL cubre la ventana hasta esa ejecución; al llegar
+la hora, el executor vuelve a comprobar expiry, dependencias, policy, rutas,
+capability fingerprint y preflight de seguridad antes de cualquier write.
+
+La aprobación no se reconstruye tras restart: los grants siguen siendo
+single-use y process-local. La ruta MCP legacy usa un bearer token únicamente
+si `DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN=1` está configurado, y queda destinada a
+instalaciones locales/dev. El runtime también expone `OperatorPrincipal` para
+que una UI/host autenticado emita grants sin introducir credenciales en el
+schema consumido por el agente. La autenticación humana real sigue siendo una
+responsabilidad del host confiable.
+
+`schedule_plan`, `reschedule_plan` y `cancel_scheduled_plan` actualizan tanto
+la cola de scheduling como `PlanRepository`; cancelar también deja el plan en
+estado terminal y bloquea una ejecución directa posterior. La reconciliación
+entre schedule y execution permanece autoritativa en los repositories y no
+reconstruye efectos físicos después de un crash.
 
 ## Versionado
 

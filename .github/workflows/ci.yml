@@ -132,4 +132,4 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uvx pip-audit --local
+      - run: uv run --with pip-audit pip-audit --local

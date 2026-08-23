@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +29,8 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class KnxAdapter:
@@ -43,10 +44,12 @@ class KnxAdapter:
         mapping: KnxMappingDocument | Path,
         *,
         discovery_timeout: float = 5.0,
+        clock: Clock | None = None,
     ) -> None:
         self.transport = transport
         self.mapping = load_mapping(mapping) if isinstance(mapping, Path) else mapping
         self.discovery_timeout = discovery_timeout
+        self._clock = clock or SystemClock()
         self.mapper = KnxMapper()
         self._connected = False
         self._available = True
@@ -155,14 +158,21 @@ class KnxAdapter:
             )
         return snapshots
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         self._require_connected()
         entity = self._entity_by_canonical.get(command.device_id)
         if entity is None:
             return AdapterExecutionAck(accepted=False, message="Unknown KNX device")
-        return await self.execute_source(command, entity.entity_id)
+        return await self.execute_source(command, entity.entity_id, execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         self._require_connected()
         entity = next(
             (item for item in self.mapping.entities if item.entity_id == source_entity_id),
@@ -183,7 +193,9 @@ class KnxAdapter:
             )
         group_address, dpt, value = translated
         try:
-            await self.transport.write_group(group_address, dpt, value)
+            await self.transport.write_group(
+                group_address, dpt, value, execution_context=execution_context
+            )
         except (ConnectionError, OSError, TimeoutError) as error:
             self._available = False
             raise ConnectionError(f"KNX command failed: {error}") from error
@@ -245,7 +257,7 @@ class KnxAdapter:
 
     def _ingest_value(self, value: KnxGroupValue) -> StateChangedEvent | None:
         decoded = self.mapper.decode_many(self.mapping, value)
-        received_at = datetime.now(UTC)
+        received_at = self._clock.now()
         entity_ids: list[str] = []
         capabilities: list[str] = []
         for state in decoded:

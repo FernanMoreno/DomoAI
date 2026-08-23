@@ -6,6 +6,7 @@ from domoai.domain.provider import (
     DeviceDescriptor,
     Measurement,
     MeasurementQuality,
+    NominalCapacityAttestation,
     ProviderCollectionResult,
     ProviderCommand,
     ProviderDiagnostic,
@@ -14,6 +15,7 @@ from domoai.domain.provider import (
     ProviderManifest,
     ProviderRole,
 )
+from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.provider_sdk import (
     CommandProviderPort,
     DuplicateProviderError,
@@ -56,12 +58,14 @@ __all__ = [
     "ConformanceHarness",
     "ConformanceResult",
     "DiagnosticSeverity",
+    "ExecutionContext",
     "DuplicateAdapterError",
     "CommandProviderPort",
     "DeviceDescriptor",
     "DuplicateProviderError",
     "Measurement",
     "MeasurementQuality",
+    "NominalCapacityAttestation",
     "ProviderCollectionResult",
     "ProviderCommand",
     "PROVIDER_CONTRACT_VERSION",

@@ -32,6 +32,17 @@ def test_operator_approval_token_defaults_to_unset(
     settings = Settings.from_environment()
 
     assert settings.operator_approval_token is None
+    assert settings.allow_legacy_operator_token is False
+
+
+def test_legacy_operator_token_requires_explicit_environment_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN", "1")
+
+    settings = Settings.from_environment()
+
+    assert settings.allow_legacy_operator_token is True
 
 
 def test_operator_approval_token_is_loaded_from_environment(

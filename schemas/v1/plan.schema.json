@@ -27,6 +27,30 @@
           "default": "plan",
           "title": "Scope",
           "type": "string"
+        },
+        "authentication_context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authentication Context"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
         }
       },
       "required": [
@@ -106,6 +130,14 @@
           ],
           "default": null,
           "title": "Intent"
+        },
+        "postconditions": {
+          "items": {
+            "$ref": "#/$defs/CommandPostcondition"
+          },
+          "maxItems": 1,
+          "title": "Postconditions",
+          "type": "array"
         }
       },
       "required": [
@@ -115,6 +147,75 @@
         "idempotency_key"
       ],
       "title": "Command",
+      "type": "object"
+    },
+    "CommandPostcondition": {
+      "additionalProperties": false,
+      "description": "Typed observation required before a command is confirmed successful.",
+      "properties": {
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tolerance": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance"
+        },
+        "settle_timeout_seconds": {
+          "anyOf": [
+            {
+              "maximum": 120,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Settle Timeout Seconds"
+        },
+        "poll_interval_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Poll Interval Seconds",
+          "type": "number"
+        },
+        "reconcile_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Reconcile Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability",
+        "expected"
+      ],
+      "title": "CommandPostcondition",
       "type": "object"
     },
     "ErrorDetail": {
@@ -321,6 +422,13 @@
             "type": "integer"
           },
           "title": "State Versions",
+          "type": "object"
+        },
+        "capability_fingerprints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Capability Fingerprints",
           "type": "object"
         }
       },

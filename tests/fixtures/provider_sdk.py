@@ -14,6 +14,7 @@ from domoai.domain.provider import (
     ProviderManifest,
     ProviderRole,
 )
+from domoai.runtime.execution_context import ExecutionContext
 
 OBSERVED_AT = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
 RECEIVED_AT = datetime(2026, 8, 16, 12, 0, 1, tzinfo=UTC)
@@ -162,9 +163,15 @@ class CommandFixture:
     def __init__(self, manifest: ProviderManifest | None = None) -> None:
         self.manifest = manifest or command_manifest()
         self.commands: list[ProviderCommand] = []
+        self.execution_contexts: list[ExecutionContext | None] = []
 
-    async def execute(self, command: ProviderCommand) -> ProviderExecutionResult:
+    async def execute(
+        self,
+        command: ProviderCommand,
+        execution_context: ExecutionContext | None = None,
+    ) -> ProviderExecutionResult:
         self.commands.append(command)
+        self.execution_contexts.append(execution_context)
         return ProviderExecutionResult(
             provider_id=self.manifest.provider_id,
             external_device_id=command.external_device_id,

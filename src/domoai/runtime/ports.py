@@ -18,6 +18,7 @@ from domoai.domain.models import (
     SourceRef,
     StateSnapshot,
 )
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class AdapterPort(Protocol):
@@ -31,7 +32,9 @@ class AdapterPort(Protocol):
 
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]: ...
 
-    async def execute(self, command: Command) -> AdapterExecutionAck: ...
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck: ...
 
     def subscribe_events(self) -> AsyncIterator[SourceEvent]: ...
 
@@ -41,7 +44,15 @@ class AdapterPort(Protocol):
 class StateStorePort(Protocol):
     async def save(self, snapshot: StateSnapshot) -> None: ...
 
+    def peek(self, device_id: str, capability: str) -> StateSnapshot | None: ...
+
     async def get(self, device_id: str, capability: str) -> StateSnapshot | None: ...
+
+
+class StateSnapshotSinkPort(Protocol):
+    """Durable sink for normalized runtime state observations."""
+
+    async def save(self, snapshot: StateSnapshot) -> None: ...
 
 
 class AuditSinkPort(Protocol):
@@ -66,6 +77,7 @@ class DatabasePort(Protocol):
 class PlanRecordPort(Protocol):
     async def save(self, plan: Plan) -> None: ...
     async def get(self, plan_id: str) -> Plan | None: ...
+    async def mark_unknown_if_executing(self, plan_id: str) -> bool: ...
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool: ...

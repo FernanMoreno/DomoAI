@@ -36,6 +36,25 @@ class _PacedFloodAdapter:
             yield StateChangedEvent(payload={"i": i})
 
 
+class _BlockingStructuralAdapter:
+    def __init__(self, adapter_id: str, count: int) -> None:
+        self.adapter_id = adapter_id
+        self.count = count
+        self.yielded = 0
+        self.cancelled = False
+
+    async def connect(self) -> None:
+        return None
+
+    async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
+        try:
+            for i in range(self.count):
+                self.yielded += 1
+                yield AvailabilityChangedEvent(payload={"index": i})
+        finally:
+            self.cancelled = True
+
+
 async def _drain(composite: CompositeAdapter) -> list[SourceEvent]:
     return [event async for event in composite.subscribe_events()]
 
@@ -63,13 +82,9 @@ async def test_burst_beyond_threshold_is_capped_and_recorded() -> None:
     delivered = await _drain(composite)
 
     assert len(delivered) == 5
-    drops = [
-        entry
-        for entry in composite.diagnostics
-        if entry["event_type"] == "adapter_event_dropped_backpressure"
-    ]
-    assert len(drops) == 15
-    assert all(entry["adapter_id"] == "home_assistant" for entry in drops)
+    assert composite.dropped_events_total == 15
+    assert composite.dropped_events_by_adapter == {"home_assistant": 15}
+    assert composite.dropped_events_by_kind == {"state_changed": 15}
 
 
 @pytest.mark.asyncio
@@ -114,12 +129,7 @@ async def test_drops_from_two_adapters_are_recorded_individually() -> None:
 
     await _drain(composite)
 
-    drop_adapter_ids = {
-        entry["adapter_id"]
-        for entry in composite.diagnostics
-        if entry["event_type"] == "adapter_event_dropped_backpressure"
-    }
-    assert drop_adapter_ids == {"home_assistant", "modbus"}
+    assert composite.dropped_events_by_adapter == {"home_assistant": 15, "modbus": 20}
 
 
 @pytest.mark.asyncio
@@ -160,14 +170,7 @@ async def test_availability_changed_survives_a_state_changed_flood() -> None:
 
     structural = [event for event in delivered if event.kind == "availability_changed"]
     assert len(structural) == 1
-
-    drops = [
-        entry
-        for entry in composite.diagnostics
-        if entry["event_type"] == "adapter_event_dropped_backpressure"
-    ]
-    assert len(drops) == 15
-    assert all(entry["adapter_id"] == "home_assistant" for entry in drops)
+    assert composite.dropped_events_by_adapter == {"home_assistant": 15}
 
 
 @pytest.mark.asyncio
@@ -233,6 +236,110 @@ async def test_dropped_events_total_survives_a_reconnect() -> None:
 
     assert composite.diagnostics == []
     assert composite.dropped_events_total == 15
+
+
+@pytest.mark.asyncio
+async def test_priority_lane_is_bounded_and_delivers_structural_flood() -> None:
+    adapter = _idle_adapter("modbus")
+    adapter.events = [
+        AvailabilityChangedEvent(payload={"index": i}) for i in range(20)
+    ]
+    composite = CompositeAdapter([adapter], event_queue_max_size=3)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    assert composite._priority_queue is not None
+    assert composite._priority_queue.maxsize == 3
+    assert len([event for event in delivered if event.kind == "availability_changed"]) == 20
+
+
+@pytest.mark.asyncio
+async def test_cancellation_releases_a_structural_producer_blocked_by_backpressure() -> None:
+    adapter = _BlockingStructuralAdapter("modbus", count=100)
+    composite = CompositeAdapter([adapter], event_queue_max_size=1)
+    await composite.connect()
+    stream = composite.subscribe_events()
+
+    await anext(stream)
+    await asyncio.sleep(0)
+
+    assert composite.event_queue_depth["priority"] <= 1
+    assert adapter.yielded < 100
+
+    await stream.aclose()
+    await asyncio.sleep(0)
+
+    assert adapter.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_identical_state_updates_coalesce_to_the_latest_pending_value() -> None:
+    adapter = _idle_adapter("home_assistant")
+    adapter.events = [
+        StateChangedEvent(
+            payload={
+                "entity_id": "light.main",
+                "capabilities": ["brightness"],
+                "value": i,
+            }
+        )
+        for i in range(20)
+    ]
+    composite = CompositeAdapter([adapter], event_queue_max_size=1)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    assert len(delivered) == 1
+    assert delivered[0].payload["value"] == 19
+    assert composite.coalesced_events_total == 19
+    assert composite.dropped_events_total == 0
+
+
+@pytest.mark.asyncio
+async def test_state_coalescing_keeps_same_identity_namespaced_by_adapter() -> None:
+    first = _idle_adapter("home_assistant")
+    first.events = [
+        StateChangedEvent(
+            payload={"entity_id": "light.shared", "capabilities": ["power"], "value": i}
+        )
+        for i in range(10)
+    ]
+    second = _idle_adapter("modbus")
+    second.events = [
+        StateChangedEvent(
+            payload={"entity_id": "light.shared", "capabilities": ["power"], "value": i}
+        )
+        for i in range(10, 20)
+    ]
+    composite = CompositeAdapter([first, second], event_queue_max_size=2)
+    await composite.connect()
+
+    delivered = await _drain(composite)
+
+    assert {
+        event.payload["source_adapter_id"] for event in delivered
+    } == {"home_assistant", "modbus"}
+    assert {event.payload["value"] for event in delivered} == {9, 19}
+    assert {event.source_adapter_id for event in delivered} == {"home_assistant", "modbus"}
+
+
+def test_failure_diagnostics_are_bounded_and_drop_telemetry_is_counter_based() -> None:
+    adapter = _idle_adapter("home_assistant")
+    composite = CompositeAdapter([adapter], event_queue_max_size=2, diagnostics_max_size=3)
+
+    for index in range(10):
+        composite._record_failure("home_assistant", "adapter_failed", RuntimeError(str(index)))
+    for index in range(100):
+        composite._record_drop(
+            "home_assistant", StateChangedEvent(payload={"opaque": index})
+        )
+
+    assert len(composite.diagnostics) == 3
+    assert composite.dropped_events_total == 100
+    assert composite.dropped_events_by_adapter == {"home_assistant": 100}
+    assert composite.dropped_events_by_kind == {"state_changed": 100}
 
 
 @pytest.mark.asyncio

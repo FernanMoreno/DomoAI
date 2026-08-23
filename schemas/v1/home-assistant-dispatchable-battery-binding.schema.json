@@ -1,0 +1,154 @@
+{
+  "$defs": {
+    "HomeAssistantBatteryCommandRoute": {
+      "additionalProperties": false,
+      "description": "One exact Home Assistant source entity and provider command name.",
+      "properties": {
+        "entity_id": {
+          "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "provider_command": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Command",
+          "type": "string"
+        },
+        "service_domain": {
+          "anyOf": [
+            {
+              "const": "number",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Domain"
+        },
+        "service": {
+          "anyOf": [
+            {
+              "const": "set_value",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service"
+        },
+        "value_transform": {
+          "default": "none",
+          "enum": [
+            "none",
+            "as_is",
+            "negate",
+            "zero"
+          ],
+          "title": "Value Transform",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id",
+        "provider_command"
+      ],
+      "title": "HomeAssistantBatteryCommandRoute",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Static HA-side routes for a future dispatchable battery composition.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "device_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Device Id",
+      "type": "string"
+    },
+    "control_capability": {
+      "default": "battery_control",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Control Capability",
+      "type": "string"
+    },
+    "soc_entity_id": {
+      "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+      "title": "Soc Entity Id",
+      "type": "string"
+    },
+    "power_feedback_entity_id": {
+      "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+      "title": "Power Feedback Entity Id",
+      "type": "string"
+    },
+    "capacity_entity_id": {
+      "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+      "title": "Capacity Entity Id",
+      "type": "string"
+    },
+    "soc_capability": {
+      "const": "battery.soc",
+      "default": "battery.soc",
+      "title": "Soc Capability",
+      "type": "string"
+    },
+    "soc_unit": {
+      "const": "%",
+      "default": "%",
+      "title": "Soc Unit",
+      "type": "string"
+    },
+    "power_feedback_capability": {
+      "const": "battery.power",
+      "default": "battery.power",
+      "title": "Power Feedback Capability",
+      "type": "string"
+    },
+    "power_unit": {
+      "const": "kW",
+      "default": "kW",
+      "title": "Power Unit",
+      "type": "string"
+    },
+    "capacity_metric": {
+      "const": "battery.capacity",
+      "default": "battery.capacity",
+      "title": "Capacity Metric",
+      "type": "string"
+    },
+    "charge": {
+      "$ref": "#/$defs/HomeAssistantBatteryCommandRoute"
+    },
+    "discharge": {
+      "$ref": "#/$defs/HomeAssistantBatteryCommandRoute"
+    },
+    "stop": {
+      "$ref": "#/$defs/HomeAssistantBatteryCommandRoute"
+    }
+  },
+  "required": [
+    "device_id",
+    "soc_entity_id",
+    "power_feedback_entity_id",
+    "capacity_entity_id",
+    "charge",
+    "discharge",
+    "stop"
+  ],
+  "title": "HomeAssistantDispatchableBatteryBinding",
+  "type": "object"
+}

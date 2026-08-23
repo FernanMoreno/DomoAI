@@ -5,13 +5,15 @@ from unittest.mock import ANY
 
 import pytest
 
-from domoai.domain.models import StateStatus
+from domoai.domain.models import Policy, PolicyAction, StateStatus
+from domoai.skills.validator import V3_OPERATION_BINDINGS
 from domoai.skills.workflow import (
     ApprovalDecision,
     EnergySkillRequest,
     EnergySkillWorkflow,
     WorkflowStage,
     WorkflowStatus,
+    bundle_approval_digest,
 )
 from tests.fixtures.skill_workflow import (
     FIXTURE_OPERATOR_TOKEN,
@@ -451,6 +453,146 @@ async def test_bundle_validation_covers_every_member() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v3_workflow_commits_bundle_through_one_runtime_boundary() -> None:
+    fixture = await build_workflow_fixture()
+    workflow = EnergySkillWorkflow(
+        fixture.router,
+        fixture.approval,
+        operation_bindings=V3_OPERATION_BINDINGS,
+    )
+
+    result = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert result.bundle_commit_status == "completed"
+    assert result.bundle_commit_id
+    assert result.completed_operations[-1] == "commit_or_schedule_bundle"
+    assert [tool for _provider, tool, _arguments in fixture.router.calls] == [
+        "discover_devices",
+        "get_state",
+        "get_energy_context",
+        "optimize_scenario",
+        "validate_plan",
+        "validate_plan",
+        "explain_solution",
+        "commit_or_schedule_bundle",
+    ]
+    commit_arguments = fixture.router.calls[-1][2]
+    assert commit_arguments["bundle_digest"] == result.bundle_digest
+    assert [member["validation_digest"] for member in commit_arguments["members"]] == (
+        result.validation_digests
+    )
+    assert fixture.domotics_adapter.calls
+
+
+@pytest.mark.asyncio
+async def test_v3_workflow_uses_member_grants_after_one_bundle_decision() -> None:
+    fixture = await build_workflow_fixture(confirmation_required=True)
+    workflow = EnergySkillWorkflow(
+        fixture.router,
+        fixture.approval,
+        operation_bindings=V3_OPERATION_BINDINGS,
+    )
+
+    pending = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
+    assert pending.status is WorkflowStatus.AWAITING_APPROVAL
+    assert pending.bundle_digest
+    assert fixture.approval.requests[0][1]["bundle_digest"] == pending.bundle_digest
+
+    completed = await workflow.resume(
+        pending,
+        ApprovalDecision(
+            approved=True,
+            approved_by="fixture-operator",
+            bundle_digest=pending.bundle_digest,
+            operator_token=FIXTURE_OPERATOR_TOKEN,
+        ),
+    )
+
+    assert completed.status is WorkflowStatus.COMPLETED
+    assert [tool for _provider, tool, _arguments in fixture.router.calls].count(
+        "request_approval"
+    ) == 2
+    assert [tool for _provider, tool, _arguments in fixture.router.calls].count(
+        "commit_or_schedule_bundle"
+    ) == 1
+    assert all(
+        tool not in {"execute_plan", "schedule_plan"}
+        for _provider, tool, _arguments in fixture.router.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_v3_workflow_reports_mixed_physical_and_scheduled_members() -> None:
+    horizon = future_horizon(slots=4)
+    fixture = await build_workflow_fixture(horizon=horizon)
+    workflow = EnergySkillWorkflow(
+        fixture.router,
+        fixture.approval,
+        operation_bindings=V3_OPERATION_BINDINGS,
+    )
+
+    result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(0, 3)))
+
+    assert result.status is WorkflowStatus.SCHEDULED
+    assert result.bundle_commit_status == "completed"
+    assert result.scheduled_plan_ids == [result.plan_ids[1]]
+    assert len(fixture.domotics_adapter.calls) == 1
+    assert [tool for _provider, tool, _arguments in fixture.router.calls].count(
+        "commit_or_schedule_bundle"
+    ) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("aggregate_status", "expected_status"),
+    [
+        ("partially_committed", WorkflowStatus.PARTIALLY_COMMITTED),
+        ("unknown", WorkflowStatus.UNKNOWN),
+    ],
+)
+async def test_v3_workflow_preserves_partial_commit_statuses(
+    aggregate_status: str, expected_status: WorkflowStatus
+) -> None:
+    fixture = await build_workflow_fixture()
+    original = fixture.router.call
+
+    async def partial_commit(
+        provider: str, tool: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        if tool == "commit_or_schedule_bundle":
+            return {
+                "schema_version": "v1",
+                "bundle_commit_id": "bundle-failure-fixture",
+                "status": aggregate_status,
+                "members": [
+                    {
+                        "plan_id": member["plan_id"],
+                        "status": "unknown",
+                        "execution_status": "unknown",
+                        "error_code": "execution_unknown",
+                    }
+                    for member in arguments["members"]
+                ],
+            }
+        return await original(provider, tool, arguments)
+
+    fixture.router.call = partial_commit  # type: ignore[method-assign]
+    workflow = EnergySkillWorkflow(
+        fixture.router,
+        fixture.approval,
+        operation_bindings=V3_OPERATION_BINDINGS,
+    )
+
+    result = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
+
+    assert result.status is expected_status
+    assert result.bundle_commit_status == aggregate_status
+    assert result.member_outcomes
+    assert fixture.domotics_adapter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_bundle_all_or_nothing_on_invalid_member() -> None:
     fixture = await build_workflow_fixture()
     workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
@@ -490,6 +632,87 @@ async def test_bundle_single_decision_covers_every_confirming_member() -> None:
     assert len(completed.plan_ids) == 2
 
 
+def test_bundle_approval_digest_changes_when_order_or_member_evidence_changes() -> None:
+    bundle = [
+        {
+            "plan_id": "plan-a",
+            "validation_digest": "sha256:a",
+            "execute_at": "2026-08-21T10:00:00+00:00",
+        },
+        {
+            "plan_id": "plan-b",
+            "validation_digest": "sha256:b",
+            "execute_at": None,
+        },
+    ]
+
+    original = bundle_approval_digest("scenario-1", bundle)
+    reordered = bundle_approval_digest("scenario-1", list(reversed(bundle)))
+    changed_member = bundle_approval_digest(
+        "scenario-1",
+        [bundle[0], {**bundle[1], "validation_digest": "sha256:changed"}],
+    )
+    changed_time = bundle_approval_digest(
+        "scenario-1",
+        [{**bundle[0], "execute_at": "2026-08-21T10:15:00+00:00"}, bundle[1]],
+    )
+    changed_scenario = bundle_approval_digest("scenario-2", bundle)
+
+    assert len(original) == 71
+    assert len({original, reordered, changed_member, changed_time, changed_scenario}) == 5
+
+
+@pytest.mark.asyncio
+async def test_mixed_bundle_approval_uses_full_bundle_digest() -> None:
+    fixture = await build_workflow_fixture()
+    switch_id = switch_device_id(fixture)
+    fixture.domotics_context.facade.plan_service.policy_engine.policies.append(
+        Policy(
+            id="confirm-only-switch-power",
+            target={"device_id": switch_id, "capability": "power"},
+            action=PolicyAction.CONFIRM,
+        )
+    )
+    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+
+    pending = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
+
+    assert pending.status is WorkflowStatus.AWAITING_APPROVAL
+    assert pending.bundle_digest
+    assert pending.bundle_digest == pending.validation_digest
+    assert pending.bundle_digest != pending.validation_digests[0]
+    assert fixture.approval.requests[0][1]["bundle_digest"] == pending.bundle_digest
+
+    completed = await workflow.resume(
+        pending,
+        ApprovalDecision(
+            approved=True,
+            approved_by="fixture-operator",
+            bundle_digest=pending.bundle_digest,
+            operator_token=FIXTURE_OPERATOR_TOKEN,
+        ),
+    )
+
+    assert completed.status is WorkflowStatus.COMPLETED
+    member_approval_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "request_approval"
+    ]
+    assert [call["validation_digest"] for call in member_approval_calls] == [
+        pending.validation_digests[1]
+    ]
+    member_execute_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "execute_plan"
+    ]
+    assert [call["validation_digest"] for call in member_execute_calls] == [
+        pending.validation_digests[0],
+        pending.validation_digests[1],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_bundle_decline_blocks_every_member() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
@@ -514,9 +737,22 @@ async def test_bundle_future_members_are_scheduled_not_dropped() -> None:
 
     result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(0, 3)))
 
-    assert result.status is WorkflowStatus.COMPLETED
+    assert result.status is WorkflowStatus.SCHEDULED
     assert len(result.scheduled_plan_ids) == 1
     assert len(fixture.domotics_adapter.calls) == 1
+
+    execute_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "execute_plan"
+    ]
+    schedule_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "schedule_plan"
+    ]
+    assert execute_calls[0]["validation_digest"] == result.validation_digests[0]
+    assert schedule_calls[0]["validation_digest"] == result.validation_digests[1]
 
     listed = await fixture.router.call("mcp", "list_scheduled_plans", {})
     listed_ids = {entry["plan_id"] for entry in listed["plans"]}
@@ -531,6 +767,44 @@ async def test_single_future_plan_is_scheduled_instead_of_rejected() -> None:
 
     result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(3,)))
 
-    assert result.status is WorkflowStatus.COMPLETED
+    assert result.status is WorkflowStatus.SCHEDULED
     assert result.scheduled_plan_ids == result.plan_ids
     assert fixture.domotics_adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_workflow_stops_before_approval_for_unbound_battery_proposal() -> None:
+    fixture = await build_workflow_fixture()
+    original = fixture.router.call
+
+    async def unbound_battery_proposal(
+        provider: str, tool: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        response = await original(provider, tool, arguments)
+        if tool == "optimize_scenario":
+            return {
+                **response,
+                "status": "invalid",
+                "plan": None,
+                "plans": [],
+                "diagnostics": [
+                    {
+                        "code": "battery_actuation_unbound",
+                        "message": "Battery dispatch has no physical actuator binding",
+                        "retryable": False,
+                    }
+                ],
+            }
+        return response
+
+    fixture.router.call = unbound_battery_proposal  # type: ignore[method-assign]
+    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(
+        request_for(fixture)
+    )
+
+    assert result.status is WorkflowStatus.BLOCKED
+    assert result.diagnostics[0].code == "invalid_proposal"
+    assert fixture.approval.requests == []
+    assert fixture.domotics_adapter.calls == []
+    assert all(call[1] not in {"request_approval", "execute_plan", "schedule_plan"}
+               for call in fixture.router.calls)

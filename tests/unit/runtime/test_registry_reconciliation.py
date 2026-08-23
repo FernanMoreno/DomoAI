@@ -152,3 +152,40 @@ def test_drain_diagnostics_returns_and_clears_accumulated_diagnostics() -> None:
     assert drained[0]["kind"] == "canonical_type_conflict"
     assert registry.diagnostics == []
     assert registry.drain_diagnostics() == []
+
+
+def test_same_source_capability_metadata_refresh_replaces_previous_value() -> None:
+    registry = DeviceRegistry()
+    first = entity(
+        entity_id="light.brightness",
+        source_device_id="brightness-device",
+        canonical_id="living_room.brightness",
+        name="Brightness",
+        capabilities=[
+            {
+                **power_capability(),
+                "name": "brightness",
+                "kind": "integer",
+                "unit": "%",
+                "minimum": 0,
+                "maximum": 100,
+                "commands": ["set_brightness"],
+            }
+        ],
+    )
+    second = {
+        **first,
+        "domain": "light-v2",
+        "capabilities": [{**first["capabilities"][0], "maximum": 50}],
+    }
+
+    registry.apply_snapshot(AdapterSnapshot(source_entities=[first]), "fixture")
+    registry.apply_snapshot(AdapterSnapshot(source_entities=[second]), "fixture")
+
+    device = registry.get("living_room.brightness")
+    assert device is not None
+    assert device.capabilities[0].maximum == 50
+    routes = registry.routes_for("living_room.brightness", "brightness")
+    assert len(routes) == 1
+    assert routes[0].source_ref.external_type == "light-v2"
+    assert registry.diagnostics == []

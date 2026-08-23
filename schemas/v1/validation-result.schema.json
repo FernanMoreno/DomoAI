@@ -86,6 +86,13 @@
           },
           "title": "State Versions",
           "type": "object"
+        },
+        "capability_fingerprints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Capability Fingerprints",
+          "type": "object"
         }
       },
       "required": [

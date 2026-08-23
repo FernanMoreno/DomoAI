@@ -21,9 +21,10 @@ from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
-from domoai.persistence.repositories import ScheduledPlanRepository
+from domoai.persistence.repositories import BundleCommitRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
+from domoai.runtime.bundle_commit import BundleCommitService
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.policy_engine import PolicyEngine
@@ -183,16 +184,31 @@ async def _build_domotics_context(
     plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
     executor = PlanExecutor(adapter, plan_service, audit)
     facade = DomoticsFacade(plan_service, executor)
-    scheduler = Scheduler(executor, ScheduledPlanRepository(database), audit)
+    scheduled_repository = ScheduledPlanRepository(database)
+    scheduler = Scheduler(executor, scheduled_repository, audit)
+    approval_store = ApprovalStore(
+        operator_token=FIXTURE_OPERATOR_TOKEN, allow_legacy_token=True
+    )
+    plans: dict[str, Any] = {}
+    bundle_commit_service = BundleCommitService(
+        facade=facade,
+        plans=plans,
+        approval_store=approval_store,
+        bundle_repository=BundleCommitRepository(database),
+        scheduled_repository=scheduled_repository,
+        audit=audit,
+    )
     return adapter, DomoticsMcpContext(
         discovery=discovery,
         state_service=StateService(state_store),
         facade=facade,
         registry=registry,
         policies=policies,
-        approval_store=ApprovalStore(operator_token=FIXTURE_OPERATOR_TOKEN),
+        approval_store=approval_store,
+        plans=plans,
+        bundle_commit_service=bundle_commit_service,
         energy_context_provider=StaticEnergyContextProvider(
-            energy_context_for(horizon or default_horizon())
+            energy_context_for(horizon or default_horizon(), with_battery=False)
         ),
         scheduler=scheduler,
     )

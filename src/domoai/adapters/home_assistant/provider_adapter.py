@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.domain.models import (
@@ -20,6 +19,8 @@ from domoai.domain.models import (
     StateStatus,
 )
 from domoai.domain.provider import ProviderCommand
+from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.execution_context import ExecutionContext
 
 
 class HomeAssistantProviderAdapter:
@@ -33,8 +34,9 @@ class HomeAssistantProviderAdapter:
 
     adapter_id = "home_assistant"
 
-    def __init__(self, provider: HomeAssistantProvider) -> None:
+    def __init__(self, provider: HomeAssistantProvider, *, clock: Clock | None = None) -> None:
         self.provider = provider
+        self._clock = clock or SystemClock()
         self._connected = False
         self._source_by_command: dict[tuple[str, str], list[str]] = {}
         self._canonical_by_source: dict[str, str] = {}
@@ -56,7 +58,7 @@ class HomeAssistantProviderAdapter:
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         wanted = {source_ref.external_id for source_ref in source_refs}
         snapshot = await self.provider.snapshot()
-        now = datetime.now(UTC)
+        now = self._clock.now()
         return [
             StateSnapshot(
                 device_id=str(state["entity_id"]),
@@ -77,7 +79,9 @@ class HomeAssistantProviderAdapter:
             if str(state["entity_id"]) in wanted
         ]
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         candidates = self._source_by_command.get((command.device_id, command.command), [])
         if len(candidates) != 1:
             message = (
@@ -86,25 +90,32 @@ class HomeAssistantProviderAdapter:
                 else f"Unknown Home Assistant command route: {command.command}"
             )
             return AdapterExecutionAck(accepted=False, message=message)
-        return await self.execute_source(command, candidates[0])
+        return await self.execute_source(command, candidates[0], execution_context)
 
-    async def execute_source(self, command: Command, source_entity_id: str) -> AdapterExecutionAck:
+    async def execute_source(
+        self,
+        command: Command,
+        source_entity_id: str,
+        execution_context: ExecutionContext | None = None,
+    ) -> AdapterExecutionAck:
         if source_entity_id not in self._canonical_by_source:
             return AdapterExecutionAck(
                 accepted=False,
                 message=f"Unknown Home Assistant entity: {source_entity_id}",
             )
         params = {} if command.value is None else {"value": command.value}
-        result = await self.provider.execute(
-            ProviderCommand(
-                provider_id=self.provider.manifest.provider_id,
-                external_device_id=source_entity_id,
-                command=command.command,
-                params=params,
-                idempotency_key=command.idempotency_key,
-                intent=command.intent,
-            )
+        provider_command = ProviderCommand(
+            provider_id=self.provider.manifest.provider_id,
+            external_device_id=source_entity_id,
+            command=command.command,
+            params=params,
+            idempotency_key=command.idempotency_key,
+            intent=command.intent,
         )
+        if execution_context is None:
+            result = await self.provider.execute(provider_command)
+        else:
+            result = await self.provider.execute(provider_command, execution_context)
         if result.status in {ExecutionStatus.FAILED, ExecutionStatus.UNAVAILABLE}:
             raise ConnectionError(result.message or "Home Assistant service call failed")
         if result.status not in {

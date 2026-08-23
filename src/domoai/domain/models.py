@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, time
 from enum import StrEnum
 from typing import Any, Literal
@@ -94,6 +95,23 @@ class ExecutionStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     CONFIRMED_SUCCESS = "confirmed_success"
+    UNKNOWN = "unknown"
+
+
+class BundleCommitStatus(StrEnum):
+    COMMITTING = "committing"
+    COMPLETED = "completed"
+    SCHEDULED = "scheduled"
+    PARTIALLY_COMMITTED = "partially_committed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class BundleMemberCommitStatus(StrEnum):
+    PENDING = "pending"
+    EXECUTED = "executed"
+    SCHEDULED = "scheduled"
+    FAILED = "failed"
     UNKNOWN = "unknown"
 
 
@@ -199,6 +217,54 @@ class SafetyLimit(StrictModel):
         return self
 
 
+class CommandPostcondition(StrictModel):
+    """Typed observation required before a command is confirmed successful."""
+
+    capability: str = Field(min_length=1)
+    expected: ScalarValue | None
+    tolerance: float | None = Field(default=None, ge=0)
+    settle_timeout_seconds: float | None = Field(default=None, ge=0, le=120)
+    poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
+    reconcile_capabilities: list[str] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_tolerance(self) -> CommandPostcondition:
+        if self.tolerance is None:
+            return self
+        numeric_expected = isinstance(self.expected, (int, float)) and not isinstance(
+            self.expected, bool
+        )
+        if not numeric_expected:
+            raise ValueError("tolerance is only valid for numeric expected values")
+        expected_value = self.expected
+        assert isinstance(expected_value, (int, float)) and not isinstance(expected_value, bool)
+        if not math.isfinite(float(expected_value)) or not math.isfinite(self.tolerance):
+            raise ValueError("postcondition numeric values must be finite")
+        return self
+
+    @model_validator(mode="after")
+    def validate_settling(self) -> CommandPostcondition:
+        if not math.isfinite(self.poll_interval_seconds):
+            raise ValueError("poll interval must be finite")
+        if self.settle_timeout_seconds is not None:
+            if not math.isfinite(self.settle_timeout_seconds):
+                raise ValueError("settle timeout must be finite")
+            if (
+                self.settle_timeout_seconds > 0
+                and self.poll_interval_seconds > self.settle_timeout_seconds
+            ):
+                raise ValueError("poll interval must not exceed settle timeout")
+        return self
+
+    @model_validator(mode="after")
+    def validate_reconciliation(self) -> CommandPostcondition:
+        if any(not capability.strip() for capability in self.reconcile_capabilities):
+            raise ValueError("reconcile capabilities must be non-empty")
+        if len(set(self.reconcile_capabilities)) != len(self.reconcile_capabilities):
+            raise ValueError("reconcile capabilities must be unique")
+        return self
+
+
 class Command(StrictModel):
     id: str = Field(min_length=1)
     device_id: str = Field(min_length=1)
@@ -209,6 +275,7 @@ class Command(StrictModel):
     risk_class: RiskClass = RiskClass.SAFE
     idempotency_key: str = Field(min_length=1)
     intent: str | None = None
+    postconditions: list[CommandPostcondition] = Field(default_factory=list, max_length=1)
 
 
 class ErrorDetail(StrictModel):
@@ -225,6 +292,7 @@ class PlanDependencies(StrictModel):
     inventory_revision: str = Field(min_length=1)
     policy_revision: str = Field(min_length=1)
     state_versions: dict[str, int] = Field(default_factory=dict)
+    capability_fingerprints: dict[str, str] = Field(default_factory=dict)
 
 
 class ValidationResult(StrictModel):
@@ -257,6 +325,8 @@ class Approval(StrictModel):
     approved_at: datetime
     validation_digest: str = Field(min_length=1)
     scope: str = "plan"
+    authentication_context: str | None = None
+    session_id: str | None = None
 
 
 class ExecutionOutcome(StrictModel):
@@ -274,6 +344,46 @@ class ExecutionOutcome(StrictModel):
 
 class ExecutionSummary(StrictModel):
     outcomes: list[ExecutionOutcome] = Field(default_factory=list)
+
+
+class BundleMemberCommit(StrictModel):
+    plan_id: str = Field(min_length=1)
+    validation_digest: str = Field(min_length=1)
+    execute_at: datetime | None = None
+    status: BundleMemberCommitStatus = BundleMemberCommitStatus.PENDING
+    execution_status: ExecutionStatus | None = None
+    scheduled: bool = False
+    error_code: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_execute_at(self) -> BundleMemberCommit:
+        if self.execute_at is not None and self.execute_at.tzinfo is None:
+            raise ValueError("execute_at must be timezone-aware")
+        return self
+
+
+class BundleCommit(StrictModel):
+    id: str = Field(min_length=1)
+    schema_version: str = SCHEMA_VERSION
+    bundle_digest: str = Field(min_length=1)
+    scenario_id: str = Field(min_length=1)
+    status: BundleCommitStatus = BundleCommitStatus.COMMITTING
+    compensation_policy: Literal["none"] = "none"
+    members: list[BundleMemberCommit] = Field(min_length=1, max_length=50)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    failure: ErrorDetail | None = None
+
+    @model_validator(mode="after")
+    def validate_timestamps(self) -> BundleCommit:
+        for field_name, value in (
+            ("created_at", self.created_at),
+            ("updated_at", self.updated_at),
+        ):
+            if value.tzinfo is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+        return self
 
 
 class Plan(StrictModel):
@@ -348,27 +458,112 @@ class AdapterExecutionAck(StrictModel):
 
 class StateChangedEvent(StrictModel):
     kind: Literal["state_changed"] = "state_changed"
+    source_adapter_id: str | None = None
+    occurred_at: datetime | None = None
+    external_id: str | None = None
+    device_id: str | None = None
+    capability: str | None = None
+    value: Any = None
+    unit: str | None = None
+    available: bool | None = None
+    capabilities: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_legacy_payload(cls, value: Any) -> Any:
+        return _decode_event_payload(value, {
+            "source_adapter_id": ("source_adapter_id",),
+            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+            "capability": ("capability",),
+            "value": ("value",),
+            "unit": ("unit",),
+            "available": ("available",),
+            "capabilities": ("capabilities",),
+            "occurred_at": ("occurred_at", "received_at", "observed_at"),
+        })
 
 
 class AvailabilityChangedEvent(StrictModel):
     kind: Literal["availability_changed"] = "availability_changed"
+    source_adapter_id: str | None = None
+    occurred_at: datetime | None = None
+    external_id: str | None = None
+    available: bool | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_legacy_payload(cls, value: Any) -> Any:
+        return _decode_event_payload(value, {
+            "source_adapter_id": ("source_adapter_id",),
+            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+            "available": ("available",),
+            "occurred_at": ("occurred_at", "received_at", "observed_at"),
+        })
 
 
 class DeviceMembershipChangedEvent(StrictModel):
     kind: Literal["device_membership_changed"] = "device_membership_changed"
+    source_adapter_id: str | None = None
+    occurred_at: datetime | None = None
+    external_id: str | None = None
+    friendly_name: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_legacy_payload(cls, value: Any) -> Any:
+        return _decode_event_payload(value, {
+            "source_adapter_id": ("source_adapter_id",),
+            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+            "friendly_name": ("friendly_name",),
+            "capabilities": ("capabilities",),
+            "occurred_at": ("occurred_at", "received_at", "observed_at"),
+        })
 
 
 class MetadataChangedEvent(StrictModel):
     kind: Literal["metadata_changed"] = "metadata_changed"
+    source_adapter_id: str | None = None
+    occurred_at: datetime | None = None
+    external_id: str | None = None
+    friendly_name: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_legacy_payload(cls, value: Any) -> Any:
+        return _decode_event_payload(value, {
+            "source_adapter_id": ("source_adapter_id",),
+            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+            "friendly_name": ("friendly_name",),
+            "capabilities": ("capabilities",),
+            "occurred_at": ("occurred_at", "received_at", "observed_at"),
+        })
 
 
 class AdapterDiagnosticEvent(StrictModel):
     kind: Literal["adapter_diagnostic"] = "adapter_diagnostic"
+    source_adapter_id: str | None = None
+    occurred_at: datetime | None = None
+    external_id: str | None = None
+    code: str | None = None
+    message: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_legacy_payload(cls, value: Any) -> Any:
+        return _decode_event_payload(value, {
+            "source_adapter_id": ("source_adapter_id",),
+            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+            "code": ("code", "diagnostic_code"),
+            "message": ("message", "reason"),
+            "occurred_at": ("occurred_at", "received_at", "observed_at"),
+        })
 
 
 type SourceEvent = (
@@ -378,3 +573,27 @@ type SourceEvent = (
     | MetadataChangedEvent
     | AdapterDiagnosticEvent
 )
+
+
+def _decode_event_payload(value: Any, fields: dict[str, tuple[str, ...]]) -> Any:
+    """Populate typed metadata while accepting legacy adapter payloads."""
+
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
+    payload = result.get("payload")
+    if not isinstance(payload, dict):
+        return result
+    for field_name, aliases in fields.items():
+        if result.get(field_name) is not None:
+            continue
+        for alias in aliases:
+            if payload.get(alias) is not None:
+                raw_value = payload[alias]
+                result[field_name] = (
+                    str(raw_value)
+                    if field_name in {"external_id", "device_id"}
+                    else raw_value
+                )
+                break
+    return result

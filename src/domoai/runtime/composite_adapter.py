@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections import defaultdict, deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from itertools import count
 from typing import Any, cast
 
 from domoai.domain.models import (
@@ -18,8 +19,12 @@ from domoai.domain.models import (
     StateChangedEvent,
     StateSnapshot,
 )
+from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.registry import DeviceRegistry
+
+DEFAULT_DIAGNOSTICS_MAX_SIZE = 1000
+StateEventKey = tuple[str, ...]
 
 
 class CompositeAdapter:
@@ -33,9 +38,14 @@ class CompositeAdapter:
         *,
         registry: DeviceRegistry | None = None,
         event_queue_max_size: int = 1000,
+        diagnostics_max_size: int = DEFAULT_DIAGNOSTICS_MAX_SIZE,
     ) -> None:
         if not adapters:
             raise ValueError("CompositeAdapter requires at least one adapter")
+        if event_queue_max_size <= 0:
+            raise ValueError("CompositeAdapter event_queue_max_size must be positive")
+        if diagnostics_max_size <= 0:
+            raise ValueError("CompositeAdapter diagnostics_max_size must be positive")
         adapter_ids = [adapter.adapter_id for adapter in adapters]
         if len(set(adapter_ids)) != len(adapter_ids):
             raise ValueError("CompositeAdapter requires unique adapter IDs")
@@ -43,15 +53,30 @@ class CompositeAdapter:
         self._by_id = {adapter.adapter_id: adapter for adapter in self.adapters}
         self.registry = registry
         self._connected: set[str] = set()
-        self._diagnostics: list[dict[str, Any]] = []
+        self._diagnostics: deque[dict[str, Any]] = deque(maxlen=diagnostics_max_size)
         self._event_queue_max_size = event_queue_max_size
         self._dropped_events_total = 0
+        self._dropped_events_by_adapter: defaultdict[str, int] = defaultdict(int)
+        self._dropped_events_by_kind: defaultdict[str, int] = defaultdict(int)
+        self._coalesced_events_total = 0
         self._bulk_queue: asyncio.Queue[Any] | None = None
         self._priority_queue: asyncio.Queue[Any] | None = None
 
     @property
     def dropped_events_total(self) -> int:
         return self._dropped_events_total
+
+    @property
+    def dropped_events_by_adapter(self) -> dict[str, int]:
+        return dict(self._dropped_events_by_adapter)
+
+    @property
+    def dropped_events_by_kind(self) -> dict[str, int]:
+        return dict(self._dropped_events_by_kind)
+
+    @property
+    def coalesced_events_total(self) -> int:
+        return self._coalesced_events_total
 
     @property
     def event_queue_depth(self) -> dict[str, int]:
@@ -145,7 +170,9 @@ class CompositeAdapter:
             raise failures[0]
         return results
 
-    async def execute(self, command: Command) -> AdapterExecutionAck:
+    async def execute(
+        self, command: Command, execution_context: ExecutionContext | None = None
+    ) -> AdapterExecutionAck:
         if self.registry is None:
             return AdapterExecutionAck(
                 accepted=False, message="Composite route registry is unavailable"
@@ -165,11 +192,17 @@ class CompositeAdapter:
         execute_source = getattr(adapter, "execute_source", None)
         if callable(execute_source):
             source_executor = cast(
-                Callable[[Command, str], Awaitable[AdapterExecutionAck]], execute_source
+                Callable[..., Awaitable[AdapterExecutionAck]], execute_source
             )
-            return await source_executor(command, route.source_ref.external_id)
+            if execution_context is None:
+                return await source_executor(command, route.source_ref.external_id)
+            return await source_executor(
+                command, route.source_ref.external_id, execution_context
+            )
         local_command = command.model_copy(update={"device_id": route.local_canonical_id})
-        return await adapter.execute(local_command)
+        if execution_context is None:
+            return await adapter.execute(local_command)
+        return await adapter.execute(local_command, execution_context)
 
     def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         return self._event_stream()
@@ -181,35 +214,50 @@ class CompositeAdapter:
         # membership, metadata) are comparatively rare and NOT
         # self-correcting -- losing one can leave the runtime's topology
         # understanding silently wrong indefinitely -- so they, along with
-        # stream-error/stream-end signaling, go through an unbounded queue
-        # that is never subject to backpressure and is preferred whenever
-        # both queues have an item ready.
+        # stream-error/stream-end signaling, go through a bounded queue whose
+        # producers await capacity instead of dropping an item.
         Item = tuple[str, SourceEvent | None, BaseException | None]
-        bulk_queue: asyncio.Queue[Item] = asyncio.Queue(maxsize=self._event_queue_max_size)
-        priority_queue: asyncio.Queue[Item] = asyncio.Queue()
+        bulk_queue: asyncio.Queue[StateEventKey] = asyncio.Queue(
+            maxsize=self._event_queue_max_size
+        )
+        bulk_pending: dict[StateEventKey, tuple[str, StateChangedEvent]] = {}
+        priority_queue: asyncio.Queue[Item] = asyncio.Queue(
+            maxsize=self._event_queue_max_size
+        )
         self._bulk_queue = bulk_queue
         self._priority_queue = priority_queue
         active = [adapter for adapter in self.adapters if adapter.adapter_id in self._connected]
+        sequence = count()
 
         async def pump(adapter: AdapterPort) -> None:
+            cancelled = False
             try:
                 async for event in adapter.subscribe_events():
                     if isinstance(event, StateChangedEvent):
-                        try:
-                            bulk_queue.put_nowait((adapter.adapter_id, event, None))
-                        except asyncio.QueueFull:
+                        key = self._state_event_key(adapter.adapter_id, event, next(sequence))
+                        if key in bulk_pending:
+                            bulk_pending[key] = (adapter.adapter_id, event)
+                            self._coalesced_events_total += 1
+                        elif len(bulk_pending) < self._event_queue_max_size:
+                            bulk_pending[key] = (adapter.adapter_id, event)
+                            bulk_queue.put_nowait(key)
+                        else:
                             self._record_drop(adapter.adapter_id, event)
                     else:
                         await priority_queue.put((adapter.adapter_id, event, None))
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except (ConnectionError, OSError, TimeoutError) as error:
                 await priority_queue.put((adapter.adapter_id, None, error))
             finally:
-                await priority_queue.put((adapter.adapter_id, None, None))
+                if not cancelled:
+                    await priority_queue.put((adapter.adapter_id, None, None))
 
         tasks = [asyncio.create_task(pump(adapter)) for adapter in active]
         remaining = len(tasks)
         priority_get: asyncio.Task[Item] = asyncio.ensure_future(priority_queue.get())
-        bulk_get: asyncio.Task[Item] = asyncio.ensure_future(bulk_queue.get())
+        bulk_get: asyncio.Task[StateEventKey] = asyncio.ensure_future(bulk_queue.get())
         try:
             # bulk_get may already hold a resolved item at the moment the
             # last stream-end sentinel (delivered via priority_queue) drops
@@ -221,8 +269,13 @@ class CompositeAdapter:
                     item = priority_get.result()
                     priority_get = asyncio.ensure_future(priority_queue.get())
                 elif bulk_get.done():
-                    item = bulk_get.result()
+                    key = bulk_get.result()
                     bulk_get = asyncio.ensure_future(bulk_queue.get())
+                    pending = bulk_pending.pop(key, None)
+                    if pending is None:
+                        continue
+                    pending_adapter_id, pending_event = pending
+                    item = (pending_adapter_id, pending_event, None)
                 else:
                     await asyncio.wait(
                         {priority_get, bulk_get}, return_when=asyncio.FIRST_COMPLETED
@@ -232,6 +285,7 @@ class CompositeAdapter:
                 if error is not None:
                     self._record_failure(adapter_id, "adapter_event_stream_failed", error)
                     yield AdapterDiagnosticEvent(
+                        source_adapter_id=adapter_id,
                         payload={
                             "source_adapter_id": adapter_id,
                             "reason": str(error)[:200],
@@ -242,7 +296,10 @@ class CompositeAdapter:
                 else:
                     payload = dict(event.payload)
                     payload["source_adapter_id"] = adapter_id
-                    yield type(event)(payload=payload)
+                    yield type(event).model_validate(
+                        event.model_dump(mode="python")
+                        | {"source_adapter_id": adapter_id, "payload": payload}
+                    )
         finally:
             priority_get.cancel()
             bulk_get.cancel()
@@ -270,16 +327,52 @@ class CompositeAdapter:
 
     def _record_drop(self, adapter_id: str, event: SourceEvent) -> None:
         self._dropped_events_total += 1
-        self._diagnostics.append(
-            {
-                "event_type": "adapter_event_dropped_backpressure",
-                "adapter_id": adapter_id,
-                "message": (
-                    f"event kind={event.kind!r} dropped: queue at capacity "
-                    f"({self._event_queue_max_size})"
-                ),
-            }
-        )
+        self._dropped_events_by_adapter[adapter_id] += 1
+        self._dropped_events_by_kind[event.kind] += 1
+
+    @staticmethod
+    def _state_event_key(
+        adapter_id: str, event: StateChangedEvent, sequence: int
+    ) -> StateEventKey:
+        payload = event.payload
+        identity = CompositeAdapter._extract_state_identity(payload)
+        scope = CompositeAdapter._extract_state_scope(payload)
+        if identity is None:
+            return (adapter_id, "unique", str(sequence))
+        return (adapter_id, *identity, "scope", *scope)
+
+    @staticmethod
+    def _extract_state_identity(payload: Mapping[str, Any]) -> tuple[str, ...] | None:
+        candidates: list[Mapping[str, Any]] = [payload]
+        for key in ("event", "data", "new_state"):
+            nested = payload.get(key)
+            if isinstance(nested, Mapping):
+                candidates.append(nested)
+                nested_data = nested.get("data")
+                if isinstance(nested_data, Mapping):
+                    candidates.append(nested_data)
+
+        for candidate in candidates:
+            entity_ids = candidate.get("entity_ids")
+            if isinstance(entity_ids, (list, tuple, set)) and entity_ids:
+                values = tuple(sorted(str(value) for value in entity_ids))
+                return ("entity_ids", *values)
+            for field in ("entity_id", "friendly_name", "node_id"):
+                value = candidate.get(field)
+                if value is not None and str(value):
+                    return (field, str(value))
+        return None
+
+    @staticmethod
+    def _extract_state_scope(payload: Mapping[str, Any]) -> tuple[str, ...]:
+        capabilities = payload.get("capabilities")
+        if isinstance(capabilities, (list, tuple, set)):
+            return tuple(sorted(str(value) for value in capabilities))
+        for field in ("capability", "path"):
+            value = payload.get(field)
+            if value is not None and str(value):
+                return (str(value),)
+        return ()
 
     def _record_failure(self, adapter_id: str, kind: str, error: BaseException) -> None:
         if self.registry is not None:

@@ -53,16 +53,16 @@ the host. A host may change configuration syntax or presentation, but it may
 not introduce vendor tools, direct adapters, arbitrary solver code or a second
 server role.
 
-The `operator` boundary is enforced by the server, not merely documented:
-`request_approval` requires an `operator_token` argument that must match the
-deployment's `DOMOAI_OPERATOR_APPROVAL_TOKEN` (configured via `Settings`,
-compared in constant time). If the token is unset or blank, or the supplied
-value does not match, the server refuses to issue an approval grant and
-reports `operator_authentication_failed` — an automated agent driving the
-skill has no way to learn or guess this value, so it cannot approve its own
-plan. A compliant host that has already obtained a human decision through its
-own UI carries that value through as `ApprovalDecision.operator_token`; the
-skill/workflow logic only forwards it, it never inspects or chooses it.
+The `operator` boundary is enforced by the server, not merely documented.
+Production hosts should inject an authenticated `OperatorPrincipal` from the
+trusted UI/host boundary; that principal supplies the recorded operator ID,
+authentication context and session ID, and no reusable credential is exposed
+to the MCP tool schema. The local/dev compatibility path accepts an
+`operator_token` only when `DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN=1` is enabled
+and the value matches `DOMOAI_OPERATOR_APPROVAL_TOKEN` (compared in constant
+time). The default is disabled. If the token is unset, blank, disabled or
+incorrect, the server refuses to issue a grant and reports
+`operator_authentication_failed`.
 
 ## Validation
 
@@ -78,6 +78,7 @@ The deterministic suite proves two independent MCP sessions plus a
 protocol-level flow receive equivalent catalogs/results and that optimization
 does not call the fixture adapter.
 
-Validation evidence on 2026-08-18: full pytest `325 passed, 8 skipped`, lab
-smoke `34 passed`, Ruff clean, `uv lock --check` clean and mypy clean for
-`src`. No credentials or live hardware are required for this contract.
+Validation evidence on 2026-08-23: full pytest `972 passed, 10 skipped`, Ruff
+clean, `uv lock --check` clean and mypy clean for `src`. No credentials or live
+hardware are required for this deterministic contract; the separate Home
+Assistant inverter HIL smoke was not executed.

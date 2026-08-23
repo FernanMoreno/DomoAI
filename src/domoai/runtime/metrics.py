@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from domoai.domain.models import PlanStatus, StateStatus
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.ports import AdapterPort, PlanRecordPort
 from domoai.runtime.state_store import StateStore
@@ -42,6 +42,7 @@ class RuntimeMetricsCollector:
         plan_repository: PlanRecordPort,
         database: SQLiteDatabase,
         optimization_service: OptimizationService | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.adapter = adapter
         self.event_consumer = event_consumer
@@ -50,6 +51,7 @@ class RuntimeMetricsCollector:
         self.plan_repository = plan_repository
         self.database = database
         self.optimization_service = optimization_service
+        self.clock = clock or SystemClock()
 
     async def snapshot(self) -> dict[str, Any]:
         health = await self.adapter.health()
@@ -72,9 +74,15 @@ class RuntimeMetricsCollector:
         if isinstance(self.adapter, CompositeAdapter):
             event_queue_depth = self.adapter.event_queue_depth
             dropped_events_total = self.adapter.dropped_events_total
+            dropped_events_by_adapter = self.adapter.dropped_events_by_adapter
+            dropped_events_by_kind = self.adapter.dropped_events_by_kind
+            coalesced_events_total = self.adapter.coalesced_events_total
         else:
             event_queue_depth = {"bulk": 0, "priority": 0}
             dropped_events_total = 0
+            dropped_events_by_adapter = {}
+            dropped_events_by_kind = {}
+            coalesced_events_total = 0
 
         states = await self.state_store.all()
         stale_state_count = sum(1 for state in states if state.status is StateStatus.STALE)
@@ -93,12 +101,15 @@ class RuntimeMetricsCollector:
 
         return {
             "schema_version": "v1",
-            "generated_at": datetime.now(UTC).isoformat(),
+            "generated_at": self.clock.now().isoformat(),
             "adapter_health": adapter_health,
             "event_consumer_alive": self.event_consumer.alive,
             "scheduler_alive": self.scheduler.alive,
             "event_queue_depth": event_queue_depth,
             "dropped_events_total": dropped_events_total,
+            "dropped_events_by_adapter": dropped_events_by_adapter,
+            "dropped_events_by_kind": dropped_events_by_kind,
+            "coalesced_events_total": coalesced_events_total,
             "stale_state_count": stale_state_count,
             "plans_by_status": plans_by_status,
             "optimizer_last_wall_time_seconds": optimizer_last_wall_time_seconds,

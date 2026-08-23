@@ -9,11 +9,29 @@ from __future__ import annotations
 
 import hmac
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Plan, PlanStatus
+from domoai.runtime.clock import Clock, SystemClock
+
+
+@dataclass(frozen=True)
+class OperatorPrincipal:
+    """Authenticated operator identity supplied by a trusted host boundary."""
+
+    id: str
+    authentication_context: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.authentication_context or not self.session_id:
+            raise ValueError("operator principal fields must be non-empty")
+
+
+OperatorPrincipalProvider = Callable[[], OperatorPrincipal | None]
 
 
 @dataclass(frozen=True)
@@ -25,20 +43,45 @@ class ApprovalGrant:
     validation_digest: str
     approved_by: str
     issued_at: datetime
+    authentication_context: str = "legacy_bearer_token"
+    session_id: str | None = None
+    bundle_digest: str | None = None
 
 
 class ApprovalStore:
     """In-process store of pending and consumed approval grants."""
 
-    def __init__(self, *, operator_token: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        operator_token: str | None = None,
+        allow_legacy_token: bool = False,
+        legacy_operator_id: str = "legacy_operator",
+        clock: Clock | None = None,
+    ) -> None:
         self._grants: dict[str, ApprovalGrant] = {}
         self._consumed: set[str] = set()
         stripped = operator_token.strip() if operator_token is not None else ""
         self._operator_token: str | None = stripped or None
+        self._allow_legacy_token = allow_legacy_token
+        self._legacy_operator_id = legacy_operator_id
+        self._clock = clock or SystemClock()
 
-    def issue(self, plan: Plan, *, approved_by: str, operator_token: str) -> ApprovalGrant:
-        if self._operator_token is None or not hmac.compare_digest(
-            operator_token, self._operator_token
+    def issue(
+        self,
+        plan: Plan,
+        *,
+        approved_by: str,
+        operator_token: str | None,
+        bundle_digest: str | None = None,
+    ) -> ApprovalGrant:
+        if (
+            not self._allow_legacy_token
+            or self._operator_token is None
+            or not isinstance(operator_token, str)
+            or not hmac.compare_digest(
+                operator_token, self._operator_token
+            )
         ):
             raise DomainError(
                 ErrorCode.OPERATOR_AUTHENTICATION_FAILED,
@@ -49,17 +92,87 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Only a validated plan requiring confirmation can receive an approval grant",
             )
+        return self._issue(
+            plan,
+            approved_by=approved_by,
+            authentication_context="legacy_bearer_token",
+            session_id=None,
+            bundle_digest=bundle_digest,
+        )
+
+    def issue_legacy(
+        self, plan: Plan, *, operator_token: str | None, bundle_digest: str | None = None
+    ) -> ApprovalGrant:
+        """Issue local/dev compatibility approval with server-owned identity."""
+
+        return self.issue(
+            plan,
+            approved_by=self._legacy_operator_id,
+            operator_token=operator_token,
+            bundle_digest=bundle_digest,
+        )
+
+    def issue_authenticated(
+        self,
+        plan: Plan,
+        *,
+        principal: OperatorPrincipal,
+        bundle_digest: str | None = None,
+    ) -> ApprovalGrant:
+        """Issue a grant for a principal authenticated outside the MCP tool schema."""
+
+        return self._issue(
+            plan,
+            approved_by=principal.id,
+            authentication_context=principal.authentication_context,
+            session_id=principal.session_id,
+            bundle_digest=bundle_digest,
+        )
+
+    @staticmethod
+    def _assert_issueable(plan: Plan) -> None:
+        if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Only a validated plan requiring confirmation can receive an approval grant",
+            )
+
+    def _issue(
+        self,
+        plan: Plan,
+        *,
+        approved_by: str,
+        authentication_context: str,
+        session_id: str | None,
+        bundle_digest: str | None,
+    ) -> ApprovalGrant:
+        self._assert_issueable(plan)
+        assert plan.validation is not None
         grant = ApprovalGrant(
             approval_id=uuid.uuid4().hex,
             plan_id=plan.id,
             validation_digest=plan.validation.digest,
             approved_by=approved_by,
-            issued_at=datetime.now(UTC),
+            issued_at=self._clock.now(),
+            authentication_context=authentication_context,
+            session_id=session_id,
+            bundle_digest=bundle_digest,
         )
         self._grants[grant.approval_id] = grant
         return grant
 
-    def consume(self, approval_id: str, plan: Plan) -> ApprovalGrant:
+    def consume(
+        self, approval_id: str, plan: Plan, *, bundle_digest: str | None = None
+    ) -> ApprovalGrant:
+        grant = self.validate(approval_id, plan, bundle_digest=bundle_digest)
+        self._consumed.add(approval_id)
+        return grant
+
+    def validate(
+        self, approval_id: str, plan: Plan, *, bundle_digest: str | None = None
+    ) -> ApprovalGrant:
+        """Validate a grant without consuming it before a bundle preflight ends."""
+
         grant = self._grants.get(approval_id)
         if grant is None:
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Unknown approval")
@@ -72,5 +185,9 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the plan's current validation digest",
             )
-        self._consumed.add(approval_id)
+        if grant.bundle_digest != bundle_digest:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the expected bundle digest",
+            )
         return grant

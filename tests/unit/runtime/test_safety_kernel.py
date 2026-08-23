@@ -13,6 +13,26 @@ def test_no_configured_limit_returns_none() -> None:
     assert result is None
 
 
+def test_builtin_percentage_limits_apply_without_configuration() -> None:
+    kernel = SafetyKernel([])
+
+    result = kernel.check(device_type=DeviceType.COVER, capability="position", value=101)
+
+    assert result is not None
+    assert result.code == ErrorCode.SAFETY_LIMIT_EXCEEDED
+
+
+def test_configured_limit_cannot_widen_builtin_percentage_limit() -> None:
+    kernel = SafetyKernel(
+        [SafetyLimit(device_type=DeviceType.LIGHT, capability="brightness", maximum=200)]
+    )
+
+    result = kernel.check(device_type=DeviceType.LIGHT, capability="brightness", value=101)
+
+    assert result is not None
+    assert result.code == ErrorCode.SAFETY_LIMIT_EXCEEDED
+
+
 def test_none_value_returns_none() -> None:
     kernel = SafetyKernel(
         [SafetyLimit(device_type=DeviceType.CLIMATE, capability="target_temperature", maximum=28)]

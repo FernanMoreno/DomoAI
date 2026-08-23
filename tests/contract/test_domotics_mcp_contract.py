@@ -12,7 +12,7 @@ from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError
-from domoai.domain.models import Policy, PolicyAction
+from domoai.domain.models import Policy, PolicyAction, StateStatus
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.persistence.repositories import (
@@ -22,7 +22,11 @@ from domoai.persistence.repositories import (
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
-from domoai.runtime.approval_store import ApprovalStore, OperatorPrincipal
+from domoai.runtime.approval_store import (
+    ApprovalAssertion,
+    ApprovalStore,
+    OperatorPrincipal,
+)
 from domoai.runtime.bundle_commit import (
     BundleCommitRequestMember,
     BundleCommitService,
@@ -218,6 +222,65 @@ async def test_invalid_mcp_command_returns_safe_error_envelope_without_adapter_c
 
 
 @pytest.mark.asyncio
+async def test_validate_command_rejects_explicit_unit_mismatch_before_adapter_call() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    climate_id = next(
+        device.id for device in context.registry.devices if device.type.value == "climate"
+    )
+
+    result = structured(
+        await server.call_tool(
+            "validate_command",
+            {
+                "command": {
+                    "id": "command-contract-unit-mismatch",
+                    "device_id": climate_id,
+                    "command": "set_temperature",
+                    "value": 22,
+                    "unit": "°F",
+                    "idempotency_key": "intent-contract-unit-mismatch",
+                }
+            },
+        )
+    )
+
+    assert result["validation"]["status"] == "invalid"
+    assert any(
+        error["code"] == "invalid_capability" and error["field"] == "unit"
+        for error in result["validation"]["errors"]
+    )
+    assert cast(SimulatedHomeAdapter, context.facade.executor.adapter).calls == []
+
+
+@pytest.mark.asyncio
+async def test_validate_command_returns_canonical_unit() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    climate_id = next(
+        device.id for device in context.registry.devices if device.type.value == "climate"
+    )
+
+    result = structured(
+        await server.call_tool(
+            "validate_command",
+            {
+                "command": {
+                    "id": "command-contract-unit-default",
+                    "device_id": climate_id,
+                    "command": "set_temperature",
+                    "value": 22,
+                    "idempotency_key": "intent-contract-unit-default",
+                }
+            },
+        )
+    )
+
+    assert result["validation"]["status"] == "valid"
+    assert result["command"]["unit"] == "°C"
+
+
+@pytest.mark.asyncio
 async def test_validate_plan_generates_agent_request_id_when_omitted() -> None:
     context = await build_context()
     server = create_domotics_server(context)
@@ -274,6 +337,170 @@ async def test_validate_plan_preserves_a_supplied_agent_request_id() -> None:
     )
 
     assert result["plan"]["agent_request_id"] == "agent-req-contract-explicit"
+
+
+@pytest.mark.asyncio
+async def test_terminal_plan_cannot_be_revalidated_into_executable_state(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    plan_input = {
+        "id": "plan-terminal-revalidation-contract",
+        "commands": [
+            {
+                "id": "cmd-terminal-revalidation-contract",
+                "device_id": device_id,
+                "command": "turn_on",
+                "idempotency_key": "intent-terminal-revalidation-contract",
+            }
+        ],
+    }
+
+    validated = structured(await server.call_tool("validate_plan", {"plan": plan_input}))
+    executed = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+            },
+        )
+    )
+    assert "outcomes" in executed
+    assert len(adapter.calls) == 1
+
+    persisted = await context.plan_repository.get(validated["plan"]["id"])
+    assert persisted is not None
+    assert persisted.status.value == "completed"
+
+    rejected = structured(
+        await server.call_tool("validate_plan", {"plan": persisted.model_dump(mode="json")})
+    )
+
+    assert rejected["error"]["code"] == "invalid_transition"
+    assert context.plans[validated["plan"]["id"]].status.value == "completed"
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_identity_conflict_rejects_changed_command(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    plan_id = "plan-identity-conflict-contract"
+    first = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": plan_id,
+                    "commands": [
+                        {
+                            "id": "cmd-identity-conflict-contract",
+                            "device_id": device_id,
+                            "command": "turn_on",
+                            "idempotency_key": "intent-identity-conflict-contract",
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    assert "plan" in first
+
+    changed = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": plan_id,
+                    "commands": [
+                        {
+                            "id": "cmd-identity-conflict-contract",
+                            "device_id": device_id,
+                            "command": "turn_off",
+                            "idempotency_key": "intent-identity-conflict-contract",
+                        }
+                    ],
+                }
+            },
+        )
+    )
+
+    assert changed["error"]["code"] == "plan_identity_conflict"
+
+
+@pytest.mark.asyncio
+async def test_mcp_execution_rejects_matching_stale_precondition_without_write(tmp_path) -> None:
+    context = await build_context_with_scheduler(tmp_path)
+    server = create_domotics_server(context)
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+    switch_id = next(
+        device.id for device in context.registry.devices if device.type.value == "switch"
+    )
+    light_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    snapshot = await context.discovery.state_store.get(switch_id, "power")
+    assert snapshot is not None
+    await context.discovery.state_store.save(
+        snapshot.model_copy(update={"status": StateStatus.STALE})
+    )
+
+    validated = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-mcp-stale-precondition",
+                    "commands": [
+                        {
+                            "id": "command-mcp-stale-precondition",
+                            "device_id": light_id,
+                            "command": "set_brightness",
+                            "value": 60,
+                            "unit": "%",
+                            "idempotency_key": "intent-mcp-stale-precondition",
+                            "preconditions": [
+                                {
+                                    "device_id": switch_id,
+                                    "capability": "power",
+                                    "expected": snapshot.value,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    executed = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+            },
+        )
+    )
+
+    assert executed["outcomes"][0]["status"] == "rejected"
+    assert (
+        executed["outcomes"][0]["error"]["details"]["preconditions"][0]["freshness"]["status"]
+        == "stale"
+    )
+    assert (
+        executed["outcomes"][0]["error"]["details"]["preconditions"][0]["freshness"][
+            "source_revision"
+        ]
+        > 0
+    )
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio
@@ -649,11 +876,21 @@ async def test_request_approval_uses_server_principal_not_caller_identity() -> N
         id="human-42", authentication_context="oidc", session_id="session-7"
     )
     context.operator_principal_provider = lambda: principal
-    context.approval_store = ApprovalStore(
-        operator_token=OPERATOR_TOKEN, allow_legacy_token=False
-    )
+    context.approval_store = ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=False)
     server = create_domotics_server(context)
     validated = await _validated_plan_requiring_confirmation(server, context)
+    assertion_now = datetime.now(UTC)
+    context.operator_approval_assertion_provider = (
+        lambda plan_id, validation_digest, bundle_digest: ApprovalAssertion(
+            principal=principal,
+            plan_id=plan_id,
+            validation_digest=validation_digest,
+            bundle_digest=bundle_digest,
+            nonce="contract-human-gesture-1",
+            approved_at=assertion_now,
+            expires_at=assertion_now + timedelta(minutes=5),
+        )
+    )
 
     approval = structured(
         await server.call_tool(
@@ -677,9 +914,7 @@ async def test_request_approval_uses_server_principal_not_caller_identity() -> N
 @pytest.mark.asyncio
 async def test_legacy_mcp_approval_requires_explicit_compatibility_mode() -> None:
     context = await build_confirmation_required_context()
-    context.approval_store = ApprovalStore(
-        operator_token=OPERATOR_TOKEN, allow_legacy_token=False
-    )
+    context.approval_store = ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=False)
     server = create_domotics_server(context)
     validated = await _validated_plan_requiring_confirmation(server, context)
 
@@ -756,7 +991,9 @@ async def test_approval_id_is_rejected_once_already_consumed() -> None:
         context.approval_store.consume(approval["approval_id"], plan)
 
 
-async def _validated_safe_plan(server, context: DomoticsMcpContext) -> dict[str, Any]:
+async def _validated_safe_plan(
+    server, context: DomoticsMcpContext, *, execute_at: str | None = None
+) -> dict[str, Any]:
     device_id = next(
         device.id for device in context.registry.devices if device.type.value == "light"
     )
@@ -766,6 +1003,7 @@ async def _validated_safe_plan(server, context: DomoticsMcpContext) -> dict[str,
             {
                 "plan": {
                     "id": "plan-schedulable-1",
+                    **({"execute_at": execute_at} if execute_at is not None else {}),
                     "commands": [
                         {
                             "id": "command-schedulable-1",
@@ -786,9 +1024,9 @@ async def _validated_safe_plan(server, context: DomoticsMcpContext) -> dict[str,
 async def test_schedule_plan_defers_execution_until_due(tmp_path) -> None:
     context = await build_context_with_scheduler(tmp_path)
     server = create_domotics_server(context)
-    validated = await _validated_safe_plan(server, context)
     adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    validated = await _validated_safe_plan(server, context, execute_at=future)
 
     scheduled = structured(
         await server.call_tool(
@@ -900,8 +1138,8 @@ async def test_bundle_commit_tool_returns_durable_aggregate_and_is_idempotent(tm
 async def test_cancel_scheduled_plan_removes_it_from_pending(tmp_path) -> None:
     context = await build_context_with_scheduler(tmp_path)
     server = create_domotics_server(context)
-    validated = await _validated_safe_plan(server, context)
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    validated = await _validated_safe_plan(server, context, execute_at=future)
     await server.call_tool(
         "schedule_plan",
         {
@@ -932,8 +1170,8 @@ async def test_cancel_scheduled_plan_removes_it_from_pending(tmp_path) -> None:
 async def test_reschedule_plan_changes_pending_execute_at(tmp_path) -> None:
     context = await build_context_with_scheduler(tmp_path)
     server = create_domotics_server(context)
-    validated = await _validated_safe_plan(server, context)
     first_time = datetime.now(UTC) + timedelta(hours=1)
+    validated = await _validated_safe_plan(server, context, execute_at=first_time.isoformat())
     await server.call_tool(
         "schedule_plan",
         {
@@ -950,21 +1188,21 @@ async def test_reschedule_plan_changes_pending_execute_at(tmp_path) -> None:
             {"plan_id": validated["plan"]["id"], "execute_at": new_time.isoformat()},
         )
     )
-    assert rescheduled["rescheduled"] is True
+    assert rescheduled["error"]["code"] == "reschedule_requires_revalidation"
 
     pending = structured(await server.call_tool("list_scheduled_plans", {}))
-    assert pending["plans"][0]["execute_at"] == new_time.isoformat()
+    assert pending["plans"][0]["execute_at"] == first_time.isoformat()
     persisted = await context.plan_repository.get(validated["plan"]["id"])
     assert persisted is not None
-    assert persisted.execute_at == new_time
+    assert persisted.execute_at == first_time
 
 
 @pytest.mark.asyncio
 async def test_reschedule_plan_rejects_naive_execute_at_and_preserves_schedule(tmp_path) -> None:
     context = await build_context_with_scheduler(tmp_path)
     server = create_domotics_server(context)
-    validated = await _validated_safe_plan(server, context)
     original_time = datetime.now(UTC) + timedelta(hours=1)
+    validated = await _validated_safe_plan(server, context, execute_at=original_time.isoformat())
     await server.call_tool(
         "schedule_plan",
         {

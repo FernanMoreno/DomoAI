@@ -17,7 +17,19 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
+        },
+        "verification": {
+          "default": "equals",
+          "enum": [
+            "equals",
+            "toggle_transition",
+            "motion_stopped",
+            "unconfirmed"
+          ],
+          "title": "Verification",
+          "type": "string"
         },
         "tolerance": {
           "anyOf": [
@@ -63,8 +75,7 @@
         }
       },
       "required": [
-        "capability",
-        "expected"
+        "capability"
       ],
       "title": "CommandPostcondition",
       "type": "object"
@@ -91,6 +102,11 @@
               "type": "null"
             }
           ]
+        },
+        "allow_stale": {
+          "default": false,
+          "title": "Allow Stale",
+          "type": "boolean"
         }
       },
       "required": [

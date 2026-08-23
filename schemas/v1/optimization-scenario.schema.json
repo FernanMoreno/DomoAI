@@ -686,6 +686,90 @@
       "title": "EVChargingLoad",
       "type": "object"
     },
+    "EVState": {
+      "additionalProperties": false,
+      "description": "Canonical provider-observed EV state used for executable planning.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "connected": {
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "soc_kwh": {
+          "minimum": 0,
+          "title": "Soc Kwh",
+          "type": "number"
+        },
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "max_charge_kw": {
+          "minimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "departure_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Departure At"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "source_revision": {
+          "minLength": 1,
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "quality": {
+          "$ref": "#/$defs/MeasurementQuality",
+          "default": "good"
+        }
+      },
+      "required": [
+        "device_id",
+        "connected",
+        "soc_kwh",
+        "capacity_kwh",
+        "max_charge_kw",
+        "observed_at",
+        "received_at",
+        "source_revision",
+        "source_ref"
+      ],
+      "title": "EVState",
+      "type": "object"
+    },
     "EnergyContext": {
       "additionalProperties": false,
       "description": "Complete external energy context for exactly one optimization horizon.",
@@ -753,6 +837,13 @@
             }
           ],
           "default": null
+        },
+        "ev_states": {
+          "items": {
+            "$ref": "#/$defs/EVState"
+          },
+          "title": "Ev States",
+          "type": "array"
         },
         "source_revision": {
           "minLength": 1,
@@ -1169,6 +1260,53 @@
       ],
       "title": "TariffPoint",
       "type": "object"
+    },
+    "TerminalSOCPolicy": {
+      "additionalProperties": false,
+      "description": "Explicit rolling-horizon reserve/terminal-value policy.",
+      "properties": {
+        "minimum_kwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Kwh"
+        },
+        "target_kwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Kwh"
+        },
+        "value_eur_per_kwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Eur Per Kwh"
+        }
+      },
+      "title": "TerminalSOCPolicy",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -1225,6 +1363,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/EnergyContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "terminal_soc_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TerminalSOCPolicy"
         },
         {
           "type": "null"

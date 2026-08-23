@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
 from domoai.domain.models import Command, Plan, PlanStatus
 from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
@@ -84,3 +85,110 @@ async def test_claim_for_execution_rejects_non_executable_statuses_at_repository
     persisted = await repository.get(plan.id)
     assert persisted is not None
     assert persisted.status is PlanStatus.DRAFT
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_reopening_terminal_plan(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    terminal = _plan("plan-terminal-immutable", PlanStatus.COMPLETED)
+    await repository.save(terminal)
+
+    with pytest.raises(InvalidTransitionError):
+        await repository.save(terminal.model_copy(update={"status": PlanStatus.READY}))
+
+    persisted = await repository.get(terminal.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_changed_definition_for_existing_plan_id(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    original = _plan("plan-definition-immutable", PlanStatus.READY).model_copy(
+        update={"definition_digest": "sha256:original"}
+    )
+    await repository.save(original)
+
+    changed = original.model_copy(update={"definition_digest": "sha256:changed"})
+    with pytest.raises(DomainError) as error:
+        await repository.save(changed)
+
+    assert error.value.code is ErrorCode.PLAN_IDENTITY_CONFLICT
+    persisted = await repository.get(original.id)
+    assert persisted is not None
+    assert persisted.definition_digest == "sha256:original"
+
+
+@pytest.mark.asyncio
+async def test_save_validation_rejects_terminal_plan_before_rewriting_it(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    terminal = _plan("plan-validation-terminal", PlanStatus.COMPLETED)
+    await repository.save(terminal)
+
+    with pytest.raises(InvalidTransitionError):
+        await repository.save_validation(terminal.model_copy(update={"status": PlanStatus.READY}))
+
+    persisted = await repository.get(terminal.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_definition_mismatch_for_existing_plan_id(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    original = _plan("plan-claim-definition-immutable", PlanStatus.READY).model_copy(
+        update={"definition_digest": "sha256:original"}
+    )
+    await repository.save(original)
+
+    changed = original.model_copy(
+        update={
+            "definition_digest": "sha256:changed",
+            "status": PlanStatus.EXECUTING,
+        }
+    )
+    with pytest.raises(DomainError) as error:
+        await repository.claim_for_execution(
+            changed,
+            allowed_statuses=frozenset({PlanStatus.READY}),
+        )
+
+    assert error.value.code is ErrorCode.PLAN_IDENTITY_CONFLICT
+    persisted = await repository.get(original.id)
+    assert persisted is not None
+    assert persisted.status is PlanStatus.READY
+    assert persisted.definition_digest == "sha256:original"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_specific_approval_and_settlement_guards(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+
+    ready = _plan("plan-lifecycle-specific", PlanStatus.READY)
+    with pytest.raises(InvalidTransitionError):
+        await repository.save_approval(ready)
+
+    requires_confirmation = ready.model_copy(update={"status": PlanStatus.REQUIRES_CONFIRMATION})
+    await repository.save(requires_confirmation)
+    approved = requires_confirmation.model_copy(update={"status": PlanStatus.APPROVED})
+    await repository.save_approval(approved)
+    assert (await repository.get(approved.id)).status is PlanStatus.APPROVED
+
+    with pytest.raises(InvalidTransitionError):
+        await repository.settle_execution(approved)
+
+    executing = approved.model_copy(update={"status": PlanStatus.EXECUTING})
+    await repository.save(executing)
+    completed = executing.model_copy(update={"status": PlanStatus.COMPLETED})
+    await repository.settle_execution(completed)
+    assert (await repository.get(completed.id)).status is PlanStatus.COMPLETED

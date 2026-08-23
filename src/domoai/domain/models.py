@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from datetime import UTC, datetime, time
 from enum import StrEnum
@@ -46,6 +48,13 @@ class StateStatus(StrEnum):
     INVALID = "invalid"
 
 
+class ControlLeaseStatus(StrEnum):
+    ACQUIRED = "acquired"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    RELEASED = "released"
+
+
 class CapabilityKind(StrEnum):
     BOOLEAN = "boolean"
     INTEGER = "integer"
@@ -88,6 +97,12 @@ class ValidationStatus(StrEnum):
     REQUIRES_CONFIRMATION = "requires_confirmation"
 
 
+class DependencyKind(StrEnum):
+    ASSUMPTION = "assumption"
+    PRECONDITION = "precondition"
+    PREDECESSOR_OUTCOME = "predecessor_outcome"
+
+
 class ExecutionStatus(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -105,6 +120,7 @@ class BundleCommitStatus(StrEnum):
     PARTIALLY_COMMITTED = "partially_committed"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    MISSED = "missed"
 
 
 class BundleMemberCommitStatus(StrEnum):
@@ -113,6 +129,7 @@ class BundleMemberCommitStatus(StrEnum):
     SCHEDULED = "scheduled"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    MISSED = "missed"
 
 
 class SourceRef(StrictModel):
@@ -143,8 +160,6 @@ class Capability(StrictModel):
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> Capability:
-        if (self.minimum is None) != (self.maximum is None):
-            raise ValueError("minimum and maximum must be provided together")
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("minimum must be less than or equal to maximum")
         if self.kind not in {CapabilityKind.INTEGER, CapabilityKind.NUMBER}:
@@ -152,6 +167,17 @@ class Capability(StrictModel):
                 raise ValueError("numeric bounds are only valid for integer or number capabilities")
         if self.kind is CapabilityKind.ENUM and not self.enum_values:
             raise ValueError("enum capabilities require enum_values")
+        step = self.constraints.get("step")
+        if step is not None:
+            if self.kind not in {CapabilityKind.INTEGER, CapabilityKind.NUMBER}:
+                raise ValueError("step is only valid for numeric capabilities")
+            if (
+                not isinstance(step, (int, float))
+                or isinstance(step, bool)
+                or not math.isfinite(float(step))
+                or float(step) <= 0
+            ):
+                raise ValueError("step must be a finite positive number")
         return self
 
 
@@ -196,10 +222,51 @@ class StateSnapshot(StrictModel):
         return self
 
 
+class ExecutionWindow(StrictModel):
+    """Immutable temporal evidence attached to a scheduled physical intent."""
+
+    intended_at: datetime
+    not_before: datetime
+    not_after: datetime
+    timezone: str = Field(min_length=1)
+    revision: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> ExecutionWindow:
+        values = {
+            "intended_at": self.intended_at,
+            "not_before": self.not_before,
+            "not_after": self.not_after,
+        }
+        if any(value.tzinfo is None or value.utcoffset() is None for value in values.values()):
+            raise ValueError("execution window instants must be timezone-aware")
+        if self.not_before > self.intended_at or self.intended_at > self.not_after:
+            raise ValueError("execution window must satisfy not_before <= intended_at <= not_after")
+        return self
+
+    def canonical_payload(self) -> dict[str, Any]:
+        def canonical(value: datetime) -> str:
+            return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+        return {
+            "intended_at": canonical(self.intended_at),
+            "not_before": canonical(self.not_before),
+            "not_after": canonical(self.not_after),
+            "timezone": self.timezone,
+            "revision": self.revision,
+        }
+
+    @property
+    def digest(self) -> str:
+        canonical = json.dumps(self.canonical_payload(), sort_keys=True, separators=(",", ":"))
+        return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
 class Precondition(StrictModel):
     device_id: str = Field(min_length=1)
     capability: str = Field(min_length=1)
     expected: ScalarValue | None
+    allow_stale: bool = False
 
 
 class SafetyLimit(StrictModel):
@@ -221,7 +288,10 @@ class CommandPostcondition(StrictModel):
     """Typed observation required before a command is confirmed successful."""
 
     capability: str = Field(min_length=1)
-    expected: ScalarValue | None
+    expected: ScalarValue | None = None
+    verification: Literal["equals", "toggle_transition", "motion_stopped", "unconfirmed"] = (
+        "equals"
+    )
     tolerance: float | None = Field(default=None, ge=0)
     settle_timeout_seconds: float | None = Field(default=None, ge=0, le=120)
     poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
@@ -229,6 +299,12 @@ class CommandPostcondition(StrictModel):
 
     @model_validator(mode="after")
     def validate_tolerance(self) -> CommandPostcondition:
+        if self.verification == "equals" and self.expected is None:
+            raise ValueError("equals verification requires an expected value")
+        if self.verification == "toggle_transition" and self.expected is not None:
+            raise ValueError("toggle_transition verification derives its expected value")
+        if self.verification == "unconfirmed" and self.expected is not None:
+            raise ValueError("unconfirmed verification must not declare an expected value")
         if self.tolerance is None:
             return self
         numeric_expected = isinstance(self.expected, (int, float)) and not isinstance(
@@ -292,6 +368,7 @@ class PlanDependencies(StrictModel):
     inventory_revision: str = Field(min_length=1)
     policy_revision: str = Field(min_length=1)
     state_versions: dict[str, int] = Field(default_factory=dict)
+    dependency_kinds: dict[str, DependencyKind] = Field(default_factory=dict)
     capability_fingerprints: dict[str, str] = Field(default_factory=dict)
 
 
@@ -311,12 +388,14 @@ class Policy(StrictModel):
     conditions: dict[str, Any] = Field(default_factory=dict)
     priority: int = 0
     enabled: bool = True
+    allows_stale: bool = False
 
 
 class PolicyDecision(StrictModel):
     policy_id: str | None = None
     action: PolicyAction
     reason: str = Field(min_length=1)
+    allows_stale: bool = False
 
 
 class Approval(StrictModel):
@@ -327,6 +406,8 @@ class Approval(StrictModel):
     scope: str = "plan"
     authentication_context: str | None = None
     session_id: str | None = None
+    window_digest: str | None = None
+    schedule_revision: int = Field(default=0, ge=0)
 
 
 class ExecutionOutcome(StrictModel):
@@ -346,6 +427,98 @@ class ExecutionSummary(StrictModel):
     outcomes: list[ExecutionOutcome] = Field(default_factory=list)
 
 
+class ControlLease(StrictModel):
+    """Evidence-backed ownership lease for a physically controlled device."""
+
+    lease_id: str = Field(min_length=1)
+    owner: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    status: ControlLeaseStatus
+    acquired_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_window(self) -> ControlLease:
+        if self.acquired_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("control lease timestamps must be timezone-aware")
+        if self.expires_at <= self.acquired_at:
+            raise ValueError("control lease must expire after acquisition")
+        return self
+
+
+class PhysicalBaseline(StrictModel):
+    """Physical observation captured before a control lease is used."""
+
+    device_id: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    power_kw: float | None = None
+    observed_at: datetime
+    received_at: datetime
+    source_ref: SourceRef
+    state_revision: str = Field(min_length=1)
+    native_scheduler_status: Literal["disabled", "inactive", "active", "unknown"]
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> PhysicalBaseline:
+        if self.observed_at.tzinfo is None or self.received_at.tzinfo is None:
+            raise ValueError("physical baseline timestamps must be timezone-aware")
+        if self.received_at < self.observed_at:
+            raise ValueError("baseline received_at must not precede observed_at")
+        if self.power_kw is not None and not math.isfinite(self.power_kw):
+            raise ValueError("baseline power must be finite")
+        return self
+
+
+class TakeoverResult(StrictModel):
+    """Result and evidence of the pre-write control acquisition handshake."""
+
+    lease_id: str = Field(min_length=1)
+    status: ControlLeaseStatus
+    owner: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    acquired_at: datetime
+    expires_at: datetime
+    baseline: PhysicalBaseline | None = None
+    first_command_id: str = Field(min_length=1)
+    first_command_confirmed: bool = False
+    confirmed_at: datetime | None = None
+    failure_code: str | None = None
+    evidence_digest: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_result(self) -> TakeoverResult:
+        if self.acquired_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("takeover timestamps must be timezone-aware")
+        if self.expires_at <= self.acquired_at:
+            raise ValueError("takeover must expire after acquisition")
+        if self.confirmed_at is not None and self.confirmed_at.tzinfo is None:
+            raise ValueError("confirmed_at must be timezone-aware")
+        if self.status is ControlLeaseStatus.ACQUIRED and self.baseline is None:
+            raise ValueError("acquired takeover requires a physical baseline")
+        if self.status is ControlLeaseStatus.REJECTED and not self.failure_code:
+            raise ValueError("rejected takeover requires failure_code")
+        return self
+
+
+class ExecutionDependencyEvidence(StrictModel):
+    predecessor_plan_id: str = Field(min_length=1)
+    predecessor_command_ids: list[str] = Field(min_length=1)
+    status: ExecutionStatus
+    state_versions: dict[str, int] = Field(default_factory=dict)
+    captured_at: datetime
+    evidence_digest: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_capture_time(self) -> ExecutionDependencyEvidence:
+        if self.captured_at.tzinfo is None:
+            raise ValueError("captured_at must be timezone-aware")
+        if self.status is not ExecutionStatus.CONFIRMED_SUCCESS:
+            raise ValueError("only confirmed success can publish dependency evidence")
+        return self
+
+
 class BundleMemberCommit(StrictModel):
     plan_id: str = Field(min_length=1)
     validation_digest: str = Field(min_length=1)
@@ -355,11 +528,15 @@ class BundleMemberCommit(StrictModel):
     scheduled: bool = False
     error_code: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    predecessor_plan_id: str | None = None
+    predecessor_outcome_digest: str | None = None
 
     @model_validator(mode="after")
     def validate_execute_at(self) -> BundleMemberCommit:
         if self.execute_at is not None and self.execute_at.tzinfo is None:
             raise ValueError("execute_at must be timezone-aware")
+        if self.predecessor_outcome_digest is not None and self.predecessor_plan_id is None:
+            raise ValueError("predecessor outcome digest requires predecessor plan")
         return self
 
 
@@ -392,8 +569,11 @@ class Plan(StrictModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     expires_at: datetime | None = None
     execute_at: datetime | None = None
+    execution_window: ExecutionWindow | None = None
+    schedule_revision: int = Field(default=0, ge=0)
     commands: list[Command] = Field(min_length=1, max_length=50)
     status: PlanStatus = PlanStatus.DRAFT
+    definition_digest: str | None = None
     validation: ValidationResult | None = None
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
     approval: Approval | None = None
@@ -409,6 +589,13 @@ class Plan(StrictModel):
         ):
             if value is not None and value.tzinfo is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
+        if self.execution_window is not None:
+            if self.execute_at is None:
+                raise ValueError("execution_window requires execute_at")
+            if self.execute_at != self.execution_window.intended_at:
+                raise ValueError("execution_window intended_at must match execute_at")
+            if self.schedule_revision != self.execution_window.revision:
+                raise ValueError("schedule_revision must match execution_window revision")
         return self
 
 

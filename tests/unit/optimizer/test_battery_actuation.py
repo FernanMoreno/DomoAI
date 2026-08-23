@@ -94,9 +94,11 @@ def test_battery_compiler_stops_exactly_at_horizon_end() -> None:
 
     commands = [command for plan in plans for command in plan.commands]
     assert [command.command for command in commands] == [
+        "stop_battery",
         "discharge_battery",
         "stop_battery",
     ]
+    assert commands[0].intent == "takeover_first_slot:0"
     assert commands[-1].value is None
     assert plans[-1].execute_at == scenario.horizon.end
 

@@ -17,6 +17,7 @@ from domoai.domain.models import (
     BundleMemberCommit,
     BundleMemberCommitStatus,
     ErrorDetail,
+    ExecutionDependencyEvidence,
     ExecutionStatus,
     ExecutionSummary,
     Plan,
@@ -38,6 +39,7 @@ class BundleCommitRequestMember(StrictModel):
     validation_digest: str = Field(min_length=1)
     execute_at: datetime | None = None
     approval_id: str | None = None
+    predecessor_plan_id: str | None = None
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> BundleCommitRequestMember:
@@ -57,21 +59,24 @@ def bundle_approval_digest(
 ) -> str:
     """Build the canonical digest shared by the host and runtime boundary."""
 
-    payload = {
+    canonical_members: list[dict[str, Any]] = []
+    for member in members:
+        member_payload: dict[str, Any] = {
+            "plan_id": member.plan_id,
+            "validation_digest": member.validation_digest,
+            "execute_at": member.execute_at.isoformat()
+            if member.execute_at is not None
+            else None,
+        }
+        if member.predecessor_plan_id is not None:
+            member_payload["predecessor_plan_id"] = member.predecessor_plan_id
+        canonical_members.append(member_payload)
+    digest_payload: dict[str, Any] = {
         "schema": "bundle-approval-v1",
         "scenario_id": scenario_id,
-        "members": [
-            {
-                "plan_id": member.plan_id,
-                "validation_digest": member.validation_digest,
-                "execute_at": member.execute_at.isoformat()
-                if member.execute_at is not None
-                else None,
-            }
-            for member in members
-        ],
+        "members": canonical_members,
     }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(digest_payload, sort_keys=True, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
@@ -115,6 +120,14 @@ class BundleCommitService:
             await self._preflight_member(member, bundle_digest=request.bundle_digest)
             for member in request.members
         ]
+        member_ids = [member.plan_id for member in request.members]
+        for index, member in enumerate(request.members):
+            if member.predecessor_plan_id is not None:
+                if member.predecessor_plan_id not in member_ids[:index]:
+                    raise DomainError(
+                        ErrorCode.VALIDATION_ERROR,
+                        "A predecessor must refer to an earlier bundle member",
+                    )
         bundle = BundleCommit(
             id=f"bundle-commit-{uuid4().hex}",
             bundle_digest=request.bundle_digest,
@@ -124,6 +137,7 @@ class BundleCommitService:
                     plan_id=member.plan_id,
                     validation_digest=member.validation_digest,
                     execute_at=member.execute_at,
+                    predecessor_plan_id=member.predecessor_plan_id,
                 )
                 for member in request.members
             ],
@@ -180,8 +194,16 @@ class BundleCommitService:
 
         for index in due_indexes:
             plan = plans[index]
+            state_version_overrides = self._predecessor_state_version_overrides(
+                request.members[index], plan, plans, request.members, due_indexes
+            )
             try:
-                summary = await self.facade.execute_plan(plan)
+                if state_version_overrides:
+                    summary = await self.facade.execute_plan(
+                        plan, state_version_overrides=state_version_overrides
+                    )
+                else:
+                    summary = await self.facade.execute_plan(plan)
             except Exception as error:
                 bundle = await self._mark_member(
                     bundle,
@@ -200,6 +222,11 @@ class BundleCommitService:
                 index,
                 status=member_status,
                 execution_status=execution_status,
+                details=(
+                    {"dependency_evidence": self._dependency_evidence(plan, summary)}
+                    if member_status is BundleMemberCommitStatus.EXECUTED
+                    else None
+                ),
             )
             if member_status is not BundleMemberCommitStatus.EXECUTED:
                 return await self._finish_failure(
@@ -218,7 +245,7 @@ class BundleCommitService:
                     bundle,
                     [plans[index] for index in future_indexes],
                     future_indexes,
-                    final_status=BundleCommitStatus.COMPLETED,
+                    final_status=BundleCommitStatus.SCHEDULED,
                 )
             except Exception as error:
                 return await self._finish_failure(bundle, error, committed=True)
@@ -226,6 +253,91 @@ class BundleCommitService:
         return await self.bundle_repository.save(
             bundle.model_copy(update={"status": BundleCommitStatus.COMPLETED})
         )
+
+    async def is_scheduled_member(self, plan_id: str) -> bool:
+        return await self.bundle_repository.is_scheduled_member(plan_id)
+
+    def _predecessor_state_version_overrides(
+        self,
+        member: BundleCommitRequestMember,
+        plan: Plan,
+        plans: list[Plan],
+        members: list[BundleCommitRequestMember],
+        due_indexes: list[int],
+    ) -> dict[str, int]:
+        """Advance only explicit dependencies after an ordered predecessor.
+
+        The bundle loop is the owner of immediate member ordering. Future
+        members are independently scheduled and therefore rely on their
+        explicit preconditions instead of an in-memory handoff.
+        """
+
+        if member.predecessor_plan_id is None or members.index(member) not in due_indexes:
+            return {}
+        predecessor_index = next(
+            (
+                index
+                for index, candidate in enumerate(members)
+                if candidate.plan_id == member.predecessor_plan_id
+            ),
+            None,
+        )
+        if predecessor_index is None or predecessor_index >= len(plans):
+            return {}
+        predecessor = plans[predecessor_index]
+        predecessor_devices = {command.device_id for command in predecessor.commands}
+        dependencies = plan.validation.dependencies if plan.validation else None
+        if dependencies is None:
+            return {}
+        state_store = getattr(getattr(self.facade, "plan_service", None), "state_store", None)
+        if state_store is None:
+            return {}
+        overrides: dict[str, int] = {}
+        for key in dependencies.state_versions:
+            device_id, _, _capability = key.partition("::")
+            if device_id in predecessor_devices:
+                overrides[key] = state_store.state_version(device_id, _capability)
+        return overrides
+
+    def _dependency_evidence(self, plan: Plan, summary: ExecutionSummary) -> dict[str, Any]:
+        plan_service = getattr(self.facade, "plan_service", None)
+        if plan_service is None:
+            return {}
+        state_store = getattr(plan_service, "state_store", None)
+        if state_store is None:
+            return {}
+        state_versions: dict[str, int] = {}
+        for command in plan.commands:
+            capability = plan_service.capability_for_command(command)
+            if capability is not None:
+                key = f"{command.device_id}::{capability.name}"
+                state_versions[key] = state_store.state_version(
+                    command.device_id, capability.name
+                )
+            for precondition in command.preconditions:
+                key = f"{precondition.device_id}::{precondition.capability}"
+                state_versions[key] = state_store.state_version(
+                    precondition.device_id, precondition.capability
+                )
+        first_outcome = summary.outcomes[0]
+        captured_at = self.clock.now()
+        canonical_payload = {
+            "predecessor_plan_id": plan.id,
+            "predecessor_command_ids": [outcome.command_id for outcome in summary.outcomes],
+            "status": first_outcome.status.value,
+            "state_versions": state_versions,
+            "captured_at": captured_at.isoformat(),
+        }
+        canonical = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
+        evidence = ExecutionDependencyEvidence(
+            predecessor_plan_id=plan.id,
+            predecessor_command_ids=[outcome.command_id for outcome in summary.outcomes],
+            status=first_outcome.status,
+            state_versions=state_versions,
+            captured_at=captured_at,
+            evidence_digest=f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}",
+        )
+        return evidence.model_dump(mode="json")
 
     async def _preflight_member(
         self, member: BundleCommitRequestMember, *, bundle_digest: str
@@ -311,7 +423,7 @@ class BundleCommitService:
             approved[index] = self.facade.approve_plan(plans[index], grant=grant)
             self.plans[approved[index].id] = approved[index]
             if self.plan_repository is not None:
-                await self.plan_repository.save(approved[index])
+                await self.plan_repository.save_approval(approved[index])
         return approved
 
     async def _mark_member(
@@ -412,6 +524,7 @@ class BundleRecoveryService:
             committed = 0
             has_unknown = False
             has_failed = False
+            has_missed = False
             all_scheduled = True
             for index, member in enumerate(members):
                 scheduled = await self.scheduled_repository.get(member.plan_id)
@@ -438,6 +551,13 @@ class BundleRecoveryService:
                         )
                         committed += 1
                         all_scheduled = False
+                        continue
+                    if schedule_status == "missed":
+                        has_missed = True
+                        all_scheduled = False
+                        members[index] = member.model_copy(
+                            update={"status": BundleMemberCommitStatus.MISSED, "scheduled": True}
+                        )
                         continue
                     has_failed = True
                     all_scheduled = False
@@ -473,6 +593,12 @@ class BundleRecoveryService:
                     BundleCommitStatus.PARTIALLY_COMMITTED
                     if committed
                     else BundleCommitStatus.UNKNOWN
+                )
+            elif has_missed:
+                status = (
+                    BundleCommitStatus.MISSED
+                    if all(item.status is BundleMemberCommitStatus.MISSED for item in members)
+                    else BundleCommitStatus.PARTIALLY_COMMITTED
                 )
             elif has_failed:
                 status = (

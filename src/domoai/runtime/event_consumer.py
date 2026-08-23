@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 from domoai.application.discovery_service import DiscoveryService
 from domoai.domain.models import SourceEvent, SourceRef, StateChangedEvent
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.state_store import StateStore
@@ -20,12 +22,18 @@ class RuntimeEventConsumer:
         discovery: DiscoveryService,
         state_store: StateStore,
         audit: AuditLog,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         self.adapter = adapter
         self.discovery = discovery
         self.state_store = state_store
         self.audit = audit
+        self.clock = clock or SystemClock()
         self.alive = False
+        self.events_applied = 0
+        self.last_event_at: datetime | None = None
+        self.last_event_lag_seconds: float | None = None
 
     async def consume_once(self) -> SourceEvent | None:
         """Apply one event, or mark cached state stale when the source is lost."""
@@ -114,6 +122,15 @@ class RuntimeEventConsumer:
 
     async def _apply_event(self, event: SourceEvent) -> None:
         """Apply state-only events cheaply; fall back to full discovery otherwise."""
+
+        self.events_applied += 1
+        occurred_at = getattr(event, "occurred_at", None)
+        self.last_event_at = occurred_at
+        self.last_event_lag_seconds = (
+            max(0.0, (self.clock.now() - occurred_at).total_seconds())
+            if occurred_at is not None
+            else None
+        )
 
         if isinstance(event, StateChangedEvent):
             await self._apply_state_only(event)

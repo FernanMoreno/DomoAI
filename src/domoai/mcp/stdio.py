@@ -11,6 +11,7 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.optimization_service import OptimizationService
+from domoai.application.optimization_worker import OptimizationWorker, WorkerBudget
 from domoai.application.plan_service import PlanService
 from domoai.application.runtime_factory import RuntimeComposition, build_runtime
 from domoai.application.state_service import StateService
@@ -19,7 +20,10 @@ from domoai.mcp.domotics_server import DomoticsMcpContext
 from domoai.mcp.ortools_server import OrtoolsMcpContext
 from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
-from domoai.runtime.approval_store import OperatorPrincipalProvider
+from domoai.runtime.approval_store import (
+    OperatorApprovalAssertionProvider,
+    OperatorPrincipalProvider,
+)
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
 from domoai.runtime.metrics import RuntimeMetricsCollector
@@ -60,14 +64,27 @@ async def build_configured_server(
     settings: Settings | None = None,
     *,
     operator_principal_provider: OperatorPrincipalProvider | None = None,
+    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
 ) -> tuple[RuntimeComposition, FastMCP]:
     runtime = await build_runtime(
-        settings, operator_principal_provider=operator_principal_provider
+        settings,
+        operator_principal_provider=operator_principal_provider,
+        operator_approval_assertion_provider=operator_approval_assertion_provider,
     )
     optimization_service = OptimizationService(
         runtime.registry,
         runtime.plan_service,
         CpSatOptimizer(runtime.registry),
+    )
+    worker = OptimizationWorker(
+        optimization_service,
+        WorkerBudget(
+            max_solver_time_seconds=runtime.settings.optimization_max_solver_time_seconds,
+            queue_capacity=runtime.settings.optimization_worker_queue_capacity,
+            max_concurrency=runtime.settings.optimization_worker_concurrency,
+            queue_wait_seconds=runtime.settings.optimization_worker_queue_wait_seconds,
+            provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
+        ),
     )
     metrics = RuntimeMetricsCollector(
         adapter=runtime.adapter,
@@ -76,6 +93,9 @@ async def build_configured_server(
         state_store=runtime.state_store,
         plan_repository=runtime.plan_repository,
         database=runtime.database,
+        storage=runtime.storage,
+        battery_qualification=runtime.battery_qualification,
+        optimization_worker=worker,
         optimization_service=optimization_service,
         clock=runtime.clock,
     )
@@ -94,12 +114,16 @@ async def build_configured_server(
         metrics=metrics,
         bundle_commit_service=runtime.bundle_commit_service,
         operator_principal_provider=runtime.operator_principal_provider,
+        operator_approval_assertion_provider=runtime.operator_approval_assertion_provider,
+        blocking_worker=worker,
+        provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
         clock=runtime.clock,
     )
     optimizer_context = OrtoolsMcpContext(
         registry=runtime.registry,
         plan_service=runtime.plan_service,
         optimization_service=optimization_service,
+        optimization_worker=worker,
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context)

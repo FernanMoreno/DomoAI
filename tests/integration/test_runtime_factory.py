@@ -14,7 +14,7 @@ from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.application.runtime_factory import build_runtime, create_adapter
 from domoai.config.settings import Settings
-from domoai.domain.models import Command, Plan, PlanStatus, SourceRef, StateStatus
+from domoai.domain.models import Command, Plan, PlanStatus, Precondition, SourceRef, StateStatus
 from domoai.domain.provider import MeasurementQuality
 from domoai.optimizer.energy import (
     BatteryActuator,
@@ -491,6 +491,8 @@ async def test_restart_changed_dependency_stays_stale_without_adapter_call(
     light_id = next(
         device.id for device in first_run.registry.devices if device.type.value == "light"
     )
+    initial_brightness = await first_run.state_store.get(light_id, "brightness")
+    assert initial_brightness is not None
     execute_at = datetime.now(UTC) - timedelta(seconds=1)
     validated = first_run.plan_service.validate(
         Plan(
@@ -505,6 +507,13 @@ async def test_restart_changed_dependency_stays_stale_without_adapter_call(
                     value=60,
                     unit="%",
                     idempotency_key=f"restart-changed-intent-{change}",
+                    preconditions=[
+                        Precondition(
+                            device_id=light_id,
+                            capability="brightness",
+                            expected=initial_brightness.value,
+                        )
+                    ],
                 )
             ],
         )

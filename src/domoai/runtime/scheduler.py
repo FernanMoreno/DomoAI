@@ -6,8 +6,21 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
-from domoai.domain.models import Command, Plan, PlanStatus, RecurrenceRule
-from domoai.persistence.repositories import RecurringScheduleRepository, ScheduledPlanRepository
+from domoai.domain.errors import DomainError, ErrorCode
+from domoai.domain.models import (
+    BundleMemberCommitStatus,
+    Command,
+    ExecutionStatus,
+    ExecutionSummary,
+    Plan,
+    PlanStatus,
+    RecurrenceRule,
+)
+from domoai.persistence.repositories import (
+    BundleCommitRepository,
+    RecurringScheduleRepository,
+    ScheduledPlanRepository,
+)
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -34,6 +47,7 @@ class Scheduler:
         grace_window: timedelta = timedelta(seconds=900),
         poll_interval: timedelta = timedelta(seconds=30),
         recurring_repository: RecurringScheduleRepository | None = None,
+        bundle_repository: BundleCommitRepository | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.executor = executor
@@ -42,8 +56,16 @@ class Scheduler:
         self.grace_window = grace_window
         self.poll_interval = poll_interval
         self.recurring_repository = recurring_repository
+        self.bundle_repository = bundle_repository
         self.clock = clock or SystemClock()
         self.alive = False
+        self.last_lateness_seconds: float | None = None
+        self.max_lateness_seconds = 0.0
+        self.missed_total = 0
+        self.execution_unknown_total = 0
+        self.execution_unavailable_total = 0
+        self.execution_failed_total = 0
+        self.execution_partial_total = 0
 
     async def schedule(self, plan: Plan) -> None:
         await self.repository.schedule(plan)
@@ -51,8 +73,22 @@ class Scheduler:
     async def cancel(self, plan_id: str) -> bool:
         return await self.repository.cancel(plan_id)
 
-    async def reschedule(self, plan_id: str, execute_at: datetime) -> bool:
-        return await self.repository.reschedule(plan_id, execute_at)
+    async def reschedule(
+        self,
+        plan_id: str,
+        execute_at: datetime,
+        *,
+        expected_revision: int | None = None,
+        expected_validation_digest: str | None = None,
+        replacement_plan: Plan | None = None,
+    ) -> bool:
+        return await self.repository.reschedule(
+            plan_id,
+            execute_at,
+            expected_revision=expected_revision,
+            expected_validation_digest=expected_validation_digest,
+            replacement_plan=replacement_plan,
+        )
 
     async def list_pending(self) -> list[Plan]:
         return await self.repository.list_pending()
@@ -130,12 +166,25 @@ class Scheduler:
         )
         return True
 
-    async def _complete_scheduled_plan(self, plan_id: str) -> str:
+    async def _complete_scheduled_plan(
+        self, plan_id: str, execution: ExecutionSummary | None = None
+    ) -> str:
         plan_repository = self._plan_repository()
         if plan_repository is None:
-            if not await self.repository.mark_executed(plan_id):
+            derived_schedule_status = "executed"
+            if execution is not None:
+                statuses = {outcome.status for outcome in execution.outcomes}
+                if statuses & {ExecutionStatus.UNKNOWN, ExecutionStatus.UNAVAILABLE}:
+                    derived_schedule_status = "unknown"
+                elif statuses != {ExecutionStatus.CONFIRMED_SUCCESS}:
+                    derived_schedule_status = "failed"
+            if derived_schedule_status == "executed":
+                settled = await self.repository.mark_executed(plan_id)
+            else:
+                settled = await self.repository.reconcile_terminal(plan_id, derived_schedule_status)
+            if not settled:
                 raise RuntimeError(f"Could not settle scheduled plan {plan_id}")
-            return "executed"
+            return derived_schedule_status
         persisted = await plan_repository.get(plan_id)
         if persisted is None:
             raise RuntimeError("Execution returned without a persisted plan")
@@ -152,6 +201,124 @@ class Scheduler:
         if not transition_succeeded:
             raise RuntimeError(f"Could not settle scheduled plan {plan_id}")
         return schedule_status
+
+    async def _assert_schedule_evidence(self, scheduled_plan: Plan) -> None:
+        """Verify durable temporal evidence before crossing into execution."""
+
+        persisted_schedule = await self.repository.get(scheduled_plan.id)
+        if persisted_schedule is None or persisted_schedule[1] != "pending":
+            raise DomainError(
+                ErrorCode.SCHEDULE_EVIDENCE_MISMATCH,
+                "Scheduled plan is no longer pending",
+            )
+        stored, _status = persisted_schedule
+        if (
+            stored.execute_at != scheduled_plan.execute_at
+            or stored.schedule_revision != scheduled_plan.schedule_revision
+            or (stored.execution_window.digest if stored.execution_window else None)
+            != (scheduled_plan.execution_window.digest if scheduled_plan.execution_window else None)
+            or (stored.validation.digest if stored.validation else None)
+            != (scheduled_plan.validation.digest if scheduled_plan.validation else None)
+        ):
+            raise DomainError(
+                ErrorCode.SCHEDULE_EVIDENCE_MISMATCH,
+                "Scheduled row evidence differs from the claimed plan",
+            )
+
+        plan_repository = self._plan_repository()
+        if plan_repository is None:
+            return
+        persisted_plan = await plan_repository.get(scheduled_plan.id)
+        if persisted_plan is None:
+            return
+        if (
+            persisted_plan.execute_at != scheduled_plan.execute_at
+            or persisted_plan.schedule_revision != scheduled_plan.schedule_revision
+            or (persisted_plan.execution_window.digest if persisted_plan.execution_window else None)
+            != (scheduled_plan.execution_window.digest if scheduled_plan.execution_window else None)
+            or (persisted_plan.validation.digest if persisted_plan.validation else None)
+            != (scheduled_plan.validation.digest if scheduled_plan.validation else None)
+        ):
+            raise DomainError(
+                ErrorCode.SCHEDULE_EVIDENCE_MISMATCH,
+                "Plan repository evidence differs from the scheduled intent",
+            )
+
+    async def _chain_state_version_overrides(self, plan: Plan) -> dict[str, int]:
+        if self.bundle_repository is None or plan.validation is None:
+            return {}
+        bundle = await self.bundle_repository.get_for_plan(plan.id)
+        if bundle is None:
+            return {}
+        member = next((item for item in bundle.members if item.plan_id == plan.id), None)
+        if member is None or member.predecessor_plan_id is None:
+            return {}
+        predecessor = next(
+            (item for item in bundle.members if item.plan_id == member.predecessor_plan_id),
+            None,
+        )
+        if predecessor is None or predecessor.status.value != "executed":
+            return {}
+        evidence = predecessor.details.get("dependency_evidence")
+        if not isinstance(evidence, dict) or evidence.get("status") != "confirmed_success":
+            return {}
+        versions = evidence.get("state_versions")
+        if not isinstance(versions, dict):
+            return {}
+        dependencies = plan.validation.dependencies
+        if dependencies is None:
+            return {}
+        return {
+            key: value
+            for key, value in versions.items()
+            if key in dependencies.state_versions and isinstance(value, int)
+        }
+
+    async def _record_bundle_outcome(
+        self, plan: Plan, execution: ExecutionSummary
+    ) -> None:
+        if self.bundle_repository is None:
+            return
+        statuses = {outcome.status for outcome in execution.outcomes}
+        if statuses == {ExecutionStatus.CONFIRMED_SUCCESS}:
+            member_status = BundleMemberCommitStatus.EXECUTED
+            execution_status = ExecutionStatus.CONFIRMED_SUCCESS
+        elif statuses & {ExecutionStatus.UNKNOWN, ExecutionStatus.UNAVAILABLE}:
+            member_status = BundleMemberCommitStatus.UNKNOWN
+            execution_status = next(
+                status
+                for status in (ExecutionStatus.UNKNOWN, ExecutionStatus.UNAVAILABLE)
+                if status in statuses
+            )
+        else:
+            member_status = BundleMemberCommitStatus.FAILED
+            execution_status = next(iter(statuses), ExecutionStatus.FAILED)
+        state_store = getattr(self.executor.plan_service, "state_store", None)
+        state_versions: dict[str, int] = {}
+        if state_store is not None:
+            keys: set[str] = set()
+            if plan.validation and plan.validation.dependencies:
+                keys.update(plan.validation.dependencies.state_versions)
+            for command in plan.commands:
+                capability = self.executor.plan_service.capability_for_command(command)
+                if capability is not None:
+                    keys.add(f"{command.device_id}::{capability.name}")
+            for key in keys:
+                device_id, _, capability_name = key.partition("::")
+                state_versions[key] = state_store.state_version(device_id, capability_name)
+        details = {
+            "dependency_evidence": {
+                "predecessor_plan_id": plan.id,
+                "status": execution_status.value,
+                "state_versions": state_versions,
+            }
+        }
+        await self.bundle_repository.record_member_outcome(
+            plan.id,
+            status=member_status,
+            execution_status=execution_status,
+            details=details,
+        )
 
     async def run_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
         sweep_time = now or self.clock.now()
@@ -188,8 +355,22 @@ class Scheduler:
                 results.append({"plan_id": plan.id, "outcome": "error"})
                 continue
             overdue = sweep_time - plan.execute_at
+            lateness = max(0.0, overdue.total_seconds())
+            self.last_lateness_seconds = lateness
+            self.max_lateness_seconds = max(self.max_lateness_seconds, lateness)
             if overdue > self.grace_window:
+                self.missed_total += 1
                 await self.repository.mark_missed(plan.id)
+                if self.bundle_repository is not None:
+                    await self.bundle_repository.record_member_outcome(
+                        plan.id,
+                        status=BundleMemberCommitStatus.MISSED,
+                        execution_status=None,
+                        details={
+                            "reason": "outside_scheduler_grace_window",
+                            "execute_at": plan.execute_at.isoformat(),
+                        },
+                    )
                 self.audit.append(
                     event_type="schedule_missed",
                     actor="runtime",
@@ -203,8 +384,47 @@ class Scheduler:
                 results.append({"plan_id": plan.id, "outcome": "missed"})
                 continue
             try:
-                await self.executor.execute(plan)
-                await self._complete_scheduled_plan(plan.id)
+                await self._assert_schedule_evidence(plan)
+                state_version_overrides = await self._chain_state_version_overrides(plan)
+                if state_version_overrides:
+                    execution = await self.executor.execute(
+                        plan, state_version_overrides=state_version_overrides
+                    )
+                else:
+                    execution = await self.executor.execute(plan)
+                statuses = {outcome.status for outcome in execution.outcomes}
+                if ExecutionStatus.UNKNOWN in statuses:
+                    self.execution_unknown_total += 1
+                if ExecutionStatus.UNAVAILABLE in statuses:
+                    self.execution_unavailable_total += 1
+                if statuses and statuses != {ExecutionStatus.CONFIRMED_SUCCESS}:
+                    self.execution_failed_total += 1
+                if len(statuses) > 1:
+                    self.execution_partial_total += 1
+                schedule_outcome = await self._complete_scheduled_plan(plan.id, execution)
+                await self._record_bundle_outcome(plan, execution)
+            except DomainError as error:
+                if error.code is ErrorCode.SCHEDULE_EVIDENCE_MISMATCH:
+                    await self.repository.reconcile_terminal(plan.id, "failed")
+                    self.audit.append(
+                        event_type="schedule_evidence_rejected",
+                        actor="runtime",
+                        subject_id=plan.id,
+                        payload={"error_code": error.code.value},
+                    )
+                    results.append({"plan_id": plan.id, "outcome": "failed"})
+                    continue
+                self.audit.append(
+                    event_type="schedule_execution_error",
+                    actor="runtime",
+                    subject_id=plan.id,
+                    payload={
+                        "error": str(error)[:200],
+                        "error_code": error.code.value,
+                    },
+                )
+                results.append({"plan_id": plan.id, "outcome": "error"})
+                continue
             except Exception as error:
                 try:
                     reconciled_status = await self._reconcile_scheduled_plan(plan.id)
@@ -230,7 +450,7 @@ class Scheduler:
                 )
                 results.append({"plan_id": plan.id, "outcome": "error"})
                 continue
-            results.append({"plan_id": plan.id, "outcome": "executed"})
+            results.append({"plan_id": plan.id, "outcome": schedule_outcome})
         return results
 
     async def schedule_recurring(

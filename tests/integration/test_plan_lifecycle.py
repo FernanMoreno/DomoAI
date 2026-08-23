@@ -15,6 +15,8 @@ from domoai.domain.models import (
     ExecutionStatus,
     Plan,
     PlanStatus,
+    Policy,
+    PolicyAction,
     Precondition,
     RiskClass,
     SafetyLimit,
@@ -1053,6 +1055,8 @@ async def test_legacy_validation_without_dependency_evidence_fails_closed() -> N
 async def test_state_marked_stale_in_background_forces_revalidation() -> None:
     adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    initial_state = await state_store.get(device_id, "brightness")
+    assert initial_state is not None
     plan = Plan(
         id="plan-background-stale-1",
         commands=[
@@ -1063,6 +1067,13 @@ async def test_state_marked_stale_in_background_forces_revalidation() -> None:
                 value=60,
                 unit="%",
                 idempotency_key="intent-background-stale-1",
+                preconditions=[
+                    Precondition(
+                        device_id=device_id,
+                        capability="brightness",
+                        expected=initial_state.value,
+                    )
+                ],
             )
         ],
     )
@@ -1560,6 +1571,206 @@ async def test_precondition_sequencing_sees_earlier_command_confirmed_effect() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_status", "should_execute"),
+    [
+        (StateStatus.CURRENT, True),
+        (StateStatus.STALE, False),
+        (StateStatus.UNAVAILABLE, False),
+        (StateStatus.INVALID, False),
+    ],
+)
+async def test_physical_precondition_requires_current_evidence(
+    snapshot_status: StateStatus, should_execute: bool
+) -> None:
+    adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    source = await state_store.get(switch_id, "power")
+    assert source is not None
+    await state_store.save(source.model_copy(update={"status": snapshot_status}))
+    plan = Plan(
+        id=f"plan-precondition-freshness-{snapshot_status.value}",
+        commands=[
+            Command(
+                id=f"command-precondition-freshness-{snapshot_status.value}",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key=f"intent-precondition-freshness-{snapshot_status.value}",
+                preconditions=[
+                    Precondition(
+                        device_id=switch_id,
+                        capability="power",
+                        expected=source.value,
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert bool(adapter.calls) is should_execute
+    assert summary.outcomes[0].status is (
+        ExecutionStatus.CONFIRMED_SUCCESS if should_execute else ExecutionStatus.REJECTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_stale_exception_is_policy_bound_and_audited() -> None:
+    adapter, registry, state_store, audit, _, _ = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    source = await state_store.get(switch_id, "power")
+    assert source is not None
+    await state_store.save(source.model_copy(update={"status": StateStatus.STALE}))
+    policy_service = PlanService(
+        registry,
+        state_store,
+        PolicyEngine(
+            [
+                Policy(
+                    id="policy-explicit-stale",
+                    action=PolicyAction.ALLOW,
+                    target={"device_id": light_id, "command": "set_brightness"},
+                    allows_stale=True,
+                )
+            ]
+        ),
+        audit,
+    )
+    executor = PlanExecutor(adapter, policy_service, audit)
+    plan = Plan(
+        id="plan-explicit-stale-exception",
+        commands=[
+            Command(
+                id="command-explicit-stale-exception",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-explicit-stale-exception",
+                preconditions=[
+                    Precondition(
+                        device_id=switch_id,
+                        capability="power",
+                        expected=source.value,
+                        allow_stale=True,
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = await executor.execute(policy_service.validate(plan))
+
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    exception_events = [
+        event
+        for event in audit.events
+        if event.event_type == "precondition_stale_exception"
+    ]
+    assert exception_events
+    assert exception_events[0].payload["policy_id"] == "policy-explicit-stale"
+    assert exception_events[0].payload["authority"] == "policy-engine"
+
+
+@pytest.mark.asyncio
+async def test_stale_projected_state_cannot_authorize_later_command() -> None:
+    adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    source = await state_store.get(switch_id, "power")
+    assert source is not None
+    await state_store.save(source.model_copy(update={"status": StateStatus.STALE}))
+    plan = Plan(
+        id="plan-stale-projection-composition",
+        commands=[
+            Command(
+                id="command-stale-projection-on",
+                device_id=switch_id,
+                command="turn_on",
+                idempotency_key="intent-stale-projection-on",
+            ),
+            Command(
+                id="command-stale-projection-brightness",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-stale-projection-brightness",
+                preconditions=[
+                    Precondition(device_id=switch_id, capability="power", expected=True)
+                ],
+            ),
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert summary.outcomes[0].status is ExecutionStatus.REJECTED
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_jit_rejects_precondition_that_becomes_stale_after_preflight() -> None:
+    state_store = StateStore()
+
+    class StalingAdapter(SimulatedHomeAdapter):
+        async def execute(self, command, execution_context=None):
+            if not self.calls:
+                snapshot = await state_store.get(switch_id, "power")
+                assert snapshot is not None
+                await state_store.save(snapshot.model_copy(update={"status": StateStatus.STALE}))
+            return await super().execute(command, execution_context)
+
+    adapter = StalingAdapter()
+    registry = DeviceRegistry()
+    audit = AuditLog()
+    await DiscoveryService(adapter, registry, state_store, audit).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    executor = PlanExecutor(adapter, plan_service, audit)
+    light_id = next(device.id for device in registry.devices if device.type.value == "light")
+    switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    source = await state_store.get(switch_id, "power")
+    assert source is not None
+    plan = Plan(
+        id="plan-jit-freshness-race",
+        commands=[
+            Command(
+                id="command-jit-freshness-first",
+                device_id=light_id,
+                command="turn_on",
+                idempotency_key="intent-jit-freshness-first",
+            ),
+            Command(
+                id="command-jit-freshness-second",
+                device_id=light_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-jit-freshness-second",
+                preconditions=[
+                    Precondition(
+                        device_id=switch_id,
+                        capability="power",
+                        expected=source.value,
+                    )
+                ],
+            ),
+        ],
+    )
+
+    summary = await executor.execute(plan_service.validate(plan))
+
+    assert len(adapter.calls) == 1
+    assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert summary.outcomes[1].status is ExecutionStatus.REJECTED
+
+
+@pytest.mark.asyncio
 async def test_double_execution_of_terminal_plan_is_refused(tmp_path) -> None:
     adapter, registry, _, _, plan_service, executor, _ = await build_plan_context_with_repository(
         tmp_path
@@ -1713,6 +1924,14 @@ class _InterleavingPlanRepository:
     async def save(self, plan: Plan) -> None:
         await asyncio.sleep(0)
         await self._inner.save(plan)
+
+    async def save_approval(self, plan: Plan) -> None:
+        await asyncio.sleep(0)
+        await self._inner.save_approval(plan)
+
+    async def settle_execution(self, plan: Plan) -> None:
+        await asyncio.sleep(0)
+        await self._inner.settle_execution(plan)
 
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]

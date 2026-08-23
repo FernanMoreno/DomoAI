@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import AsyncIterator, Sequence
+from datetime import datetime, timedelta
+from typing import Literal, cast
 
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.domain.models import (
@@ -11,15 +15,19 @@ from domoai.domain.models import (
     AdapterHealth,
     AdapterSnapshot,
     Command,
+    ControlLeaseStatus,
     ExecutionStatus,
+    PhysicalBaseline,
     SourceEvent,
     SourceRef,
     StateChangedEvent,
     StateSnapshot,
     StateStatus,
+    TakeoverResult,
 )
 from domoai.domain.provider import ProviderCommand
 from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.control_takeover import ControlTakeoverRequest
 from domoai.runtime.execution_context import ExecutionContext
 
 
@@ -133,6 +141,100 @@ class HomeAssistantProviderAdapter:
             or SourceRef(adapter_id=self.adapter_id, external_id=source_entity_id),
             message=result.message,
         )
+
+    async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
+        """Read a declared HA battery baseline without pretending to disable native control.
+
+        HA route mappings currently expose telemetry and service commands, but
+        do not expose a certified native-scheduler disable operation. Active
+        native ownership therefore fails closed here. The executor performs the
+        first command and confirms its readback after this admission handshake.
+        """
+
+        now = self._clock.now()
+        binding = next(
+            (
+                item
+                for item in self.provider.battery_dispatch_bindings.values()
+                if item.device_id == request.device_id
+            ),
+            None,
+        )
+        if binding is None:
+            return self._takeover_rejected(request, now, "battery_binding_not_found")
+        if request.native_scheduler_status == "active":
+            return self._takeover_rejected(
+                request, now, "native_scheduler_disable_not_configured"
+            )
+        snapshot = await self.provider.snapshot()
+        state = next(
+            (
+                item
+                for item in snapshot.source_states
+                if str(item.get("entity_id")) == binding.power_feedback_entity_id
+                and str(item.get("capability")) == binding.power_feedback_capability
+            ),
+            None,
+        )
+        value = state.get("value") if state is not None else None
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return self._takeover_rejected(request, now, "baseline_unavailable")
+        if state is None or not state.get("available", True):
+            return self._takeover_rejected(request, now, "baseline_unavailable")
+        baseline = PhysicalBaseline(
+            device_id=request.device_id,
+            capability=binding.power_feedback_capability,
+            power_kw=float(value),
+            observed_at=now,
+            received_at=now,
+            source_ref=SourceRef(
+                adapter_id=self.adapter_id,
+                external_id=binding.power_feedback_entity_id,
+            ),
+            state_revision=f"ha:{now.isoformat()}",
+            native_scheduler_status=cast(
+                Literal["disabled", "inactive", "active", "unknown"],
+                request.native_scheduler_status,
+            ),
+        )
+        return TakeoverResult(
+            lease_id=f"ha-control-{request.device_id}-{request.plan_id}",
+            status=ControlLeaseStatus.ACQUIRED,
+            owner=request.owner,
+            device_id=request.device_id,
+            plan_id=request.plan_id,
+            acquired_at=now,
+            expires_at=now + timedelta(seconds=request.lease_seconds),
+            baseline=baseline,
+            first_command_id=request.first_command_id,
+            first_command_confirmed=False,
+            evidence_digest=self._takeover_digest(request, baseline),
+        )
+
+    def _takeover_rejected(
+        self, request: ControlTakeoverRequest, now: datetime, failure_code: str
+    ) -> TakeoverResult:
+        return TakeoverResult(
+            lease_id=f"rejected-{request.plan_id}",
+            status=ControlLeaseStatus.REJECTED,
+            owner=request.owner,
+            device_id=request.device_id,
+            plan_id=request.plan_id,
+            acquired_at=now,
+            expires_at=now + timedelta(seconds=request.lease_seconds),
+            first_command_id=request.first_command_id,
+            failure_code=failure_code,
+            evidence_digest=self._takeover_digest(request, failure_code),
+        )
+
+    @staticmethod
+    def _takeover_digest(request: ControlTakeoverRequest, evidence: object) -> str:
+        canonical = json.dumps(
+            {"request": request.model_dump(mode="json"), "evidence": str(evidence)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
     def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         return self._event_stream()

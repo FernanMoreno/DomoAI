@@ -13,8 +13,9 @@ from pydantic import ValidationError
 
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
+from domoai.application.optimization_worker import OptimizationWorker, WorkerOperationError
 from domoai.application.state_service import StateService
-from domoai.domain.errors import DomainError
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Command, DeviceType, Plan, PlanStatus, Policy, RecurrenceRule
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
@@ -29,8 +30,13 @@ from domoai.mcp.resources import (
 from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.horizon import Horizon
 from domoai.optimizer.ports import EnergyContextProvider
+from domoai.optimizer.providers import EnergyProviderError
 from domoai.persistence.repositories import AuditEventRepository, PlanRepository
-from domoai.runtime.approval_store import ApprovalStore, OperatorPrincipalProvider
+from domoai.runtime.approval_store import (
+    ApprovalStore,
+    OperatorApprovalAssertionProvider,
+    OperatorPrincipalProvider,
+)
 from domoai.runtime.bundle_commit import BundleCommitRequest, BundleCommitService
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.metrics import RuntimeMetricsCollector
@@ -55,6 +61,9 @@ class DomoticsMcpContext:
     metrics: RuntimeMetricsCollector | None = None
     bundle_commit_service: BundleCommitService | None = None
     operator_principal_provider: OperatorPrincipalProvider | None = None
+    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None
+    blocking_worker: OptimizationWorker | None = None
+    provider_timeout_seconds: float = 10.0
     clock: Clock = field(default_factory=SystemClock)
 
 
@@ -75,9 +84,23 @@ async def _resolve_plan(context: DomoticsMcpContext, plan_id: str) -> Plan | Non
 
 
 async def _persist_plan(context: DomoticsMcpContext, plan: Plan) -> Plan:
-    context.plans[plan.id] = plan
     if context.plan_repository is not None:
         await context.plan_repository.save(plan)
+    context.plans[plan.id] = plan
+    return plan
+
+
+async def _persist_validated_plan(context: DomoticsMcpContext, plan: Plan) -> Plan:
+    if context.plan_repository is not None:
+        await context.plan_repository.save_validation(plan)
+    context.plans[plan.id] = plan
+    return plan
+
+
+async def _persist_approved_plan(context: DomoticsMcpContext, plan: Plan) -> Plan:
+    if context.plan_repository is not None:
+        await context.plan_repository.save_approval(plan)
+    context.plans[plan.id] = plan
     return plan
 
 
@@ -152,13 +175,33 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if context.energy_context_provider is None:
                 raise ValueError("Energy context provider is unavailable")
             requested_horizon = Horizon.model_validate(horizon)
-            energy_context = context.energy_context_provider.get_context(requested_horizon)
+            if (
+                context.blocking_worker is None
+                or context.blocking_worker.service is not context.energy_context_provider
+            ):
+                context.blocking_worker = OptimizationWorker(context.energy_context_provider)
+            worker = context.blocking_worker
+            energy_context = await worker.run_blocking(
+                context.energy_context_provider.get_context,
+                requested_horizon,
+                timeout=context.provider_timeout_seconds,
+            )
             parsed_context = EnergyContext.model_validate(energy_context)
             if parsed_context.horizon != requested_horizon:
                 raise ValueError("Energy context horizon does not match the request")
             return energy_context_snapshot(
                 parsed_context,
                 context.discovery.state_store.runtime_revision,
+            )
+        except WorkerOperationError as error:
+            if isinstance(error.cause, EnergyProviderError):
+                return error_envelope(error.cause)
+            return error_envelope(
+                DomainError(
+                    ErrorCode.VALIDATION_ERROR,
+                    "Energy provider worker could not complete the request",
+                    details={"worker_code": error.code},
+                )
             )
         except (ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -180,11 +223,11 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 agent_request_id=agent_request_id or str(uuid4()),
             )
             validated = context.facade.validate_plan(plan)
-            await _persist_plan(context, validated)
+            await _persist_validated_plan(context, validated)
             return {
                 "schema_version": "v1",
                 "plan_id": validated.id,
-                "command": parsed_command.model_dump(mode="json"),
+                "command": validated.commands[0].model_dump(mode="json"),
                 "validation": validated.validation.model_dump(mode="json")
                 if validated.validation
                 else None,
@@ -208,7 +251,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if parsed_plan.agent_request_id is None:
                 parsed_plan = parsed_plan.model_copy(update={"agent_request_id": str(uuid4())})
             validated = context.facade.validate_plan(parsed_plan)
-            await _persist_plan(context, validated)
+            await _persist_validated_plan(context, validated)
             return {
                 "schema_version": "v1",
                 "plan": validated.model_dump(mode="json"),
@@ -253,15 +296,32 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 if context.operator_principal_provider is not None
                 else None
             )
-            grant = (
-                context.approval_store.issue_authenticated(
-                    plan, principal=principal, bundle_digest=bundle_digest
+            if context.operator_approval_assertion_provider is not None:
+                assertion = context.operator_approval_assertion_provider(
+                    plan.id, validation_digest, bundle_digest
                 )
-                if principal is not None
-                else context.approval_store.issue_legacy(
+                if assertion is None:
+                    raise DomainError(
+                        ErrorCode.APPROVAL_ASSERTION_REQUIRED,
+                        "The trusted host did not provide an explicit human approval assertion",
+                    )
+                if principal is None:
+                    principal = assertion.principal
+                grant = context.approval_store.issue_authenticated(
+                    plan,
+                    principal=principal,
+                    assertion=assertion,
+                    bundle_digest=bundle_digest,
+                )
+            elif principal is not None:
+                raise DomainError(
+                    ErrorCode.APPROVAL_ASSERTION_REQUIRED,
+                    "An authenticated operator principal is not human consent",
+                )
+            else:
+                grant = context.approval_store.issue_legacy(
                     plan, operator_token=operator_token, bundle_digest=bundle_digest
                 )
-            )
             return {
                 "schema_version": "v1",
                 "approval_id": grant.approval_id,
@@ -299,7 +359,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     approval_id, plan, bundle_digest=bundle_digest
                 )
                 plan = context.facade.approve_plan(plan, grant=grant)
-                await _persist_plan(context, plan)
+                await _persist_approved_plan(context, plan)
             if dry_run:
                 return {
                     "schema_version": "v1",
@@ -307,6 +367,10 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     "plan": plan.model_dump(mode="json"),
                 }
             execution = await context.facade.execute_plan(plan)
+            if context.plan_repository is not None:
+                persisted = await context.plan_repository.get(plan.id)
+                if persisted is not None:
+                    context.plans[persisted.id] = persisted
             return {
                 "schema_version": "v1",
                 "plan_id": plan.id,
@@ -341,6 +405,11 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
             parsed_execute_at = _parse_timezone_aware_datetime(execute_at)
+            if plan.execute_at != parsed_execute_at or plan.execution_window is None:
+                raise DomainError(
+                    ErrorCode.SCHEDULE_EVIDENCE_MISMATCH,
+                    "The plan must be validated with its exact execution window before scheduling",
+                )
             if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
                 if approval_id is None:
                     raise ValueError("Plan requires an approval_id issued via request_approval")
@@ -439,11 +508,20 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
 
     @server.tool(
         name="reschedule_plan",
-        description="Move a pending scheduled plan to a different future time.",
+        description=(
+            "Request a temporal revision for a pending plan. The legacy generic "
+            "mutation is fail-closed; a changed time must be validated and "
+            "approved again before admission."
+        ),
         annotations=mutation_annotations,
         structured_output=True,
     )
-    async def reschedule_plan(plan_id: str, execute_at: str) -> dict[str, Any]:
+    async def reschedule_plan(
+        plan_id: str,
+        execute_at: str,
+        validation_digest: str | None = None,
+        schedule_revision: int | None = None,
+    ) -> dict[str, Any]:
         try:
             if context.scheduler is None:
                 raise ValueError("Scheduling is unavailable in this deployment")
@@ -451,21 +529,62 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if plan is None:
                 raise ValueError(f"Unknown plan: {plan_id}")
             parsed_execute_at = _parse_timezone_aware_datetime(execute_at)
-            rescheduled = await context.scheduler.reschedule(plan_id, parsed_execute_at)
-            if rescheduled:
-                scheduled_expiry = parsed_execute_at + context.facade.plan_service.DEFAULT_PLAN_TTL
-                await _persist_plan(
-                    context,
-                    plan.model_copy(
-                        update={
-                            "execute_at": parsed_execute_at,
-                            "expires_at": max(
-                                plan.expires_at or parsed_execute_at, scheduled_expiry
-                            ),
-                        }
-                    ),
+            is_bundle_member = (
+                context.bundle_commit_service is not None
+                and await context.bundle_commit_service.is_scheduled_member(plan_id)
+            )
+            if is_bundle_member:
+                context.facade.plan_service.audit.append(
+                    event_type="reschedule_rejected",
+                    actor="runtime",
+                    subject_id=plan_id,
+                    payload={
+                        "reason": ErrorCode.BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN.value,
+                        "requested_execute_at": parsed_execute_at.isoformat(),
+                    },
                 )
-            return {"schema_version": "v1", "plan_id": plan_id, "rescheduled": rescheduled}
+                raise DomainError(
+                    ErrorCode.BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN,
+                    "Bundle members require a new bundle revision; generic rescheduling "
+                    "is forbidden",
+                )
+            scheduled = await context.scheduler.repository.get(plan_id)
+            if scheduled is None or scheduled[1] != "pending":
+                return {"schema_version": "v1", "plan_id": plan_id, "rescheduled": False}
+            scheduled_plan, _status = scheduled
+            context.facade.plan_service.audit.append(
+                event_type="reschedule_rejected",
+                actor="runtime",
+                subject_id=plan_id,
+                payload={
+                    "reason": ErrorCode.RESCHEDULE_REQUIRES_REVALIDATION.value,
+                    "old_execute_at": scheduled_plan.execute_at.isoformat()
+                    if scheduled_plan.execute_at
+                    else None,
+                    "requested_execute_at": parsed_execute_at.isoformat(),
+                    "old_validation_digest": scheduled_plan.validation.digest
+                    if scheduled_plan.validation
+                    else None,
+                    "old_schedule_revision": scheduled_plan.schedule_revision,
+                },
+            )
+            raise DomainError(
+                ErrorCode.RESCHEDULE_REQUIRES_REVALIDATION,
+                "Rescheduling changes physical intent; create and validate a new temporal revision",
+                details={
+                    "old_execute_at": scheduled_plan.execute_at.isoformat()
+                    if scheduled_plan.execute_at
+                    else None,
+                    "requested_execute_at": parsed_execute_at.isoformat(),
+                    "old_validation_digest": scheduled_plan.validation.digest
+                    if scheduled_plan.validation
+                    else None,
+                    "old_schedule_revision": scheduled_plan.schedule_revision,
+                    "provided_validation_digest": validation_digest,
+                    "provided_schedule_revision": schedule_revision,
+                    "requires_revalidation": True,
+                },
+            )
         except (ValueError, ValidationError) as error:
             return error_envelope(error)
 
@@ -593,9 +712,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             events = await context.audit_repository.list_events(
                 event_type=event_type,
                 subject_id=subject_id,
-                since=(
-                    _parse_timezone_aware_datetime(since) if since is not None else None
-                ),
+                since=(_parse_timezone_aware_datetime(since) if since is not None else None),
                 limit=limit,
             )
             return {

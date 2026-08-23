@@ -19,13 +19,16 @@ from domoai.domain.models import (
     ExecutionSummary,
     Plan,
     PlanStatus,
+    PolicyDecision,
     Precondition,
     StateSnapshot,
     StateStatus,
 )
 from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.control_takeover import ControlTakeoverPort
 from domoai.runtime.events import AuditLog
 from domoai.runtime.execution_context import ExecutionContext
+from domoai.runtime.freshness import FreshnessDecision, FreshnessEvaluator
 from domoai.runtime.ports import (
     AdapterPort,
     ExecutionOutcomePort,
@@ -40,6 +43,18 @@ class _PreflightResult:
     command: Command
     before_state: StateSnapshot | None
     error: ErrorDetail | None
+
+
+@dataclass(frozen=True)
+class _PreconditionFailure:
+    precondition: Precondition
+    decision: FreshnessDecision
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            **self.precondition.model_dump(mode="json"),
+            "freshness": self.decision.details(),
+        }
 
 
 class _ReadbackPersistenceError(Exception):
@@ -59,6 +74,7 @@ class PlanExecutor:
         clock: Clock | None = None,
         safety_kernel: SafetyKernel | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        control_takeover: ControlTakeoverPort | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
@@ -67,8 +83,10 @@ class PlanExecutor:
         self.outcome_repository = outcome_repository
         self.state_snapshot_repository = state_snapshot_repository
         self.clock = clock or SystemClock()
+        self.freshness_evaluator = FreshnessEvaluator(self.clock)
         self.safety_kernel = safety_kernel
         self._sleep = sleep or asyncio.sleep
+        self.control_takeover = control_takeover
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -81,7 +99,9 @@ class PlanExecutor:
 
     _CLAIMABLE_STATUSES = frozenset({PlanStatus.READY, PlanStatus.APPROVED})
 
-    async def execute(self, plan: Plan) -> ExecutionSummary:
+    async def execute(
+        self, plan: Plan, *, state_version_overrides: dict[str, int] | None = None
+    ) -> ExecutionSummary:
         if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
                 ErrorCode.NOT_YET_DUE,
@@ -94,7 +114,9 @@ class PlanExecutor:
                     ErrorCode.INVALID_TRANSITION,
                     "Plan is already executing or has reached a terminal status",
                 )
-        self.plan_service.assert_executable(plan)
+        self.plan_service.assert_executable(
+            plan, state_version_overrides=state_version_overrides
+        )
         if self.plan_repository is not None:
             claimed = await self.plan_repository.claim_for_execution(
                 plan.model_copy(update={"status": PlanStatus.EXECUTING}),
@@ -135,7 +157,7 @@ class PlanExecutor:
                 )
             summary = ExecutionSummary(outcomes=preflight_outcomes)
             if self.plan_repository is not None:
-                await self.plan_repository.save(
+                await self.plan_repository.settle_execution(
                     plan.model_copy(
                         update={
                             "status": self._terminal_plan_status(preflight_outcomes),
@@ -169,22 +191,119 @@ class PlanExecutor:
                 },
             )
             return summary
+        takeover_first_command_id: str | None = None
+        if self.control_takeover is not None:
+            takeover = await self.control_takeover.acquire_for_plan(
+                plan_id=plan.id, commands=plan.commands
+            )
+            if takeover is not None:
+                self.audit.append(
+                    event_type="control_takeover_result",
+                    actor="runtime",
+                    subject_id=plan.id,
+                    payload=takeover.model_dump(mode="json"),
+                )
+                if takeover.status.value != "acquired":
+                    takeover_outcomes = [
+                        ExecutionOutcome(
+                            plan_id=plan.id,
+                            command_id=command.id,
+                            execution_attempt_id=execution_attempt_id,
+                            status=ExecutionStatus.REJECTED,
+                            completed_at=self.clock.now(),
+                            error=ErrorDetail(
+                                code=ErrorCode.CONTROL_TAKEOVER_FAILED,
+                                message="Physical control was not acquired before dispatch",
+                                device_id=command.device_id,
+                                retryable=True,
+                                details={
+                                    "failure_code": takeover.failure_code,
+                                    "takeover_evidence_digest": takeover.evidence_digest,
+                                },
+                            ),
+                        )
+                        for command in plan.commands
+                    ]
+                    for outcome in takeover_outcomes:
+                        if self.outcome_repository is not None:
+                            await self.outcome_repository.save(outcome)
+                        self.audit.append(
+                            event_type="command_execution_outcome",
+                            actor="runtime",
+                            subject_id=outcome.command_id,
+                            payload={
+                                "plan_id": plan.id,
+                                "status": outcome.status.value,
+                                "control_takeover_failed": True,
+                            },
+                        )
+                    summary = ExecutionSummary(outcomes=takeover_outcomes)
+                    if self.plan_repository is not None:
+                        await self.plan_repository.settle_execution(
+                            plan.model_copy(
+                                update={
+                                    "status": PlanStatus.FAILED,
+                                    "execution": summary,
+                                }
+                            )
+                        )
+                    return summary
+                takeover_first_command_id = takeover.first_command_id
         outcomes: list[ExecutionOutcome] = []
         seen_keys: set[str] = set()
-        for command in plan.commands:
+        for command_index, command in enumerate(plan.commands):
+            semantic = self.plan_service.validate_command_semantics(command)
+            command = semantic.command
+            capability = semantic.capability
+            if semantic.errors:
+                outcome = ExecutionOutcome(
+                    plan_id=plan.id,
+                    command_id=command.id,
+                    execution_attempt_id=execution_attempt_id,
+                    status=ExecutionStatus.REJECTED,
+                    completed_at=self.clock.now(),
+                    error=semantic.errors[0].model_copy(
+                        update={
+                            "details": {
+                                **semantic.errors[0].details,
+                                "phase": "jit",
+                            }
+                        }
+                    ),
+                )
+                outcomes.append(outcome)
+                if self.outcome_repository is not None:
+                    await self.outcome_repository.save(outcome)
+                self.audit.append(
+                    event_type="command_execution_outcome",
+                    actor="runtime",
+                    subject_id=command.id,
+                    payload={
+                        "plan_id": plan.id,
+                        "status": outcome.status.value,
+                        "execution_attempt_id": execution_attempt_id,
+                    },
+                )
+                continue
             if command.idempotency_key in seen_keys:
                 raise DomainError(
                     ErrorCode.DUPLICATE_COMMAND,
                     "Duplicate command idempotency key detected during execution",
                 )
             seen_keys.add(command.idempotency_key)
-            capability = self.plan_service.capability_for_command(command)
             before_state = (
                 await self.plan_service.state_store.get(command.device_id, capability.name)
                 if capability is not None
                 else None
             )
-            failed_preconditions = await self._failed_preconditions(command)
+            failed_preconditions = await self._failed_preconditions(
+                command,
+                policy_decision=(
+                    plan.policy_decisions[command_index]
+                    if command_index < len(plan.policy_decisions)
+                    else None
+                ),
+            )
             if failed_preconditions:
                 outcome = ExecutionOutcome(
                     plan_id=plan.id,
@@ -199,7 +318,7 @@ class PlanExecutor:
                         retryable=True,
                         details={
                             "preconditions": [
-                                item.model_dump(mode="json") for item in failed_preconditions
+                                item.as_payload() for item in failed_preconditions
                             ]
                         },
                     ),
@@ -229,7 +348,9 @@ class PlanExecutor:
                     error: ErrorDetail | None = None
                     if acknowledgement.accepted:
                         after_state, readback_error = await self._readback_until_settled(
-                            command, capability.name if capability else None
+                            command,
+                            capability.name if capability else None,
+                            before_state=before_state,
                         )
                         if readback_error is not None:
                             status = ExecutionStatus.UNKNOWN
@@ -268,7 +389,10 @@ class PlanExecutor:
                                     retryable=True,
                                 )
                         elif self._postcondition_matches(
-                            command, capability.name if capability else None, after_state
+                            command,
+                            capability.name if capability else None,
+                            after_state,
+                            before_state=before_state,
                         ):
                             reconciliation_error = await self._reconcile_post_write(command)
                             if reconciliation_error is not None:
@@ -333,10 +457,44 @@ class PlanExecutor:
                     "adapter_request_id": outcome.adapter_request_id,
                 },
             )
+            if takeover_first_command_id == outcome.command_id:
+                self.audit.append(
+                    event_type="control_takeover_first_command_result",
+                    actor="runtime",
+                    subject_id=plan.id,
+                    payload={
+                        "plan_id": plan.id,
+                        "command_id": outcome.command_id,
+                        "confirmed": outcome.status is ExecutionStatus.CONFIRMED_SUCCESS,
+                    },
+                )
+                if outcome.status is not ExecutionStatus.CONFIRMED_SUCCESS:
+                    for remaining in plan.commands[command_index + 1 :]:
+                        blocked = ExecutionOutcome(
+                            plan_id=plan.id,
+                            command_id=remaining.id,
+                            execution_attempt_id=execution_attempt_id,
+                            status=ExecutionStatus.REJECTED,
+                            completed_at=self.clock.now(),
+                            error=ErrorDetail(
+                                code=ErrorCode.CONTROL_TAKEOVER_FAILED,
+                                message=(
+                                    "Later dispatch command blocked because the first "
+                                    "takeover command was not confirmed"
+                                ),
+                                device_id=remaining.device_id,
+                                retryable=True,
+                                details={"first_command_id": outcome.command_id},
+                            ),
+                        )
+                        outcomes.append(blocked)
+                        if self.outcome_repository is not None:
+                            await self.outcome_repository.save(blocked)
+                    break
         summary = ExecutionSummary(outcomes=outcomes)
         if self.plan_repository is not None:
             terminal_status = self._terminal_plan_status(outcomes)
-            await self.plan_repository.save(
+            await self.plan_repository.settle_execution(
                 plan.model_copy(update={"status": terminal_status, "execution": summary})
             )
         self.audit.append(
@@ -370,20 +528,38 @@ class PlanExecutor:
         )
 
     async def _preflight(self, plan: Plan) -> list[_PreflightResult] | None:
-        projected_state: dict[tuple[str, str], object] = {}
+        projected_state: dict[tuple[str, str], StateSnapshot] = {}
         results: list[_PreflightResult] = []
-        for command in plan.commands:
-            capability = self.plan_service.capability_for_command(command)
+        for command_index, command in enumerate(plan.commands):
+            semantic = self.plan_service.validate_command_semantics(command)
+            command = semantic.command
+            capability = semantic.capability
             before_state = (
                 await self.plan_service.state_store.get(command.device_id, capability.name)
                 if capability is not None
                 else None
             )
             failed_preconditions = await self._failed_preconditions(
-                command, projected_state=projected_state
+                command,
+                projected_state=projected_state,
+                policy_decision=(
+                    plan.policy_decisions[command_index]
+                    if command_index < len(plan.policy_decisions)
+                    else None
+                ),
             )
-            if failed_preconditions:
-                error: ErrorDetail | None = ErrorDetail(
+            error: ErrorDetail | None = None
+            if semantic.errors:
+                error = semantic.errors[0].model_copy(
+                    update={
+                        "details": {
+                            **semantic.errors[0].details,
+                            "phase": "plan_preflight",
+                        }
+                    }
+                )
+            elif failed_preconditions:
+                error = ErrorDetail(
                     code=ErrorCode.PRECONDITION_FAILED,
                     message=f"{len(failed_preconditions)} precondition(s) not satisfied",
                     device_id=command.device_id,
@@ -392,40 +568,31 @@ class PlanExecutor:
                     details={
                         "phase": "plan_preflight",
                         "preconditions": [
-                            item.model_dump(mode="json") for item in failed_preconditions
+                            item.as_payload() for item in failed_preconditions
                         ],
                     },
                 )
             else:
-                value_errors = self.plan_service.validate_command_value(command)
-                if value_errors:
-                    error = value_errors[0].model_copy(
+                safety_error = self._safety_violation(command, capability)
+                error = (
+                    safety_error.model_copy(
                         update={
                             "details": {
-                                **value_errors[0].details,
+                                **safety_error.details,
                                 "phase": "plan_preflight",
                             }
                         }
                     )
-                else:
-                    safety_error = self._safety_violation(command, capability)
-                    error = (
-                        safety_error.model_copy(
-                            update={
-                                "details": {
-                                    **safety_error.details,
-                                    "phase": "plan_preflight",
-                                }
-                            }
-                        )
-                        if safety_error is not None
-                        else None
-                    )
+                    if safety_error is not None
+                    else None
+                )
             results.append(_PreflightResult(command, before_state, error))
             projected = self._projected_postcondition(command, capability)
-            if projected is not None:
+            if projected is not None and before_state is not None:
                 capability_name, value = projected
-                projected_state[(command.device_id, capability_name)] = value
+                projected_state[(command.device_id, capability_name)] = before_state.model_copy(
+                    update={"capability": capability_name, "value": value}
+                )
         return results if any(result.error is not None for result in results) else None
 
     def _preflight_outcomes(
@@ -460,24 +627,43 @@ class PlanExecutor:
         self,
         command: Command,
         *,
-        projected_state: dict[tuple[str, str], object] | None = None,
-    ) -> list[Precondition]:
-        failed: list[Precondition] = []
+        projected_state: dict[tuple[str, str], StateSnapshot] | None = None,
+        policy_decision: PolicyDecision | None = None,
+    ) -> list[_PreconditionFailure]:
+        failed: list[_PreconditionFailure] = []
         for precondition in command.preconditions:
             key = (precondition.device_id, precondition.capability)
-            if projected_state is not None and key in projected_state:
-                if projected_state[key] != precondition.expected:
-                    failed.append(precondition)
-                continue
-            snapshot = await self.plan_service.state_store.get(
-                precondition.device_id, precondition.capability
+            snapshot = (
+                projected_state[key]
+                if projected_state is not None and key in projected_state
+                else await self.plan_service.state_store.get(
+                    precondition.device_id, precondition.capability
+                )
             )
-            if (
-                snapshot is None
-                or snapshot.status is StateStatus.INVALID
-                or snapshot.value != precondition.expected
-            ):
-                failed.append(precondition)
+            decision = self.freshness_evaluator.evaluate(
+                snapshot,
+                precondition,
+                policy_decision,
+                source_revision=self.plan_service.state_store.state_version(
+                    precondition.device_id, precondition.capability
+                ),
+            )
+            if decision.stale_exception:
+                self.audit.append(
+                    event_type="precondition_stale_exception",
+                    actor="policy-engine",
+                    subject_id=command.id,
+                    payload={
+                        "device_id": precondition.device_id,
+                        "capability": precondition.capability,
+                        "policy_id": policy_decision.policy_id if policy_decision else None,
+                        "authority": "policy-engine",
+                        "justification": policy_decision.reason if policy_decision else None,
+                        "evidence": decision.details(),
+                    },
+                )
+            if not decision.satisfied:
+                failed.append(_PreconditionFailure(precondition, decision))
         return failed
 
     @staticmethod
@@ -486,6 +672,8 @@ class PlanExecutor:
     ) -> tuple[str, object] | None:
         if command.postconditions:
             postcondition = command.postconditions[0]
+            if postcondition.verification != "equals":
+                return None
             return postcondition.capability, postcondition.expected
         if capability is None:
             return None
@@ -659,7 +847,11 @@ class PlanExecutor:
         return None
 
     async def _readback_until_settled(
-        self, command: Command, capability_name: str | None
+        self,
+        command: Command,
+        capability_name: str | None,
+        *,
+        before_state: StateSnapshot | None = None,
     ) -> tuple[StateSnapshot | None, Exception | None]:
         postcondition = command.postconditions[0] if command.postconditions else None
         timeout = postcondition.settle_timeout_seconds if postcondition is not None else None
@@ -682,7 +874,9 @@ class PlanExecutor:
                 latest_error = None
                 if current is not None:
                     latest = current
-                if self._postcondition_matches(command, capability_name, current):
+                if self._postcondition_matches(
+                    command, capability_name, current, before_state=before_state
+                ):
                     return current, None
 
             if timeout is None or timeout <= 0 or self.clock.now() >= deadline:
@@ -694,7 +888,11 @@ class PlanExecutor:
 
     @staticmethod
     def _postcondition_matches(
-        command: Command, capability_name: str | None, after_state: StateSnapshot | None
+        command: Command,
+        capability_name: str | None,
+        after_state: StateSnapshot | None,
+        *,
+        before_state: StateSnapshot | None = None,
     ) -> bool:
         if after_state is None or after_state.status is not StateStatus.CURRENT:
             return False
@@ -702,6 +900,17 @@ class PlanExecutor:
             postcondition = command.postconditions[0]
             if after_state.capability != postcondition.capability:
                 return False
+            if postcondition.verification == "unconfirmed":
+                return False
+            if postcondition.verification == "toggle_transition":
+                return (
+                    before_state is not None
+                    and before_state.capability == after_state.capability
+                    and before_state.status is StateStatus.CURRENT
+                    and before_state.value != after_state.value
+                )
+            if postcondition.verification == "motion_stopped":
+                return after_state.value is False
             if postcondition.tolerance is not None:
                 actual = after_state.value
                 postcondition_expected = postcondition.expected
@@ -727,7 +936,7 @@ class PlanExecutor:
         elif command.command == "close":
             expected = 0
         elif command.command == "stop":
-            return True
+            return False
         elif command.command.startswith("set_"):
             expected = command.value
         else:

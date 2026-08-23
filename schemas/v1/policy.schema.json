@@ -39,6 +39,11 @@
       "default": true,
       "title": "Enabled",
       "type": "boolean"
+    },
+    "allows_stale": {
+      "default": false,
+      "title": "Allows Stale",
+      "type": "boolean"
     }
   },
   "required": [

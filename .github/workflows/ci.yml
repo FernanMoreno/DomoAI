@@ -122,6 +122,31 @@ jobs:
       - run: uv run python3 scripts/export_schemas.py
       - run: git diff --exit-code schemas/v1/
 
+  contract-docs:
+    name: Runtime contract documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      - run: uv run python scripts/export_schemas.py
+      - run: uv run python scripts/check_runtime_contract_docs.py
+
+  architecture:
+    name: Architecture contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      - run: uv run python scripts/check_architecture_contracts.py
+
   dependency-audit:
     name: Dependency vulnerability audit
     runs-on: ubuntu-latest

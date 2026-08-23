@@ -46,6 +46,14 @@ async def test_busy_timeout_is_configurable(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_initialize_leaves_connection_outside_a_transaction(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+
+    assert database.connection.in_transaction is False
+
+
+@pytest.mark.asyncio
 async def test_mid_script_migration_failure_leaves_no_partial_schema_change(
     tmp_path: Path,
 ) -> None:

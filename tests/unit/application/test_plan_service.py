@@ -7,10 +7,14 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError
 from domoai.domain.models import (
+    AdapterSnapshot,
+    Capability,
+    CapabilityKind,
     Command,
     Plan,
     Policy,
     PolicyAction,
+    Precondition,
     SourceRef,
     StateSnapshot,
     StateStatus,
@@ -36,6 +40,167 @@ async def build_service_with_adapter(
     state_store = StateStore()
     await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
     return adapter, PlanService(registry, state_store, PolicyEngine(policies or []), AuditLog())
+
+
+def _semantic_service(capability: Capability) -> PlanService:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "fixture.semantic",
+                    "device_id": "fixture-semantic-1",
+                    "canonical_id": "fixture.semantic",
+                    "name": "Semantic fixture",
+                    "domain": "fixture",
+                    "semantic_type": "sensor",
+                    "capabilities": [capability.model_dump(mode="python")],
+                    "identity_keys": ["fixture:semantic"],
+                    "connections": ["fixture:semantic"],
+                    "available": True,
+                }
+            ],
+            source_states=[],
+        ),
+        "fixture",
+    )
+    return PlanService(registry, StateStore(), PolicyEngine([]), AuditLog())
+
+
+def _semantic_command(*, value: object, unit: str | None = None) -> Command:
+    return Command(
+        id="semantic-command-1",
+        device_id="fixture.semantic",
+        command="set_value",
+        value=value,
+        unit=unit,
+        idempotency_key="semantic-intent-1",
+    )
+
+
+def test_validate_plan_rejects_unit_kind_bounds_step_and_writable_mismatches() -> None:
+    cases = [
+        (
+            Capability(
+                name="temperature",
+                kind=CapabilityKind.NUMBER,
+                unit="°C",
+                readable=True,
+                writable=True,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=22, unit="°F"),
+            "invalid_capability",
+        ),
+        (
+            Capability(
+                name="power",
+                kind=CapabilityKind.BOOLEAN,
+                readable=True,
+                writable=True,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=1),
+            "invalid_command_value",
+        ),
+        (
+            Capability(
+                name="temperature",
+                kind=CapabilityKind.NUMBER,
+                readable=True,
+                writable=True,
+                maximum=32,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=33),
+            "value_out_of_range",
+        ),
+        (
+            Capability(
+                name="temperature",
+                kind=CapabilityKind.NUMBER,
+                readable=True,
+                writable=True,
+                minimum=0,
+                maximum=10,
+                constraints={"step": 0.5},
+                commands=["set_value"],
+            ),
+            _semantic_command(value=1.2),
+            "invalid_command_value",
+        ),
+        (
+            Capability(
+                name="mode",
+                kind=CapabilityKind.ENUM,
+                readable=True,
+                writable=True,
+                enum_values=["auto", "manual"],
+                commands=["set_value"],
+            ),
+            _semantic_command(value="unsupported"),
+            "invalid_command_value",
+        ),
+        (
+            Capability(
+                name="power",
+                kind=CapabilityKind.NUMBER,
+                readable=True,
+                writable=True,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=float("nan")),
+            "invalid_command_value",
+        ),
+        (
+            Capability(
+                name="count",
+                kind=CapabilityKind.INTEGER,
+                readable=True,
+                writable=True,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=1.2),
+            "invalid_command_value",
+        ),
+        (
+            Capability(
+                name="temperature",
+                kind=CapabilityKind.NUMBER,
+                readable=True,
+                writable=False,
+                commands=["set_value"],
+            ),
+            _semantic_command(value=1),
+            "invalid_capability",
+        ),
+    ]
+
+    for capability, command, expected_code in cases:
+        validated = _semantic_service(capability).validate(
+            Plan(id=f"semantic-{expected_code}", commands=[command])
+        )
+        assert validated.validation is not None
+        assert any(error.code == expected_code for error in validated.validation.errors)
+
+
+def test_create_plan_and_validate_plan_fill_only_the_canonical_unit() -> None:
+    service = _semantic_service(
+        Capability(
+            name="temperature",
+            kind=CapabilityKind.NUMBER,
+            unit="°C",
+            readable=True,
+            writable=True,
+            commands=["set_value"],
+        )
+    )
+
+    created = service.create_plan("semantic-normalized", [_semantic_command(value=22)])
+
+    assert created.commands[0].unit == "°C"
+    validated = service.validate(created)
+    assert validated.commands[0].unit == "°C"
 
 
 @pytest.mark.asyncio
@@ -76,6 +241,89 @@ async def test_create_plan_rejects_incompatible_unit() -> None:
 
     with pytest.raises(DomainError, match="unit"):
         service.create_plan("plan-unit-1", [command])
+
+
+@pytest.mark.asyncio
+async def test_definition_digest_changes_when_plan_intent_changes() -> None:
+    service = await build_service()
+    device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    plan = Plan(
+        id="plan-definition-digest-1",
+        commands=[
+            Command(
+                id="command-definition-digest-1",
+                device_id=device_id,
+                command="set_brightness",
+                value=60,
+                unit="%",
+                idempotency_key="intent-definition-digest-1",
+            )
+        ],
+    )
+
+    validated = service.validate(plan)
+    changed = service.validate(
+        plan.model_copy(
+            update={
+                "commands": [
+                    plan.commands[0].model_copy(update={"value": 61}),
+                ]
+            }
+        )
+    )
+
+    assert validated.definition_digest is not None
+    assert changed.definition_digest is not None
+    assert validated.definition_digest != changed.definition_digest
+
+    expiry_shifted = service.validate(
+        plan.model_copy(update={"expires_at": datetime.now(UTC) + timedelta(hours=2)})
+    )
+    assert expiry_shifted.definition_digest == validated.definition_digest
+
+
+@pytest.mark.asyncio
+async def test_validation_digest_changes_when_execution_window_changes() -> None:
+    service = await build_service()
+    device_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+    first = service.validate(
+        Plan(
+            id="plan-window-digest-1",
+            execute_at=datetime(2026, 8, 23, 13, tzinfo=UTC),
+            commands=[
+                Command(
+                    id="command-window-digest-1",
+                    device_id=device_id,
+                    command="turn_on",
+                    idempotency_key="intent-window-digest-1",
+                )
+            ],
+        )
+    )
+    second = service.validate(
+        first.model_copy(
+            update={
+                "execution_window": first.execution_window.model_copy(
+                    update={"intended_at": datetime(2026, 8, 23, 14, tzinfo=UTC)}
+                ),
+                "execute_at": datetime(2026, 8, 23, 14, tzinfo=UTC),
+                "validation": None,
+                "definition_digest": None,
+            }
+        )
+    )
+
+    assert first.execution_window is not None
+    assert second.execution_window is not None
+    assert first.validation is not None
+    assert second.validation is not None
+    assert first.execution_window.digest != second.execution_window.digest
+    assert first.validation.digest != second.validation.digest
+    assert first.definition_digest != second.definition_digest
 
 
 @pytest.mark.asyncio
@@ -149,7 +397,7 @@ async def test_unrelated_state_change_does_not_invalidate_plan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_own_state_change_invalidates_plan() -> None:
+async def test_explicit_precondition_state_change_invalidates_plan() -> None:
     adapter, service = await build_service_with_adapter()
     light_id = next(
         device.id for device in service.registry.devices if device.type.value == "light"
@@ -162,6 +410,9 @@ async def test_own_state_change_invalidates_plan() -> None:
                 device_id=light_id,
                 command="turn_on",
                 idempotency_key="intent-own-state-1",
+                preconditions=[
+                    Precondition(device_id=light_id, capability="power", expected=False)
+                ],
             )
         ],
     )
@@ -181,6 +432,63 @@ async def test_own_state_change_invalidates_plan() -> None:
 
     with pytest.raises(DomainError, match="revision"):
         service.assert_executable(validated)
+
+
+@pytest.mark.asyncio
+async def test_target_state_is_not_an_implicit_execution_dependency() -> None:
+    _adapter, service = await build_service_with_adapter()
+    light_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+
+    validated = service.validate(
+        service.create_plan(
+            "plan-target-not-assumption",
+            [
+                Command(
+                    id="command-target-not-assumption",
+                    device_id=light_id,
+                    command="turn_on",
+                    idempotency_key="intent-target-not-assumption",
+                )
+            ],
+        )
+    )
+
+    assert validated.validation is not None
+    assert validated.validation.dependencies is not None
+    assert validated.validation.dependencies.state_versions == {}
+
+
+@pytest.mark.asyncio
+async def test_explicit_precondition_is_a_revision_dependency() -> None:
+    _adapter, service = await build_service_with_adapter()
+    light_id = next(
+        device.id for device in service.registry.devices if device.type.value == "light"
+    )
+
+    validated = service.validate(
+        service.create_plan(
+            "plan-explicit-precondition-dependency",
+            [
+                Command(
+                    id="command-explicit-precondition-dependency",
+                    device_id=light_id,
+                    command="turn_on",
+                    idempotency_key="intent-explicit-precondition-dependency",
+                    preconditions=[
+                        Precondition(device_id=light_id, capability="power", expected=False)
+                    ],
+                )
+            ],
+        )
+    )
+
+    assert validated.validation is not None
+    assert validated.validation.dependencies is not None
+    key = f"{light_id}::power"
+    assert key in validated.validation.dependencies.state_versions
+    assert validated.validation.dependencies.dependency_kinds[key] == "precondition"
 
 
 @pytest.mark.asyncio

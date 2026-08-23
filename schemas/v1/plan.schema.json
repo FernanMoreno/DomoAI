@@ -51,6 +51,24 @@
           ],
           "default": null,
           "title": "Session Id"
+        },
+        "window_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Digest"
+        },
+        "schedule_revision": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Schedule Revision",
+          "type": "integer"
         }
       },
       "required": [
@@ -166,7 +184,19 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
+        },
+        "verification": {
+          "default": "equals",
+          "enum": [
+            "equals",
+            "toggle_transition",
+            "motion_stopped",
+            "unconfirmed"
+          ],
+          "title": "Verification",
+          "type": "string"
         },
         "tolerance": {
           "anyOf": [
@@ -212,11 +242,19 @@
         }
       },
       "required": [
-        "capability",
-        "expected"
+        "capability"
       ],
       "title": "CommandPostcondition",
       "type": "object"
+    },
+    "DependencyKind": {
+      "enum": [
+        "assumption",
+        "precondition",
+        "predecessor_outcome"
+      ],
+      "title": "DependencyKind",
+      "type": "string"
     },
     "ErrorDetail": {
       "additionalProperties": false,
@@ -404,6 +442,46 @@
       "title": "ExecutionSummary",
       "type": "object"
     },
+    "ExecutionWindow": {
+      "additionalProperties": false,
+      "description": "Immutable temporal evidence attached to a scheduled physical intent.",
+      "properties": {
+        "intended_at": {
+          "format": "date-time",
+          "title": "Intended At",
+          "type": "string"
+        },
+        "not_before": {
+          "format": "date-time",
+          "title": "Not Before",
+          "type": "string"
+        },
+        "not_after": {
+          "format": "date-time",
+          "title": "Not After",
+          "type": "string"
+        },
+        "timezone": {
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "intended_at",
+        "not_before",
+        "not_after",
+        "timezone"
+      ],
+      "title": "ExecutionWindow",
+      "type": "object"
+    },
     "PlanDependencies": {
       "additionalProperties": false,
       "properties": {
@@ -422,6 +500,13 @@
             "type": "integer"
           },
           "title": "State Versions",
+          "type": "object"
+        },
+        "dependency_kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DependencyKind"
+          },
+          "title": "Dependency Kinds",
           "type": "object"
         },
         "capability_fingerprints": {
@@ -487,6 +572,11 @@
           "minLength": 1,
           "title": "Reason",
           "type": "string"
+        },
+        "allows_stale": {
+          "default": false,
+          "title": "Allows Stale",
+          "type": "boolean"
         }
       },
       "required": [
@@ -518,6 +608,11 @@
               "type": "null"
             }
           ]
+        },
+        "allow_stale": {
+          "default": false,
+          "title": "Allow Stale",
+          "type": "boolean"
         }
       },
       "required": [
@@ -775,6 +870,23 @@
       "default": null,
       "title": "Execute At"
     },
+    "execution_window": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionWindow"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schedule_revision": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Schedule Revision",
+      "type": "integer"
+    },
     "commands": {
       "items": {
         "$ref": "#/$defs/Command"
@@ -787,6 +899,18 @@
     "status": {
       "$ref": "#/$defs/PlanStatus",
       "default": "draft"
+    },
+    "definition_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Digest"
     },
     "validation": {
       "anyOf": [

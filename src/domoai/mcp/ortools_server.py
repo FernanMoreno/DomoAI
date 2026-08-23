@@ -10,13 +10,19 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
 from domoai.application.optimization_service import OptimizationService
+from domoai.application.optimization_worker import OptimizationWorker
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ErrorDetail, StrictModel
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
-from domoai.optimizer.ports import OptimizationResult, OptimizationStatus
-from domoai.optimizer.scenario import OptimizationScenario
-from domoai.optimizer.scenario import validate_scenario as validate_scenario_model
+from domoai.optimizer.ports import OptimizationResult, OptimizationStatus, build_result
+from domoai.optimizer.scenario import (
+    OptimizationScenario,
+    validate_executable_scenario,
+)
+from domoai.optimizer.scenario import (
+    validate_scenario as validate_scenario_model,
+)
 from domoai.runtime.registry import DeviceRegistry
 
 
@@ -37,6 +43,7 @@ class OrtoolsMcpContext:
     registry: DeviceRegistry
     plan_service: PlanService
     optimization_service: OptimizationService
+    optimization_worker: OptimizationWorker | None = None
 
     @property
     def runtime_revision(self) -> str:
@@ -75,6 +82,12 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
                 for member in bundle
             ],
         }
+    elif result.status is OptimizationStatus.NO_ACTION_REQUIRED:
+        summary = (
+            "Optimization is valid and all declared constraints are satisfied; "
+            "no physical action is required."
+        )
+        proposal = None
     else:
         summary = f"No proposal was produced because the result is {result.status.value}."
         proposal = None
@@ -93,6 +106,7 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
 def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastMCP:
     ensure_fastmcp_settings_ready()
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+    worker = context.optimization_worker or OptimizationWorker(context.optimization_service)
 
     @server.tool(
         name="validate_scenario",
@@ -125,7 +139,18 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     ) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
-            result = context.optimization_service.optimize(parsed)
+            if parsed.ev_loads:
+                diagnostics = validate_executable_scenario(parsed, context.registry)
+                if diagnostics:
+                    return {
+                        "schema_version": "v1",
+                        **build_result(
+                            scenario_id=parsed.id,
+                            status=OptimizationStatus.INVALID,
+                            diagnostics=[item.model_dump(mode="json") for item in diagnostics],
+                        ).model_dump(mode="json"),
+                    }
+            result = await worker.optimize(parsed)
             if validate_proposal:
                 result = context.optimization_service.validate_proposal(result)
             return result.model_dump(mode="json")

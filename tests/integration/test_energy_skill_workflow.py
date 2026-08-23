@@ -6,7 +6,7 @@ from unittest.mock import ANY
 import pytest
 
 from domoai.domain.models import Policy, PolicyAction, StateStatus
-from domoai.skills.validator import V3_OPERATION_BINDINGS
+from domoai.skills.validator import V2_OPERATION_BINDINGS, V3_OPERATION_BINDINGS
 from domoai.skills.workflow import (
     ApprovalDecision,
     EnergySkillRequest,
@@ -50,7 +50,9 @@ def bundle_request_for(fixture: Any, **scenario_options: Any) -> EnergySkillRequ
 @pytest.mark.asyncio
 async def test_workflow_routes_semantic_operations_across_both_mcp_servers() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(request_for(fixture))
 
@@ -92,7 +94,9 @@ async def test_workflow_routes_semantic_operations_across_both_mcp_servers() -> 
 @pytest.mark.asyncio
 async def test_workflow_pauses_then_resumes_through_domotics_execute_once() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     pending = await workflow.run(request_for(fixture))
 
     approval = ApprovalDecision(
@@ -132,7 +136,9 @@ async def test_workflow_pauses_then_resumes_through_domotics_execute_once() -> N
 @pytest.mark.asyncio
 async def test_safe_plan_executes_without_synthetic_operator_approval() -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(request_for(fixture))
 
@@ -145,7 +151,9 @@ async def test_safe_plan_executes_without_synthetic_operator_approval() -> None:
 @pytest.mark.asyncio
 async def test_workflow_rejects_unknown_input_before_any_mcp_call() -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     device_id = light_device_id(fixture)
     scenario = scenario_for(device_id)
 
@@ -167,7 +175,9 @@ async def test_workflow_rejects_unknown_input_before_any_mcp_call() -> None:
 async def test_workflow_stops_on_stale_state_before_optimization() -> None:
     fixture = await build_workflow_fixture()
     await fixture.domotics_context.discovery.state_store.mark_all_stale()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(request_for(fixture))
 
@@ -181,7 +191,9 @@ async def test_workflow_stops_on_stale_state_before_optimization() -> None:
 async def test_explicit_stale_assumption_allows_stale_state() -> None:
     fixture = await build_workflow_fixture()
     await fixture.domotics_context.discovery.state_store.mark_all_stale()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     request = request_for(fixture).model_copy(update={"accept_stale_assumption": True})
 
     result = await workflow.run(request)
@@ -202,7 +214,9 @@ async def test_stale_energy_context_stops_before_optimization() -> None:
         return response
 
     fixture.router.call = stale_context  # type: ignore[method-assign]
-    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(request_for(fixture))
+    result = await EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    ).run(request_for(fixture))
 
     assert result.status is WorkflowStatus.BLOCKED
     assert result.diagnostics[0].code == "stale_energy_context"
@@ -228,7 +242,9 @@ async def test_invalid_energy_context_stops_before_optimization() -> None:
         return response
 
     fixture.router.call = invalid_context  # type: ignore[method-assign]
-    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(request_for(fixture))
+    result = await EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    ).run(request_for(fixture))
 
     assert result.status is WorkflowStatus.BLOCKED
     assert result.diagnostics[0].code == "invalid_energy_context"
@@ -247,7 +263,9 @@ async def test_failed_optimizer_statuses_stop_before_validation(
     scenario_options: dict[str, Any], expected_code: str
 ) -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(request_for(fixture, **scenario_options))
 
@@ -264,7 +282,9 @@ async def test_failed_optimizer_statuses_stop_before_validation(
 @pytest.mark.asyncio
 async def test_invalid_proposal_status_stops_before_validation() -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     request = request_for(fixture).model_copy(
         update={
             "scenario": scenario_for("unknown.device"),
@@ -274,19 +294,16 @@ async def test_invalid_proposal_status_stops_before_validation() -> None:
     result = await workflow.run(request)
 
     assert result.status is WorkflowStatus.BLOCKED
-    assert result.diagnostics[0].code == "invalid_proposal"
-    assert [call[1] for call in fixture.router.calls] == [
-        "discover_devices",
-        "get_state",
-        "get_energy_context",
-        "optimize_scenario",
-    ]
+    assert result.diagnostics[0].code == "missing_device"
+    assert [call[1] for call in fixture.router.calls] == ["discover_devices"]
 
 
 @pytest.mark.asyncio
 async def test_workflow_reports_operator_authentication_failure_when_host_omits_token() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     pending = await workflow.run(request_for(fixture))
 
     result = await workflow.resume(
@@ -307,7 +324,9 @@ async def test_workflow_reports_operator_authentication_failure_when_host_omits_
 @pytest.mark.asyncio
 async def test_runtime_revision_change_blocks_before_execution() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     pending = await workflow.run(request_for(fixture))
     fixture.domotics_context.discovery.state_store.begin_revision()
 
@@ -329,7 +348,9 @@ async def test_runtime_revision_change_blocks_before_execution() -> None:
 @pytest.mark.asyncio
 async def test_missing_approval_and_mismatched_digest_never_execute() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     pending = await workflow.run(request_for(fixture))
 
     missing = await workflow.resume(pending, None)
@@ -360,7 +381,9 @@ async def test_malformed_tool_response_is_sanitized_and_stops() -> None:
         return await original(provider, tool, arguments)
 
     fixture.router.call = malformed  # type: ignore[method-assign]
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(request_for(fixture))
 
@@ -382,7 +405,9 @@ async def test_state_status_invalid_is_not_overridden_by_stale_assumption() -> N
     await fixture.domotics_context.discovery.state_store.save(
         target.model_copy(update={"status": StateStatus.INVALID})
     )
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
     request = request_for(fixture).model_copy(update={"accept_stale_assumption": True})
 
     result = await workflow.run(request)
@@ -405,10 +430,12 @@ async def test_two_host_role_mappings_produce_equivalent_traces() -> None:
             ("mcp", "execute_plan"): "execute_plan",
         }
     )
-    first_result = await EnergySkillWorkflow(first.router, first.approval).run(request_for(first))
-    second_result = await EnergySkillWorkflow(second.router, second.approval).run(
-        request_for(second)
-    )
+    first_result = await EnergySkillWorkflow(
+        first.router, first.approval, operation_bindings=V2_OPERATION_BINDINGS
+    ).run(request_for(first))
+    second_result = await EnergySkillWorkflow(
+        second.router, second.approval, operation_bindings=V2_OPERATION_BINDINGS
+    ).run(request_for(second))
 
     assert first_result.status is second_result.status is WorkflowStatus.COMPLETED
     assert [(provider, tool) for provider, tool, _ in first.router.calls] == [
@@ -442,7 +469,9 @@ async def test_router_rejects_nonportable_routes(
 @pytest.mark.asyncio
 async def test_bundle_validation_covers_every_member() -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
 
@@ -535,7 +564,7 @@ async def test_v3_workflow_reports_mixed_physical_and_scheduled_members() -> Non
     result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(0, 3)))
 
     assert result.status is WorkflowStatus.SCHEDULED
-    assert result.bundle_commit_status == "completed"
+    assert result.bundle_commit_status == "scheduled"
     assert result.scheduled_plan_ids == [result.plan_ids[1]]
     assert len(fixture.domotics_adapter.calls) == 1
     assert [tool for _provider, tool, _arguments in fixture.router.calls].count(
@@ -557,9 +586,7 @@ async def test_v3_workflow_preserves_partial_commit_statuses(
     fixture = await build_workflow_fixture()
     original = fixture.router.call
 
-    async def partial_commit(
-        provider: str, tool: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def partial_commit(provider: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "commit_or_schedule_bundle":
             return {
                 "schema_version": "v1",
@@ -595,7 +622,9 @@ async def test_v3_workflow_preserves_partial_commit_statuses(
 @pytest.mark.asyncio
 async def test_bundle_all_or_nothing_on_invalid_member() -> None:
     fixture = await build_workflow_fixture()
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(
         bundle_request_for(
@@ -612,7 +641,9 @@ async def test_bundle_all_or_nothing_on_invalid_member() -> None:
 @pytest.mark.asyncio
 async def test_bundle_single_decision_covers_every_confirming_member() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     pending = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
     assert pending.status is WorkflowStatus.AWAITING_APPROVAL
@@ -673,7 +704,9 @@ async def test_mixed_bundle_approval_uses_full_bundle_digest() -> None:
             action=PolicyAction.CONFIRM,
         )
     )
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     pending = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
 
@@ -703,9 +736,7 @@ async def test_mixed_bundle_approval_uses_full_bundle_digest() -> None:
         pending.validation_digests[1]
     ]
     member_execute_calls = [
-        arguments
-        for _provider, tool, arguments in fixture.router.calls
-        if tool == "execute_plan"
+        arguments for _provider, tool, arguments in fixture.router.calls if tool == "execute_plan"
     ]
     assert [call["validation_digest"] for call in member_execute_calls] == [
         pending.validation_digests[0],
@@ -716,7 +747,9 @@ async def test_mixed_bundle_approval_uses_full_bundle_digest() -> None:
 @pytest.mark.asyncio
 async def test_bundle_decline_blocks_every_member() -> None:
     fixture = await build_workflow_fixture(confirmation_required=True)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     pending = await workflow.run(bundle_request_for(fixture, horizon=default_horizon()))
 
@@ -733,7 +766,9 @@ async def test_bundle_decline_blocks_every_member() -> None:
 async def test_bundle_future_members_are_scheduled_not_dropped() -> None:
     horizon = future_horizon(slots=4)
     fixture = await build_workflow_fixture(horizon=horizon)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(0, 3)))
 
@@ -742,14 +777,10 @@ async def test_bundle_future_members_are_scheduled_not_dropped() -> None:
     assert len(fixture.domotics_adapter.calls) == 1
 
     execute_calls = [
-        arguments
-        for _provider, tool, arguments in fixture.router.calls
-        if tool == "execute_plan"
+        arguments for _provider, tool, arguments in fixture.router.calls if tool == "execute_plan"
     ]
     schedule_calls = [
-        arguments
-        for _provider, tool, arguments in fixture.router.calls
-        if tool == "schedule_plan"
+        arguments for _provider, tool, arguments in fixture.router.calls if tool == "schedule_plan"
     ]
     assert execute_calls[0]["validation_digest"] == result.validation_digests[0]
     assert schedule_calls[0]["validation_digest"] == result.validation_digests[1]
@@ -763,7 +794,9 @@ async def test_bundle_future_members_are_scheduled_not_dropped() -> None:
 async def test_single_future_plan_is_scheduled_instead_of_rejected() -> None:
     horizon = future_horizon(slots=4)
     fixture = await build_workflow_fixture(horizon=horizon)
-    workflow = EnergySkillWorkflow(fixture.router, fixture.approval)
+    workflow = EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    )
 
     result = await workflow.run(bundle_request_for(fixture, horizon=horizon, slots=(3,)))
 
@@ -798,13 +831,15 @@ async def test_workflow_stops_before_approval_for_unbound_battery_proposal() -> 
         return response
 
     fixture.router.call = unbound_battery_proposal  # type: ignore[method-assign]
-    result = await EnergySkillWorkflow(fixture.router, fixture.approval).run(
-        request_for(fixture)
-    )
+    result = await EnergySkillWorkflow(
+        fixture.router, fixture.approval, operation_bindings=V2_OPERATION_BINDINGS
+    ).run(request_for(fixture))
 
     assert result.status is WorkflowStatus.BLOCKED
     assert result.diagnostics[0].code == "invalid_proposal"
     assert fixture.approval.requests == []
     assert fixture.domotics_adapter.calls == []
-    assert all(call[1] not in {"request_approval", "execute_plan", "schedule_plan"}
-               for call in fixture.router.calls)
+    assert all(
+        call[1] not in {"request_approval", "execute_plan", "schedule_plan"}
+        for call in fixture.router.calls
+    )

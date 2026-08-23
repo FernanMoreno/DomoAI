@@ -54,10 +54,12 @@ not introduce vendor tools, direct adapters, arbitrary solver code or a second
 server role.
 
 The `operator` boundary is enforced by the server, not merely documented.
-Production hosts should inject an authenticated `OperatorPrincipal` from the
-trusted UI/host boundary; that principal supplies the recorded operator ID,
-authentication context and session ID, and no reusable credential is exposed
-to the MCP tool schema. The local/dev compatibility path accepts an
+Production hosts must inject an authenticated `OperatorPrincipal` and a
+one-time `ApprovalAssertion` from the trusted UI/host boundary. The principal
+records who is authenticated; the assertion proves that this human explicitly
+approved the exact plan or bundle digest, with a nonce and expiry. A principal
+without an assertion is rejected and cannot issue a grant. No reusable
+credential is exposed to the MCP tool schema. The local/dev compatibility path accepts an
 `operator_token` only when `DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN=1` is enabled
 and the value matches `DOMOAI_OPERATOR_APPROVAL_TOKEN` (compared in constant
 time). The default is disabled. If the token is unset, blank, disabled or
@@ -82,3 +84,9 @@ Validation evidence on 2026-08-23: full pytest `972 passed, 10 skipped`, Ruff
 clean, `uv lock --check` clean and mypy clean for `src`. No credentials or live
 hardware are required for this deterministic contract; the separate Home
 Assistant inverter HIL smoke was not executed.
+
+The current energy skill contract is v3 and uses
+`commit_or_schedule_bundle`. A valid optimizer result may also be
+`no_action_required`; that terminal result has no plan, approval or adapter
+write. Battery dispatch remains software-qualified until matching HIL evidence
+is installed.

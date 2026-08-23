@@ -12,6 +12,7 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantDispatchableBatteryBinding,
 )
 from domoai.adapters.sdk import AdapterManifest
+from domoai.config.battery_qualification import BatteryHILEvidence
 from domoai.domain.models import (
     Area,
     AuditEvent,
@@ -101,6 +102,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "tariff-series": TariffSeries,
     "solar-forecast-series": SolarForecastSeries,
     "battery-state": BatteryState,
+    "battery-hil-evidence": BatteryHILEvidence,
     "energy-provider-diagnostic": EnergyProviderDiagnostic,
     "open-meteo-solar-config": OpenMeteoSolarConfig,
     "solar-installation-profile": SolarInstallationProfile,

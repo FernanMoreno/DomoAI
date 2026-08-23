@@ -12,6 +12,8 @@ from domoai.runtime.state_store import StateStore
 
 if TYPE_CHECKING:
     from domoai.application.optimization_service import OptimizationService
+    from domoai.application.optimization_worker import OptimizationWorker
+    from domoai.persistence.serialized import SerializedStorageExecutor
     from domoai.persistence.sqlite import SQLiteDatabase
     from domoai.runtime.event_consumer import RuntimeEventConsumer
     from domoai.runtime.scheduler import Scheduler
@@ -41,6 +43,9 @@ class RuntimeMetricsCollector:
         state_store: StateStore,
         plan_repository: PlanRecordPort,
         database: SQLiteDatabase,
+        storage: SerializedStorageExecutor | None = None,
+        battery_qualification: str = "unsupported",
+        optimization_worker: OptimizationWorker | None = None,
         optimization_service: OptimizationService | None = None,
         clock: Clock | None = None,
     ) -> None:
@@ -50,6 +55,9 @@ class RuntimeMetricsCollector:
         self.state_store = state_store
         self.plan_repository = plan_repository
         self.database = database
+        self.storage = storage
+        self.battery_qualification = battery_qualification
+        self.optimization_worker = optimization_worker
         self.optimization_service = optimization_service
         self.clock = clock or SystemClock()
 
@@ -77,12 +85,18 @@ class RuntimeMetricsCollector:
             dropped_events_by_adapter = self.adapter.dropped_events_by_adapter
             dropped_events_by_kind = self.adapter.dropped_events_by_kind
             coalesced_events_total = self.adapter.coalesced_events_total
+            reconnect_metrics = self.adapter.reconnect_metrics
         else:
             event_queue_depth = {"bulk": 0, "priority": 0}
             dropped_events_total = 0
             dropped_events_by_adapter = {}
             dropped_events_by_kind = {}
             coalesced_events_total = 0
+            reconnect_metrics = {
+                "attempts_total": 0,
+                "success_total": 0,
+                "failure_total": 0,
+            }
 
         states = await self.state_store.all()
         stale_state_count = sum(1 for state in states if state.status is StateStatus.STALE)
@@ -93,6 +107,8 @@ class RuntimeMetricsCollector:
             plans_by_status[label] = len(matching)
 
         db_metrics = self.database.metrics
+        storage_metrics = self.storage.metrics if self.storage is not None else None
+        max_state_age_seconds = self.state_store.max_state_age_seconds(self.clock.now())
         optimizer_last_wall_time_seconds = (
             self.optimization_service.last_wall_time_seconds
             if self.optimization_service is not None
@@ -110,9 +126,41 @@ class RuntimeMetricsCollector:
             "dropped_events_by_adapter": dropped_events_by_adapter,
             "dropped_events_by_kind": dropped_events_by_kind,
             "coalesced_events_total": coalesced_events_total,
+            "adapter_reconnect": reconnect_metrics,
+            "event_lag_seconds": self.event_consumer.last_event_lag_seconds,
+            "event_count": self.event_consumer.events_applied,
+            "max_state_age_seconds": max_state_age_seconds,
+            "scheduler_lateness_seconds": self.scheduler.last_lateness_seconds,
+            "scheduler_max_lateness_seconds": self.scheduler.max_lateness_seconds,
+            "scheduler_missed_total": self.scheduler.missed_total,
+            "execution_unknown_total": self.scheduler.execution_unknown_total,
+            "execution_unavailable_total": self.scheduler.execution_unavailable_total,
+            "execution_failed_total": self.scheduler.execution_failed_total,
+            "execution_partial_total": self.scheduler.execution_partial_total,
             "stale_state_count": stale_state_count,
             "plans_by_status": plans_by_status,
             "optimizer_last_wall_time_seconds": optimizer_last_wall_time_seconds,
+            "optimizer_queue_time_seconds": (
+                self.optimization_worker.last_queue_wait_seconds
+                if self.optimization_worker is not None
+                else None
+            ),
             "db_operation_count": db_metrics.operation_count,
             "db_busy_count": db_metrics.busy_count,
+            "storage": (
+                {
+                    "operation_count": storage_metrics.operation_count,
+                    "completed_count": storage_metrics.completed_count,
+                    "failed_count": storage_metrics.failed_count,
+                    "timeout_count": storage_metrics.timeout_count,
+                    "overloaded_count": storage_metrics.overloaded_count,
+                    "queue_depth": storage_metrics.queue_depth,
+                    "max_in_flight": storage_metrics.max_in_flight,
+                    "total_queue_wait_seconds": storage_metrics.total_queue_wait_seconds,
+                    "last_error": storage_metrics.last_error,
+                }
+                if storage_metrics is not None
+                else None
+            ),
+            "battery_qualification": self.battery_qualification,
         }

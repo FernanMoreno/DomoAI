@@ -105,16 +105,22 @@ class DiscoveryService:
             persisted_ids = {device.id for device in await self.device_repository.list_all()}
             for device_id in persisted_ids - current_ids:
                 await self.device_repository.delete(device_id)
-                await self.state_snapshot_repository.delete(device_id)
+                if not self.state_store.persistence_bound:
+                    await self.state_snapshot_repository.delete(device_id)
                 await self.state_store.delete(device_id)
             for device in self.registry.devices:
                 await self.device_repository.save(device)
-            for state in await self.state_store.all():
-                await self.state_snapshot_repository.save(state)
-            if self.runtime_state_metadata_repository is not None:
+            if not self.state_store.persistence_bound:
+                for state in await self.state_store.all():
+                    await self.state_snapshot_repository.save(state)
+            if self.runtime_state_metadata_repository is not None and not (
+                self.state_store.persistence_bound
+            ):
                 await self.runtime_state_metadata_repository.save(
                     self.state_store.export_metadata()
                 )
+            elif self.state_store.persistence_bound:
+                await self.state_store.persist_metadata()
 
         return DiscoveryResult(tuple(devices), tuple(areas), tuple(states), revision)
 

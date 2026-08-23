@@ -62,7 +62,11 @@ class SQLiteDatabase:
 
     async def initialize(self, *, migrations_dir: Path | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path)
+        # Runtime repository calls are serialized on a dedicated storage
+        # thread. ``check_same_thread=False`` is intentional: the connection
+        # is still single-owner at runtime, while startup/diagnostic close and
+        # tests may inspect it from their event-loop thread.
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         self._connection.executescript(_BOOTSTRAP_LEDGER)
@@ -116,6 +120,12 @@ class SQLiteDatabase:
                 self._connection.commit()
         finally:
             self._connection.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL
+            # Leave repository callers at a clean transaction boundary. In
+            # Python 3.12 restoring legacy transaction control can otherwise
+            # leave the connection inside the last migration transaction,
+            # preventing an explicit BEGIN IMMEDIATE from acquiring the
+            # lifecycle write lock.
+            self._connection.commit()
 
     @property
     def connection(self) -> sqlite3.Connection:

@@ -11,7 +11,7 @@ import hmac
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Plan, PlanStatus
@@ -35,6 +35,36 @@ OperatorPrincipalProvider = Callable[[], OperatorPrincipal | None]
 
 
 @dataclass(frozen=True)
+class ApprovalAssertion:
+    """Trusted-host proof that a human approved one exact intent."""
+
+    principal: OperatorPrincipal
+    nonce: str
+    approved_at: datetime
+    expires_at: datetime
+    plan_id: str | None = None
+    validation_digest: str | None = None
+    bundle_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.nonce.strip():
+            raise ValueError("approval assertion nonce must be non-empty")
+        if self.plan_id is None and self.validation_digest is None and self.bundle_digest is None:
+            raise ValueError("approval assertion must bind a plan or bundle digest")
+        for name, value in (
+            ("approved_at", self.approved_at),
+            ("expires_at", self.expires_at),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"approval assertion {name} must be timezone-aware")
+        if self.expires_at <= self.approved_at:
+            raise ValueError("approval assertion expiry must follow approval time")
+
+
+OperatorApprovalAssertionProvider = Callable[[str, str, str | None], ApprovalAssertion | None]
+
+
+@dataclass(frozen=True)
 class ApprovalGrant:
     """An operator-issued, single-use, digest-bound approval record."""
 
@@ -46,6 +76,11 @@ class ApprovalGrant:
     authentication_context: str = "legacy_bearer_token"
     session_id: str | None = None
     bundle_digest: str | None = None
+    window_digest: str | None = None
+    schedule_revision: int = 0
+    assertion_nonce: str | None = None
+    approved_at: datetime | None = None
+    expires_at: datetime | None = None
 
 
 class ApprovalStore:
@@ -61,6 +96,7 @@ class ApprovalStore:
     ) -> None:
         self._grants: dict[str, ApprovalGrant] = {}
         self._consumed: set[str] = set()
+        self._assertion_nonces: set[str] = set()
         stripped = operator_token.strip() if operator_token is not None else ""
         self._operator_token: str | None = stripped or None
         self._allow_legacy_token = allow_legacy_token
@@ -79,9 +115,7 @@ class ApprovalStore:
             not self._allow_legacy_token
             or self._operator_token is None
             or not isinstance(operator_token, str)
-            or not hmac.compare_digest(
-                operator_token, self._operator_token
-            )
+            or not hmac.compare_digest(operator_token, self._operator_token)
         ):
             raise DomainError(
                 ErrorCode.OPERATOR_AUTHENTICATION_FAILED,
@@ -117,17 +151,85 @@ class ApprovalStore:
         plan: Plan,
         *,
         principal: OperatorPrincipal,
+        assertion: ApprovalAssertion | None = None,
         bundle_digest: str | None = None,
     ) -> ApprovalGrant:
-        """Issue a grant for a principal authenticated outside the MCP tool schema."""
+        """Issue a grant only after a trusted host supplies a human assertion."""
 
-        return self._issue(
+        if assertion is None:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_REQUIRED,
+                "An authenticated operator principal is not human consent",
+            )
+        if assertion.principal != principal:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion principal does not match the authenticated principal",
+            )
+        return self.issue_assertion(
             plan,
-            approved_by=principal.id,
-            authentication_context=principal.authentication_context,
-            session_id=principal.session_id,
+            assertion=assertion,
             bundle_digest=bundle_digest,
         )
+
+    def issue_assertion(
+        self,
+        plan: Plan,
+        *,
+        assertion: ApprovalAssertion,
+        bundle_digest: str | None = None,
+    ) -> ApprovalGrant:
+        """Issue a digest-bound, expiring, one-nonce approval grant."""
+
+        self._assert_issueable(plan)
+        now = self._clock.now()
+        if assertion.expires_at <= now:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                "Approval assertion has expired",
+            )
+        if assertion.approved_at > now + timedelta(seconds=30):
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion timestamp is in the future",
+            )
+        if assertion.nonce in self._assertion_nonces:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_REPLAYED,
+                "Approval assertion nonce has already been used",
+            )
+        assert plan.validation is not None
+        if assertion.plan_id is not None and assertion.plan_id != plan.id:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion does not match the plan",
+            )
+        if (
+            assertion.validation_digest is not None
+            and assertion.validation_digest != plan.validation.digest
+        ):
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion does not match the validation digest",
+            )
+        if assertion.bundle_digest != bundle_digest:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion does not match the bundle digest",
+            )
+
+        grant = self._issue(
+            plan,
+            approved_by=assertion.principal.id,
+            authentication_context=assertion.principal.authentication_context,
+            session_id=assertion.principal.session_id,
+            bundle_digest=bundle_digest,
+            assertion_nonce=assertion.nonce,
+            approved_at=assertion.approved_at,
+            expires_at=assertion.expires_at,
+        )
+        self._assertion_nonces.add(assertion.nonce)
+        return grant
 
     @staticmethod
     def _assert_issueable(plan: Plan) -> None:
@@ -145,6 +247,9 @@ class ApprovalStore:
         authentication_context: str,
         session_id: str | None,
         bundle_digest: str | None,
+        assertion_nonce: str | None = None,
+        approved_at: datetime | None = None,
+        expires_at: datetime | None = None,
     ) -> ApprovalGrant:
         self._assert_issueable(plan)
         assert plan.validation is not None
@@ -157,6 +262,11 @@ class ApprovalStore:
             authentication_context=authentication_context,
             session_id=session_id,
             bundle_digest=bundle_digest,
+            window_digest=plan.execution_window.digest if plan.execution_window else None,
+            schedule_revision=plan.schedule_revision,
+            assertion_nonce=assertion_nonce,
+            approved_at=approved_at,
+            expires_at=expires_at,
         )
         self._grants[grant.approval_id] = grant
         return grant
@@ -178,12 +288,26 @@ class ApprovalStore:
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Unknown approval")
         if approval_id in self._consumed:
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval has already been consumed")
+        if grant.expires_at is not None and self._clock.now() >= grant.expires_at:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                "Approval grant has expired",
+            )
         if grant.plan_id != plan.id:
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval does not match the plan")
         if plan.validation is None or grant.validation_digest != plan.validation.digest:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the plan's current validation digest",
+            )
+        expected_window_digest = plan.execution_window.digest if plan.execution_window else None
+        if (
+            grant.window_digest != expected_window_digest
+            or grant.schedule_revision != plan.schedule_revision
+        ):
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the plan execution window",
             )
         if grant.bundle_digest != bundle_digest:
             raise DomainError(

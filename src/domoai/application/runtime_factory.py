@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlparse
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
@@ -26,6 +27,11 @@ from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.config.battery_profile import load_dispatchable_battery_binding
+from domoai.config.battery_qualification import (
+    BatteryQualificationError,
+    load_battery_hil_evidence,
+)
 from domoai.config.policy_loader import load_policy_file
 from domoai.config.risk_classification import load_risk_overrides_file
 from domoai.config.safety_kernel_loader import load_safety_limits_file
@@ -53,17 +59,21 @@ from domoai.persistence.repositories import (
     PlanRepository,
     RecurringScheduleRepository,
     RuntimeStateMetadataRepository,
+    RuntimeStatePersistenceRepository,
     ScheduledPlanRepository,
     StateSnapshotRepository,
 )
+from domoai.persistence.serialized import SerializedRepositoryProxy, SerializedStorageExecutor
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import (
     ApprovalStore,
+    OperatorApprovalAssertionProvider,
     OperatorPrincipalProvider,
 )
 from domoai.runtime.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
+from domoai.runtime.control_takeover import BatteryControlCoordinator
 from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executor import PlanExecutor
@@ -96,6 +106,7 @@ def create_adapter(
         adapters,
         registry=registry,
         event_queue_max_size=settings.composite_event_queue_max_size,
+        reconnect_on_stream_end=True,
     )
 
 
@@ -261,6 +272,7 @@ class RuntimeComposition:
     settings: Settings
     adapter: AdapterPort
     database: SQLiteDatabase
+    storage: SerializedStorageExecutor
     audit_repository: AuditEventRepository
     plan_repository: PlanRepository
     outcome_repository: ExecutionOutcomeRepository
@@ -287,6 +299,8 @@ class RuntimeComposition:
     energy_closers: tuple[Callable[[], None], ...] = ()
     clock: Clock = field(default_factory=SystemClock)
     operator_principal_provider: OperatorPrincipalProvider | None = None
+    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None
+    battery_qualification: str = "unsupported"
 
     async def close(self) -> None:
         try:
@@ -294,6 +308,7 @@ class RuntimeComposition:
         finally:
             for close in self.energy_closers:
                 close()
+            await self.storage.close()
             await self.database.close()
 
 
@@ -303,13 +318,42 @@ async def build_runtime(
     adapter: AdapterPort | None = None,
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
     operator_principal_provider: OperatorPrincipalProvider | None = None,
+    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     clock: Clock | None = None,
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
-    if dispatchable_battery_binding is not None and not resolved_settings.energy_live:
+    configured_battery_binding = (
+        load_dispatchable_battery_binding(resolved_settings.battery_dispatch_profile_path)
+        if resolved_settings.battery_dispatch_profile_path is not None
+        else None
+    )
+    if configured_battery_binding is not None and dispatchable_battery_binding is not None:
         raise ValueError(
-            "dispatchable_battery_binding requires energy_live to be enabled"
+            "battery dispatch binding must be supplied either by profile path or argument"
         )
+    dispatchable_battery_binding = configured_battery_binding or dispatchable_battery_binding
+    battery_qualification = "unsupported"
+    if dispatchable_battery_binding is not None:
+        battery_qualification = "software-qualified"
+        if resolved_settings.battery_hil_evidence_path is not None:
+            evidence = load_battery_hil_evidence(resolved_settings.battery_hil_evidence_path)
+            if evidence.qualifies(dispatchable_battery_binding):
+                battery_qualification = "hil-qualified"
+        if resolved_settings.battery_dispatch_production and battery_qualification != (
+            "hil-qualified"
+        ):
+            raise BatteryQualificationError(
+                "production battery dispatch requires passing matching HIL evidence"
+            )
+    elif (
+        resolved_settings.battery_dispatch_production
+        or resolved_settings.battery_hil_evidence_path is not None
+    ):
+        raise BatteryQualificationError(
+            "battery HIL evidence/production mode requires a dispatchable battery binding"
+        )
+    if dispatchable_battery_binding is not None and not resolved_settings.energy_live:
+        raise ValueError("dispatchable_battery_binding requires energy_live to be enabled")
     clock = clock or SystemClock()
     state_store = StateStore(
         stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds),
@@ -333,12 +377,35 @@ async def build_runtime(
         busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
         clock=clock,
     )
-    await database.initialize()
-    audit_repository = AuditEventRepository(database)
+    storage = SerializedStorageExecutor(
+        queue_capacity=resolved_settings.sqlite_worker_queue_capacity,
+        queue_wait_seconds=resolved_settings.sqlite_worker_queue_wait_seconds,
+        operation_timeout_seconds=resolved_settings.sqlite_operation_timeout_seconds,
+    )
+    await storage.run_async(database.initialize)
+    raw_audit_repository = AuditEventRepository(database)
+    raw_device_repository = DeviceRepository(database, clock=clock)
+    raw_state_snapshot_repository = StateSnapshotRepository(database)
+    raw_runtime_state_metadata_repository = RuntimeStateMetadataRepository(database, clock=clock)
+    raw_state_persistence_repository = RuntimeStatePersistenceRepository(database, clock=clock)
+    audit_repository = cast(
+        AuditEventRepository, SerializedRepositoryProxy(raw_audit_repository, storage)
+    )
+    device_repository = cast(
+        DeviceRepository, SerializedRepositoryProxy(raw_device_repository, storage)
+    )
+    state_snapshot_repository = cast(
+        StateSnapshotRepository, SerializedRepositoryProxy(raw_state_snapshot_repository, storage)
+    )
+    runtime_state_metadata_repository = cast(
+        RuntimeStateMetadataRepository,
+        SerializedRepositoryProxy(raw_runtime_state_metadata_repository, storage),
+    )
+    state_persistence_repository = SerializedRepositoryProxy(
+        raw_state_persistence_repository, storage
+    )
     audit = AuditLog(sink=audit_repository, clock=clock)
-    device_repository = DeviceRepository(database, clock=clock)
-    state_snapshot_repository = StateSnapshotRepository(database)
-    runtime_state_metadata_repository = RuntimeStateMetadataRepository(database, clock=clock)
+    state_store.bind_persistence(state_persistence_repository)
     registry = DeviceRegistry()
     registry.load_persisted(await device_repository.list_all())
     provider_registry = ProviderRegistry(clock=clock)
@@ -392,9 +459,14 @@ async def build_runtime(
     risk_classifier = RiskClassifier(overrides=tuple(risk_overrides))
     policy_engine = PolicyEngine(policies, risk_classifier)
     plan_service = PlanService(registry, state_store, policy_engine, audit, clock=clock)
-    plan_repository = PlanRepository(database, clock=clock)
+    plan_repository = cast(
+        PlanRepository, SerializedRepositoryProxy(PlanRepository(database, clock=clock), storage)
+    )
     await PlanRecoveryService(plan_repository, audit).recover_orphaned_plans()
-    outcome_repository = ExecutionOutcomeRepository(database)
+    outcome_repository = cast(
+        ExecutionOutcomeRepository,
+        SerializedRepositoryProxy(ExecutionOutcomeRepository(database), storage),
+    )
     if resolved_settings.safety_limits_path is not None:
         safety_limits = load_safety_limits_file(resolved_settings.safety_limits_path)
     else:
@@ -415,11 +487,41 @@ async def build_runtime(
         state_snapshot_repository=state_snapshot_repository,
         clock=clock,
         safety_kernel=safety_kernel,
+        control_takeover=(
+            BatteryControlCoordinator(
+                selected_adapter,  # type: ignore[arg-type]
+                dispatchable_battery_binding.control_policy,  # type: ignore[arg-type]
+                device_id=dispatchable_battery_binding.device_id,
+                command_names=frozenset(
+                    {
+                        dispatchable_battery_binding.profile.actuator.charge_command,
+                        dispatchable_battery_binding.profile.actuator.discharge_command,
+                        dispatchable_battery_binding.profile.actuator.stop_command,
+                    }
+                ),
+                clock=clock,
+            )
+            if dispatchable_battery_binding is not None
+            and dispatchable_battery_binding.profile.actuator is not None
+            else None
+        ),
     )
     facade = DomoticsFacade(plan_service, executor)
-    event_consumer = RuntimeEventConsumer(selected_adapter, discovery, state_store, audit)
-    scheduled_plan_repository = ScheduledPlanRepository(database, clock=clock)
-    recurring_schedule_repository = RecurringScheduleRepository(database, clock=clock)
+    event_consumer = RuntimeEventConsumer(
+        selected_adapter, discovery, state_store, audit, clock=clock
+    )
+    scheduled_plan_repository = cast(
+        ScheduledPlanRepository,
+        SerializedRepositoryProxy(ScheduledPlanRepository(database, clock=clock), storage),
+    )
+    bundle_commit_repository = cast(
+        BundleCommitRepository,
+        SerializedRepositoryProxy(BundleCommitRepository(database, clock=clock), storage),
+    )
+    recurring_schedule_repository = cast(
+        RecurringScheduleRepository,
+        SerializedRepositoryProxy(RecurringScheduleRepository(database, clock=clock), storage),
+    )
     scheduler = Scheduler(
         executor,
         scheduled_plan_repository,
@@ -427,9 +529,9 @@ async def build_runtime(
         grace_window=timedelta(seconds=resolved_settings.scheduler_grace_window_seconds),
         poll_interval=timedelta(seconds=resolved_settings.scheduler_poll_interval_seconds),
         recurring_repository=recurring_schedule_repository,
+        bundle_repository=bundle_commit_repository,
         clock=clock,
     )
-    bundle_commit_repository = BundleCommitRepository(database, clock=clock)
     plans: dict[str, Plan] = {}
     approval_store = ApprovalStore(
         operator_token=(
@@ -460,6 +562,7 @@ async def build_runtime(
         settings=resolved_settings,
         adapter=selected_adapter,
         database=database,
+        storage=storage,
         audit_repository=audit_repository,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
@@ -486,4 +589,6 @@ async def build_runtime(
         energy_closers=energy_closers,
         clock=clock,
         operator_principal_provider=operator_principal_provider,
+        operator_approval_assertion_provider=operator_approval_assertion_provider,
+        battery_qualification=battery_qualification,
     )

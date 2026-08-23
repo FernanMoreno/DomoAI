@@ -59,6 +59,20 @@ def test_capability_rejects_inverted_numeric_range() -> None:
         )
 
 
+def test_capability_accepts_one_sided_numeric_bounds() -> None:
+    capability = Capability(
+        name="temperature",
+        kind=CapabilityKind.NUMBER,
+        readable=True,
+        writable=True,
+        maximum=32,
+        commands=["set_temperature"],
+    )
+
+    assert capability.minimum is None
+    assert capability.maximum == 32
+
+
 def test_state_snapshot_requires_matching_observation_order() -> None:
     with pytest.raises(ValidationError, match="observed_at"):
         StateSnapshot(

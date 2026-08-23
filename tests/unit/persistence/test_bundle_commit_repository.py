@@ -85,3 +85,28 @@ async def test_bundle_repository_preserves_order_and_rolls_back_schedule_batch(
     assert unchanged is not None
     assert unchanged.status is BundleCommitStatus.COMMITTING
     assert [member.status.value for member in unchanged.members] == ["pending", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_bundle_member_is_protected_from_generic_reschedule(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "bundle-member.sqlite3")
+    await database.initialize()
+    repository = BundleCommitRepository(database)
+    bundle = BundleCommit(
+        id="bundle-member-1",
+        bundle_digest="sha256:bundle-member-1",
+        scenario_id="scenario-member-1",
+        status=BundleCommitStatus.SCHEDULED,
+        members=[
+            BundleMemberCommit(
+                plan_id="scheduled-member-1",
+                validation_digest="sha256:member",
+                status="scheduled",
+                scheduled=True,
+            )
+        ],
+    )
+    await repository.save(bundle)
+
+    assert await repository.is_scheduled_member("scheduled-member-1") is True
+    assert await repository.is_scheduled_member("other-plan") is False

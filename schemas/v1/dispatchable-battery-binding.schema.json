@@ -191,6 +191,44 @@
       "title": "BatteryCapacityEvidence",
       "type": "object"
     },
+    "BatteryControlPolicy": {
+      "additionalProperties": false,
+      "description": "Deployment declaration for physical control ownership.",
+      "properties": {
+        "owner": {
+          "default": "domoai",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Owner",
+          "type": "string"
+        },
+        "native_scheduler_status": {
+          "default": "unknown",
+          "enum": [
+            "disabled",
+            "inactive",
+            "active",
+            "unknown"
+          ],
+          "title": "Native Scheduler Status",
+          "type": "string"
+        },
+        "allow_native_takeover": {
+          "default": false,
+          "title": "Allow Native Takeover",
+          "type": "boolean"
+        },
+        "lease_seconds": {
+          "default": 300.0,
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Lease Seconds",
+          "type": "number"
+        }
+      },
+      "title": "BatteryControlPolicy",
+      "type": "object"
+    },
     "BatteryProfile": {
       "additionalProperties": false,
       "properties": {
@@ -598,6 +636,9 @@
         }
       ],
       "default": null
+    },
+    "control_policy": {
+      "$ref": "#/$defs/BatteryControlPolicy"
     }
   },
   "required": [

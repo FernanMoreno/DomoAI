@@ -65,6 +65,15 @@ class BaseLoadPoint(StrictModel):
         return self
 
 
+class BatteryControlPolicy(StrictModel):
+    """Deployment declaration for physical control ownership."""
+
+    owner: str = Field(default="domoai", min_length=1, max_length=128)
+    native_scheduler_status: Literal["disabled", "inactive", "active", "unknown"] = "unknown"
+    allow_native_takeover: bool = False
+    lease_seconds: float = Field(default=300.0, gt=0, le=86_400)
+
+
 class BatteryActuator(StrictModel):
     """Explicit canonical binding for physical battery dispatch."""
 
@@ -74,9 +83,7 @@ class BatteryActuator(StrictModel):
     discharge_command: str = Field(min_length=1)
     stop_command: str = Field(min_length=1)
     power_feedback_capability: str = Field(min_length=1)
-    power_feedback_convention: Literal["charge_positive", "discharge_positive"] = (
-        "charge_positive"
-    )
+    power_feedback_convention: Literal["charge_positive", "discharge_positive"] = "charge_positive"
     power_feedback_tolerance_kw: float = Field(gt=0)
     power_feedback_settle_timeout_seconds: float = Field(default=0, ge=0, le=120)
     power_feedback_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
@@ -105,9 +112,9 @@ class NominalCapacityTrustPolicy(StrictModel):
     """Server-owned exact allowlist for measured nominal capacity evidence."""
 
     schema_version: Literal["v1"] = "v1"
-    allowed_evidence_types: list[
-        Literal["vendor_documentation", "installer_attestation"]
-    ] = Field(min_length=1, max_length=2)
+    allowed_evidence_types: list[Literal["vendor_documentation", "installer_attestation"]] = Field(
+        min_length=1, max_length=2
+    )
     trusted_attesters: list[str] = Field(min_length=1, max_length=128)
     trusted_references: list[str] = Field(min_length=1, max_length=128)
 
@@ -159,19 +166,13 @@ class BatteryCapacityEvidence(StrictModel):
         ):
             raise ValueError("capacity received_at must be greater than or equal to observed_at")
         if self.capacity_source == "provider_measurement" and (
-            self.source_ref is None
-            or self.observed_at is None
-            or self.received_at is None
+            self.source_ref is None or self.observed_at is None or self.received_at is None
         ):
-            raise ValueError(
-                "provider-measurement capacity requires source_ref and timestamps"
-            )
+            raise ValueError("provider-measurement capacity requires source_ref and timestamps")
         if self.capacity_source == "provider_measurement" and (
             self.nominal_capacity_attestation is None
         ):
-            raise ValueError(
-                "provider-measurement capacity requires nominal capacity attestation"
-            )
+            raise ValueError("provider-measurement capacity requires nominal capacity attestation")
         return self
 
 
@@ -181,9 +182,7 @@ class BatterySocConversionEvidence(StrictModel):
     schema_version: Literal["v1"] = "v1"
     source_value_percent: StrictFloat = Field(ge=0, le=100)
     capacity: BatteryCapacityEvidence
-    method: Literal["percentage_of_declared_capacity"] = (
-        "percentage_of_declared_capacity"
-    )
+    method: Literal["percentage_of_declared_capacity"] = "percentage_of_declared_capacity"
 
     @model_validator(mode="after")
     def validate_percentage(self) -> BatterySocConversionEvidence:
@@ -236,6 +235,35 @@ class BatterySocObservation(StrictModel):
         return self
 
 
+class EVState(StrictModel):
+    """Canonical provider-observed EV state used for executable planning."""
+
+    schema_version: Literal["v1"] = "v1"
+    device_id: str = Field(min_length=1)
+    connected: bool
+    soc_kwh: float = Field(ge=0)
+    capacity_kwh: float = Field(gt=0)
+    max_charge_kw: float = Field(ge=0)
+    departure_at: datetime | None = None
+    observed_at: datetime
+    received_at: datetime
+    source_revision: str = Field(min_length=1)
+    source_ref: SourceRef
+    quality: MeasurementQuality = MeasurementQuality.GOOD
+
+    @model_validator(mode="after")
+    def validate_state(self) -> EVState:
+        if self.soc_kwh > self.capacity_kwh:
+            raise ValueError("EV SOC must not exceed capacity")
+        if self.observed_at.tzinfo is None or self.received_at.tzinfo is None:
+            raise ValueError("EV state timestamps must be timezone-aware")
+        if self.received_at < self.observed_at:
+            raise ValueError("EV received_at must be greater than or equal to observed_at")
+        if self.source_ref.adapter_id.strip() == "":
+            raise ValueError("EV state source reference must identify an adapter")
+        return self
+
+
 class BatteryProfile(StrictModel):
     capacity_kwh: float = Field(gt=0)
     initial_soc_kwh: float = Field(ge=0)
@@ -265,9 +293,7 @@ class BatteryProfile(StrictModel):
             rel_tol=0.0,
             abs_tol=SOC_OBSERVATION_TOLERANCE_KWH,
         ):
-            raise ValueError(
-                "initial_soc_observation.value_kwh must agree with initial_soc_kwh"
-            )
+            raise ValueError("initial_soc_observation.value_kwh must agree with initial_soc_kwh")
         return self
 
 
@@ -281,6 +307,7 @@ class DispatchableBatteryBinding(StrictModel):
     profile: BatteryProfile
     capacity_evidence: BatteryCapacityEvidence
     capacity_trust_policy: NominalCapacityTrustPolicy | None = None
+    control_policy: BatteryControlPolicy = Field(default_factory=BatteryControlPolicy)
 
     @model_validator(mode="after")
     def validate_binding(self) -> DispatchableBatteryBinding:
@@ -290,9 +317,7 @@ class DispatchableBatteryBinding(StrictModel):
         if actuator.device_id != self.device_id:
             raise ValueError("battery actuator device must match binding device")
         if actuator.soc_reconciliation_capability != self.soc_capability:
-            raise ValueError(
-                "battery actuator SOC reconciliation must match binding capability"
-            )
+            raise ValueError("battery actuator SOC reconciliation must match binding capability")
         evidence = self.capacity_evidence
         if evidence.provider_id != self.provider_id:
             raise ValueError("battery capacity provider must match binding provider")
@@ -307,13 +332,9 @@ class DispatchableBatteryBinding(StrictModel):
             raise ValueError("battery capacity evidence must match profile capacity")
         if evidence.capacity_source == "provider_measurement":
             if evidence.quality is not MeasurementQuality.GOOD:
-                raise ValueError(
-                    "dispatchable battery measured capacity must have GOOD quality"
-                )
+                raise ValueError("dispatchable battery measured capacity must have GOOD quality")
             if self.capacity_trust_policy is None:
-                raise ValueError(
-                    "dispatchable battery measured capacity requires trust policy"
-                )
+                raise ValueError("dispatchable battery measured capacity requires trust policy")
         return self
 
 
@@ -327,6 +348,7 @@ class EnergyContext(StrictModel):
     base_load_forecast: list[BaseLoadPoint] | None = None
     export_tariffs: list[TariffPoint] | None = None
     battery: BatteryProfile | None = None
+    ev_states: list[EVState] = Field(default_factory=list)
     source_revision: str = Field(min_length=1)
     observed_at: datetime
 
@@ -334,6 +356,9 @@ class EnergyContext(StrictModel):
     def validate_series(self) -> EnergyContext:
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
+        ev_devices = [state.device_id for state in self.ev_states]
+        if len(ev_devices) != len(set(ev_devices)):
+            raise ValueError("ev_states must contain one state per device")
         expected = list(range(self.horizon.slots))
         SeriesEntry = tuple[str, list[TariffPoint] | list[SolarForecastPoint] | list[BaseLoadPoint]]
         series: list[SeriesEntry] = [

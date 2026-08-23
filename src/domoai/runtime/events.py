@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Mapping
 from copy import deepcopy
@@ -19,9 +20,20 @@ _SECRET_KEYS = {
     "api_key",
     "authorization",
     "password",
+    "private_key",
     "secret",
     "token",
 }
+_SAFE_KEY_NAMES = {"key_id", "public_key", "source_key", "binding_key"}
+_SECRET_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(
+        r"(?i)([?&](?:access[_-]?token|api[_-]?key|authorization|client[_-]?secret|password|secret|token)=)[^&\s]+"
+    ),
+    re.compile(
+        r"(?i)\b(?:access[_-]?token|api[_-]?key|authorization|client[_-]?secret|password|private[_-]?key|secret|token)\s*[:=]\s*[^\s,;]+"
+    ),
+)
 
 
 class AuditEventSink(Protocol):
@@ -29,7 +41,27 @@ class AuditEventSink(Protocol):
 
 
 def redact_payload(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and key.lower() in _SECRET_KEYS:
+    normalized_key = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_") if key else None
+    if normalized_key is not None and (
+        normalized_key in _SECRET_KEYS
+        or (
+            normalized_key not in _SAFE_KEY_NAMES
+            and normalized_key.endswith(
+                (
+                    "_token",
+                    "_password",
+                    "_secret",
+                    "_authorization",
+                    "_private_key",
+                    "_client_key",
+                    "_api_key",
+                    "_access_key",
+                    "_credential",
+                    "_credentials",
+                )
+            )
+        )
+    ):
         return _REDACTED
     if isinstance(value, Mapping):
         return {
@@ -40,7 +72,27 @@ def redact_payload(value: Any, *, key: str | None = None) -> Any:
         return [redact_payload(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact_payload(item) for item in value)
+    if isinstance(value, BaseException):
+        return _redact_text(str(value))
+    if isinstance(value, str):
+        return _redact_text(value)
     return deepcopy(value)
+
+
+def _redact_text(value: str) -> str:
+    """Mask credential-shaped text without attempting to identify secrets."""
+
+    redacted = value
+    for pattern in _SECRET_TEXT_PATTERNS:
+        redacted = pattern.sub(
+            lambda match: (
+                match.group(1) + _REDACTED
+                if match.lastindex and match.group(1).endswith("=")
+                else _REDACTED
+            ),
+            redacted,
+        )
+    return redacted
 
 
 class AuditLog:

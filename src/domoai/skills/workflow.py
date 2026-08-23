@@ -51,6 +51,8 @@ class WorkflowStatus(StrEnum):
     SCHEDULED = "scheduled"
     PARTIALLY_COMMITTED = "partially_committed"
     UNKNOWN = "unknown"
+    MISSED = "missed"
+    NO_ACTION_REQUIRED = "no_action_required"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -172,7 +174,7 @@ class EnergySkillWorkflow:
         operation_bindings: Mapping[str, tuple[str, str, str]] | None = None,
         clock: Clock | None = None,
     ) -> None:
-        selected_bindings = dict(operation_bindings or V2_OPERATION_BINDINGS)
+        selected_bindings = dict(operation_bindings or V3_OPERATION_BINDINGS)
         if selected_bindings not in (
             V1_OPERATION_BINDINGS,
             V2_OPERATION_BINDINGS,
@@ -185,6 +187,13 @@ class EnergySkillWorkflow:
         self.approval = approval
         self.clock = clock or SystemClock()
         self._operation_bindings = selected_bindings
+        self.contract_version = (
+            "v3"
+            if selected_bindings == V3_OPERATION_BINDINGS
+            else "v2"
+            if selected_bindings == V2_OPERATION_BINDINGS
+            else "v1"
+        )
         self._requires_energy_context = selected_bindings in (
             V2_OPERATION_BINDINGS,
             V3_OPERATION_BINDINGS,
@@ -285,6 +294,28 @@ class EnergySkillWorkflow:
                 )
             completed.append("optimize_scenario")
             self._transition(history, WorkflowStage.PROPOSAL_READY)
+
+            if proposal.get("status") == "no_action_required":
+                explanation = await self._call(
+                    "explain_solution",
+                    {"result": proposal},
+                    stage=WorkflowStage.PROPOSAL_READY,
+                )
+                self._check_explanation(explanation, parsed_request.scenario.id)
+                completed.append("explain_solution")
+                return self._consume(
+                    self._result(
+                        run_id=run_id,
+                        status=WorkflowStatus.NO_ACTION_REQUIRED,
+                        stage=WorkflowStage.COMPLETED,
+                        history=history,
+                        completed=completed,
+                        runtime_revision=runtime_revision,
+                        scenario_id=parsed_request.scenario.id,
+                        proposal=proposal,
+                        explanation=explanation,
+                    )
+                )
 
             bundle: list[dict[str, Any]] = []
             first_confirming_plan_dict: dict[str, Any] | None = None
@@ -510,8 +541,7 @@ class EnergySkillWorkflow:
                 completed=list(stored.completed_operations),
                 runtime_revision=stored.runtime_revision,
                 scenario_id=(
-                    stored.scenario_id
-                    or str(stored.explanation.get("scenario_id", ""))
+                    stored.scenario_id or str(stored.explanation.get("scenario_id", ""))
                     if stored.explanation
                     else None
                 ),
@@ -684,9 +714,7 @@ class EnergySkillWorkflow:
             result = self._result(
                 run_id=run_id,
                 status=(
-                    WorkflowStatus.SCHEDULED
-                    if scheduled_plan_ids
-                    else WorkflowStatus.COMPLETED
+                    WorkflowStatus.SCHEDULED if scheduled_plan_ids else WorkflowStatus.COMPLETED
                 ),
                 stage=WorkflowStage.COMPLETED,
                 history=self._with_stage(history, WorkflowStage.COMPLETED),
@@ -803,6 +831,7 @@ class EnergySkillWorkflow:
             "partially_committed": WorkflowStatus.PARTIALLY_COMMITTED,
             "failed": WorkflowStatus.FAILED,
             "unknown": WorkflowStatus.UNKNOWN,
+            "missed": WorkflowStatus.MISSED,
         }
         workflow_status = status_map.get(raw_status)
         if workflow_status is None:
@@ -849,9 +878,7 @@ class EnergySkillWorkflow:
             explanation=explanation,
             bundle_digest=bundle_digest,
             bundle_commit_id=(
-                str(response["bundle_commit_id"])
-                if response.get("bundle_commit_id")
-                else None
+                str(response["bundle_commit_id"]) if response.get("bundle_commit_id") else None
             ),
             bundle_commit_status=raw_status,
             member_outcomes=member_outcomes,
@@ -913,7 +940,12 @@ class EnergySkillWorkflow:
 
     @staticmethod
     def _required_devices(request: EnergySkillRequest) -> list[str]:
-        devices = request.devices or [load.device_id for load in request.scenario.loads]
+        scenario_devices = [load.device_id for load in request.scenario.loads]
+        scenario_devices.extend(load.device_id for load in request.scenario.ev_loads)
+        scenario_devices.extend(load.device_id for load in request.scenario.comfort_loads)
+        devices = request.devices or scenario_devices
+        if request.devices:
+            devices = [*request.devices, *scenario_devices]
         return list(dict.fromkeys(devices))
 
     @staticmethod
@@ -1033,6 +1065,22 @@ class EnergySkillWorkflow:
     @staticmethod
     def _check_proposal(response: dict[str, Any], scenario: OptimizationScenario) -> None:
         status = response.get("status")
+        if status == "no_action_required":
+            if response.get("scenario_id") not in {None, scenario.id}:
+                raise _WorkflowFailure(
+                    status=WorkflowStatus.BLOCKED,
+                    stage=WorkflowStage.PROPOSAL_READY,
+                    code="scenario_id_mismatch",
+                    message="No-action result scenario id does not match the request",
+                )
+            if response.get("plan") is not None or response.get("plans"):
+                raise _WorkflowFailure(
+                    status=WorkflowStatus.BLOCKED,
+                    stage=WorkflowStage.PROPOSAL_READY,
+                    code="invalid_no_action_result",
+                    message="No-action result must not contain an executable plan",
+                )
+            return
         if status not in {"optimal", "feasible", "optimal_hierarchy", "feasible_hierarchy"}:
             safe_status = str(status) if isinstance(status, str) else "unknown"
             raise _WorkflowFailure(
@@ -1214,8 +1262,10 @@ class EnergySkillWorkflow:
         resolved_bundle = list(bundle or [])
         resolved_plan_id = plan_id or (resolved_bundle[0]["plan_id"] if resolved_bundle else None)
         resolved_bundle_digest = bundle_digest
-        resolved_digest = resolved_bundle_digest or validation_digest or (
-            resolved_bundle[0]["validation_digest"] if resolved_bundle else None
+        resolved_digest = (
+            resolved_bundle_digest
+            or validation_digest
+            or (resolved_bundle[0]["validation_digest"] if resolved_bundle else None)
         )
         return SkillRunResult(
             run_id=run_id,

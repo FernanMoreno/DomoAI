@@ -2378,10 +2378,7 @@ async def test_empty_scenario_returns_a_successful_empty_proposal() -> None:
 
     result = service.optimize(scenario)
 
-    assert result.status in {
-        OptimizationStatus.FEASIBLE_HIERARCHY,
-        OptimizationStatus.OPTIMAL_HIERARCHY,
-    }
+    assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
     assert result.plan is None
     assert result.plans == []
 

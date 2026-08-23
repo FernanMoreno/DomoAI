@@ -2,11 +2,13 @@
 
 from domoai.optimizer.energy import (
     BatteryCapacityEvidence,
+    BatteryControlPolicy,
     BatteryProfile,
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
     EnergyContext,
+    EVState,
     NominalCapacityTrustPolicy,
     SolarForecastPoint,
     StaticEnergyContextProvider,
@@ -29,8 +31,10 @@ from domoai.optimizer.providers import (
 )
 
 __all__ = [
+    "BatteryControlPolicy",
     "BatteryCapacityEvidence",
     "BatteryProfile",
+    "EVState",
     "BatterySocConversionEvidence",
     "BatterySocObservation",
     "DispatchableBatteryBinding",

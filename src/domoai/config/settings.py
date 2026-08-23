@@ -42,8 +42,16 @@ class Settings(StrictModel):
     state_stale_after_seconds: int = 300
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
     scheduler_grace_window_seconds: int = Field(default=900, gt=0)
+    optimization_max_solver_time_seconds: float = Field(default=30.0, gt=0)
+    optimization_worker_queue_capacity: int = Field(default=2, ge=0)
+    optimization_worker_concurrency: int = Field(default=1, gt=0)
+    optimization_worker_queue_wait_seconds: float = Field(default=0.25, gt=0)
+    provider_worker_timeout_seconds: float = Field(default=10.0, gt=0)
     composite_event_queue_max_size: int = Field(default=1000, gt=0)
     sqlite_busy_timeout_ms: int = Field(default=5000, gt=0)
+    sqlite_worker_queue_capacity: int = Field(default=128, ge=1)
+    sqlite_worker_queue_wait_seconds: float = Field(default=0.25, gt=0)
+    sqlite_operation_timeout_seconds: float = Field(default=5.0, gt=0)
     energy_live: bool = False
     tariff_provider: str | None = None
     solar_provider: str | None = None
@@ -57,6 +65,9 @@ class Settings(StrictModel):
     solar_inverter_ac_max_kw: float | None = Field(default=None, gt=0)
     solar_timezone: str = Field(default="Europe/Madrid", min_length=1)
     solar_profile_path: Path | None = None
+    battery_dispatch_profile_path: Path | None = None
+    battery_hil_evidence_path: Path | None = None
+    battery_dispatch_production: bool = False
     solar_timeout_seconds: float = Field(default=10.0, gt=0)
     energy_max_age_seconds: float | None = Field(default=900.0, ge=0)
 
@@ -192,6 +203,21 @@ class Settings(StrictModel):
             scheduler_grace_window_seconds=int(
                 os.getenv("DOMOAI_SCHEDULER_GRACE_WINDOW_SECONDS", "900")
             ),
+            optimization_max_solver_time_seconds=float(
+                os.getenv("DOMOAI_OPTIMIZATION_MAX_SOLVER_TIME_SECONDS", "30")
+            ),
+            optimization_worker_queue_capacity=int(
+                os.getenv("DOMOAI_OPTIMIZATION_WORKER_QUEUE_CAPACITY", "2")
+            ),
+            optimization_worker_concurrency=int(
+                os.getenv("DOMOAI_OPTIMIZATION_WORKER_CONCURRENCY", "1")
+            ),
+            optimization_worker_queue_wait_seconds=float(
+                os.getenv("DOMOAI_OPTIMIZATION_WORKER_QUEUE_WAIT_SECONDS", "0.25")
+            ),
+            provider_worker_timeout_seconds=float(
+                os.getenv("DOMOAI_PROVIDER_WORKER_TIMEOUT_SECONDS", "10")
+            ),
             mqtt_username=os.getenv("DOMOAI_MQTT_USERNAME"),
             mqtt_password=(
                 SecretStr(password) if (password := os.getenv("DOMOAI_MQTT_PASSWORD")) else None
@@ -213,6 +239,15 @@ class Settings(StrictModel):
                 os.getenv("DOMOAI_COMPOSITE_EVENT_QUEUE_MAX_SIZE", "1000")
             ),
             sqlite_busy_timeout_ms=int(os.getenv("DOMOAI_SQLITE_BUSY_TIMEOUT_MS", "5000")),
+            sqlite_worker_queue_capacity=int(
+                os.getenv("DOMOAI_SQLITE_WORKER_QUEUE_CAPACITY", "128")
+            ),
+            sqlite_worker_queue_wait_seconds=float(
+                os.getenv("DOMOAI_SQLITE_WORKER_QUEUE_WAIT_SECONDS", "0.25")
+            ),
+            sqlite_operation_timeout_seconds=float(
+                os.getenv("DOMOAI_SQLITE_OPERATION_TIMEOUT_SECONDS", "5")
+            ),
             matter_timeout_seconds=float(os.getenv("DOMOAI_MATTER_TIMEOUT_SECONDS", "5")),
             state_stale_after_seconds=int(stale_after),
             energy_live=boolean("DOMOAI_ENERGY_LIVE"),
@@ -232,6 +267,17 @@ class Settings(StrictModel):
                 if (profile_path := os.getenv("DOMOAI_SOLAR_PROFILE_PATH"))
                 else None
             ),
+            battery_dispatch_profile_path=(
+                Path(profile_path)
+                if (profile_path := os.getenv("DOMOAI_BATTERY_DISPATCH_PROFILE_PATH"))
+                else None
+            ),
+            battery_hil_evidence_path=(
+                Path(evidence_path)
+                if (evidence_path := os.getenv("DOMOAI_BATTERY_HIL_EVIDENCE_PATH"))
+                else None
+            ),
+            battery_dispatch_production=boolean("DOMOAI_BATTERY_DISPATCH_PRODUCTION"),
             solar_timeout_seconds=float(os.getenv("DOMOAI_SOLAR_TIMEOUT_SECONDS", "10")),
             energy_max_age_seconds=optional_float("DOMOAI_ENERGY_MAX_AGE_SECONDS")
             if os.getenv("DOMOAI_ENERGY_MAX_AGE_SECONDS") is not None

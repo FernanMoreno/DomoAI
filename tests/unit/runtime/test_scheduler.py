@@ -9,7 +9,15 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import Command, Plan, PlanStatus, RecurrenceRule, RiskClass
+from domoai.domain.models import (
+    Command,
+    Plan,
+    PlanStatus,
+    Precondition,
+    RecurrenceRule,
+    RiskClass,
+    StateStatus,
+)
 from domoai.persistence.repositories import (
     PlanRepository,
     RecurringScheduleRepository,
@@ -181,7 +189,7 @@ async def test_one_plan_failure_does_not_abandon_other_due_plans_in_sweep(tmp_pa
     outcomes = {entry["plan_id"]: entry["outcome"] for entry in results}
     assert outcomes["plan-a"] == "executed"
     assert outcomes["plan-b"] == "error"
-    assert outcomes["plan-c"] == "executed"
+    assert outcomes["plan-c"] == "unknown"
     assert len(adapter.calls) == 2
     assert any(event.event_type == "schedule_execution_error" for event in audit.events)
 
@@ -258,6 +266,51 @@ async def test_due_plan_within_grace_window_executes(tmp_path) -> None:
     assert len(adapter.calls) == 1
     _, status = await repository.get("plan-due-1")
     assert status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_due_plan_with_stale_precondition_is_not_marked_executed(tmp_path) -> None:
+    adapter, plan_service, scheduler, repository, _ = await _build_scheduler(tmp_path)
+    light_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    switch_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "switch"
+    )
+    source = await plan_service.state_store.get(switch_id, "power")
+    assert source is not None
+    await plan_service.state_store.save(source.model_copy(update={"status": StateStatus.STALE}))
+    plan = plan_service.validate(
+        Plan(
+            id="plan-scheduled-stale-precondition",
+            execute_at=datetime.now(UTC) - timedelta(minutes=1),
+            commands=[
+                Command(
+                    id="plan-scheduled-stale-precondition:command",
+                    device_id=light_id,
+                    command="set_brightness",
+                    value=60,
+                    unit="%",
+                    idempotency_key="plan-scheduled-stale-precondition:intent",
+                    preconditions=[
+                        Precondition(
+                            device_id=switch_id,
+                            capability="power",
+                            expected=source.value,
+                        )
+                    ],
+                )
+            ],
+        )
+    )
+    await scheduler.schedule(plan)
+
+    results = await scheduler.run_due()
+
+    assert results == [{"plan_id": plan.id, "outcome": "failed"}]
+    assert adapter.calls == []
+    _, status = await repository.get(plan.id)
+    assert status == "failed"
 
 
 @pytest.mark.asyncio
@@ -432,7 +485,7 @@ async def test_cancel_prevents_execution(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reschedule_moves_execution_time(tmp_path) -> None:
+async def test_reschedule_requires_a_new_temporal_revision(tmp_path) -> None:
     _, plan_service, scheduler, _repository, _ = await _build_scheduler(tmp_path)
     device_id = next(
         device.id for device in plan_service.registry.devices if device.type.value == "light"
@@ -447,9 +500,9 @@ async def test_reschedule_moves_execution_time(tmp_path) -> None:
     await scheduler.schedule(plan)
 
     new_time = datetime.now(UTC) + timedelta(hours=2)
-    assert await scheduler.reschedule("plan-reschedule-1", new_time) is True
+    assert await scheduler.reschedule("plan-reschedule-1", new_time) is False
     pending = await scheduler.list_pending()
-    assert pending[0].execute_at == new_time
+    assert pending[0].execute_at == plan.execute_at
 
 
 @pytest.mark.asyncio

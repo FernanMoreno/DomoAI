@@ -24,7 +24,7 @@ El único servidor stdio local registra estas tools semánticas:
 | `get_energy_context` | Lee un horizonte completo de tarifas, solar y batería opcional mediante un provider tipado. |
 | `validate_command` | Valida un comando sin invocar el adapter. |
 | `validate_plan` | Aplica capacidades, políticas, revisión y digest a un plan. |
-| `request_approval` | Emite un `ApprovalGrant` de un solo uso, ligado al digest del plan. Único origen válido de una aprobación. |
+| `request_approval` | Emite un `ApprovalGrant` de un solo uso, ligado al digest del plan/bundle y a una aserción humana del host. Único origen válido de una aprobación. |
 | `execute_plan` | Ejecuta un plan validado. Si requiere confirmación, exige un `approval_id` emitido por `request_approval`; ya no acepta un objeto de aprobación construido por el caller. |
 | `validate_scenario` | Valida un escenario de optimización contra dispositivos y capacidades canónicas. |
 | `optimize_scenario` | Produce una propuesta determinista sin ejecutar comandos físicos. |
@@ -84,6 +84,24 @@ las acciones futuras quedaron duraderamente registradas. Ninguno debe
 interpretarse como confirmación de que una acción futura ya se ejecutó.
 
 Contrato detallado: [`specs/087-bundle-commit-saga/contracts/bundle-commit-v3.md`](../specs/087-bundle-commit-saga/contracts/bundle-commit-v3.md).
+
+## Aserción explícita de consentimiento humano (2026-08-23)
+
+Una `OperatorPrincipal` autenticada no equivale a consentimiento. Para emitir
+un grant mediante el camino de host confiable, `request_approval` exige una
+`ApprovalAssertion` que liga principal, digest de validación o bundle, nonce,
+instante de aprobación y expiración. El nonce solo puede emitir un grant una
+vez; el grant vuelve a comprobar su expiración al consumirlo para scheduling o
+ejecución.
+
+Si el host solo proporciona principal, el runtime responde
+`approval_assertion_required` y no crea `approval_id`. Los campos de identidad
+que pudiera enviar el caller no sustituyen la evidencia del host. El camino
+de token queda únicamente como compatibilidad local/dev explícita y
+deshabilitada por defecto; ni tokens ni secretos se serializan en la respuesta
+MCP.
+
+Contrato detallado: [`specs/128-explicit-approval-assertion/contracts/approval-assertion-v1.md`](../specs/128-explicit-approval-assertion/contracts/approval-assertion-v1.md).
 
 ## Runtime safety hardening (2026-08-18)
 
@@ -506,8 +524,11 @@ ya, no en el slot elegido.
 - La frontera MCP parsea `execute_at` con una única función que exige una
   zona horaria explícita para `schedule_plan` y `reschedule_plan`. No se usa
   `model_copy(update=...)` como sustituto de validación: un timestamp naive
-  se rechaza antes de persistir y un `reschedule_plan` inválido conserva la
-  fila pendiente anterior.
+  se rechaza antes de persistir. La hora de ejecución forma parte de un
+  `ExecutionWindow` canónico y entra en los digests de definición,
+  validación y aprobación. El `reschedule_plan` genérico es fail-closed:
+  conserva la fila pendiente y exige una nueva intención validada/aprobada;
+  un miembro de bundle exige una revisión de bundle.
 - **Fallout real detectado y corregido**: tres tests preexistentes
   hardcodeaban la lista exacta de tools MCP (`test_domotics_mcp_contract.py`,
   `test_unified_mcp_contract.py`, `test_home_assistant_provider_runtime.py`)
@@ -2762,11 +2783,13 @@ que una UI/host autenticado emita grants sin introducir credenciales en el
 schema consumido por el agente. La autenticación humana real sigue siendo una
 responsabilidad del host confiable.
 
-`schedule_plan`, `reschedule_plan` y `cancel_scheduled_plan` actualizan tanto
-la cola de scheduling como `PlanRepository`; cancelar también deja el plan en
-estado terminal y bloquea una ejecución directa posterior. La reconciliación
-entre schedule y execution permanece autoritativa en los repositories y no
-reconstruye efectos físicos después de un crash.
+`schedule_plan` y `cancel_scheduled_plan` actualizan tanto la cola de
+scheduling como `PlanRepository`; cancelar también deja el plan en estado
+terminal y bloquea una ejecución directa posterior. `reschedule_plan` no
+reescribe una intención aprobada: devuelve
+`reschedule_requires_revalidation`, audita la decisión y conserva la fila
+pendiente. La reconciliación entre schedule y execution permanece autoritativa
+en los repositories y no reconstruye efectos físicos después de un crash.
 
 ## Versionado
 

@@ -6,7 +6,7 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.plan_service import PlanService
-from domoai.domain.errors import DomainError, ErrorCode
+from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
 from domoai.domain.models import (
     Command,
     CommandPostcondition,
@@ -143,7 +143,9 @@ async def test_single_execution_attempt_shares_one_attempt_id_across_commands() 
 
 
 @pytest.mark.asyncio
-async def test_two_separate_execute_calls_produce_distinct_attempt_ids(tmp_path: Path) -> None:
+async def test_terminal_plan_retry_is_rejected_without_a_second_attempt(
+    tmp_path: Path,
+) -> None:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -169,17 +171,16 @@ async def test_two_separate_execute_calls_produce_distinct_attempt_ids(tmp_path:
     )
     validated = plan_service.validate(plan)
     first_summary = await first_executor.execute(validated)
-    first_attempt_id = first_summary.outcomes[0].execution_attempt_id
+    assert first_summary.outcomes[0].execution_attempt_id is not None
+    assert len(adapter.calls) == 1
 
-    # Revalidate against current runtime state and reset to a claimable
-    # status, simulating a legitimate retry of the same plan.
+    # A terminal plan cannot be reopened by revalidation. Retrying the same
+    # physical intent requires a new plan identity and explicit admission.
     revalidated = plan_service.validate(validated.model_copy(update={"status": PlanStatus.READY}))
-    await plan_repository.save(revalidated)
-    second_executor = PlanExecutor(adapter, plan_service, audit, plan_repository=plan_repository)
-    second_summary = await second_executor.execute(revalidated)
-    second_attempt_id = second_summary.outcomes[0].execution_attempt_id
+    with pytest.raises(InvalidTransitionError):
+        await plan_repository.save(revalidated)
 
-    assert first_attempt_id != second_attempt_id
+    assert len(adapter.calls) == 1
 
 
 @pytest.mark.asyncio

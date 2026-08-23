@@ -15,6 +15,10 @@ class ErrorCode(StrEnum):
     DUPLICATE_COMMAND = "duplicate_command"
     STALE_PLAN = "stale_plan"
     APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_ASSERTION_REQUIRED = "approval_assertion_required"
+    APPROVAL_ASSERTION_INVALID = "approval_assertion_invalid"
+    APPROVAL_ASSERTION_REPLAYED = "approval_assertion_replayed"
+    APPROVAL_ASSERTION_EXPIRED = "approval_assertion_expired"
     OPERATOR_AUTHENTICATION_FAILED = "operator_authentication_failed"
     POLICY_DENIED = "policy_denied"
     CONFIRMATION_REQUIRED = "confirmation_required"
@@ -28,6 +32,12 @@ class ErrorCode(StrEnum):
     NOT_YET_DUE = "not_yet_due"
     SAFETY_LIMIT_EXCEEDED = "safety_limit_exceeded"
     POST_WRITE_RECONCILIATION_FAILED = "post_write_reconciliation_failed"
+    PLAN_IDENTITY_CONFLICT = "plan_identity_conflict"
+    RESCHEDULE_REQUIRES_REVALIDATION = "reschedule_requires_revalidation"
+    BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN = "bundle_member_reschedule_forbidden"
+    SCHEDULE_EVIDENCE_MISMATCH = "schedule_evidence_mismatch"
+    INVALID_COMMAND_VALUE = "invalid_command_value"
+    CONTROL_TAKEOVER_FAILED = "control_takeover_failed"
 
 
 class DomainError(ValueError):

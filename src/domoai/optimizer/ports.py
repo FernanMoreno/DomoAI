@@ -18,6 +18,7 @@ class OptimizationStatus(StrEnum):
     FEASIBLE = "feasible"
     OPTIMAL_HIERARCHY = "optimal_hierarchy"
     FEASIBLE_HIERARCHY = "feasible_hierarchy"
+    NO_ACTION_REQUIRED = "no_action_required"
     INFEASIBLE = "infeasible"
     INVALID = "invalid"
     TIMEOUT = "timeout"

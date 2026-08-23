@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from domoai.domain.models import StateSnapshot, StateStatus
 from domoai.runtime.clock import Clock, SystemClock
@@ -17,6 +19,14 @@ class StateStoreMetadata:
     version_counter: int
     state_versions: dict[tuple[str, str], int]
     inventory_fingerprint: str | None = None
+
+
+class RuntimeStatePersistencePort(Protocol):
+    async def persist(
+        self, snapshots: Sequence[StateSnapshot], metadata: StateStoreMetadata
+    ) -> None: ...
+
+    async def delete(self, device_id: str, metadata: StateStoreMetadata) -> None: ...
 
 
 class StateStore:
@@ -34,6 +44,16 @@ class StateStore:
         self._version_counter = 0
         self._inventory_fingerprint: str | None = None
         self._startup_reconfirmation: dict[tuple[str, str], tuple[object, StateStatus]] = {}
+        self._persistence: RuntimeStatePersistencePort | None = None
+
+    def bind_persistence(self, persistence: RuntimeStatePersistencePort) -> None:
+        """Attach the one durable writer used by every mutation path."""
+
+        self._persistence = persistence
+
+    @property
+    def persistence_bound(self) -> bool:
+        return self._persistence is not None
 
     def begin_revision(self) -> None:
         self._revision += 1
@@ -100,12 +120,15 @@ class StateStore:
             self._version_counter += 1
             self._state_versions[key] = self._version_counter
         self._snapshots[key] = snapshot
+        await self._persist([snapshot])
 
     async def delete(self, device_id: str) -> None:
         for key in [key for key in self._snapshots if key[0] == device_id]:
             del self._snapshots[key]
             self._state_versions.pop(key, None)
             self._startup_reconfirmation.pop(key, None)
+        if self._persistence is not None:
+            await self._persistence.delete(device_id, self.export_metadata())
 
     def peek(self, device_id: str, capability: str) -> StateSnapshot | None:
         """Return the cached snapshot without performing I/O or refreshing it."""
@@ -117,6 +140,20 @@ class StateStore:
 
     async def all(self) -> list[StateSnapshot]:
         return list(self._snapshots.values())
+
+    def max_state_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Return the oldest cached observation age for health reporting."""
+
+        if not self._snapshots:
+            return None
+        current_time = now or self.clock.now()
+        return max(
+            0.0,
+            max(
+                (current_time - snapshot.received_at).total_seconds()
+                for snapshot in self._snapshots.values()
+            ),
+        )
 
     async def mark_stale(self, now: datetime | None = None) -> list[StateSnapshot]:
         current_time = now or self.clock.now()
@@ -131,6 +168,7 @@ class StateStore:
                 self._version_counter += 1
                 self._state_versions[key] = self._version_counter
                 stale.append(updated)
+        await self._persist(stale)
         return stale
 
     async def mark_all_stale(self) -> list[StateSnapshot]:
@@ -144,4 +182,15 @@ class StateStore:
                 self._version_counter += 1
                 self._state_versions[key] = self._version_counter
                 stale.append(updated)
+        await self._persist(stale)
         return stale
+
+    async def persist_metadata(self) -> None:
+        """Flush revision-only changes such as inventory fingerprints."""
+
+        if self._persistence is not None:
+            await self._persistence.persist((), self.export_metadata())
+
+    async def _persist(self, snapshots: Sequence[StateSnapshot]) -> None:
+        if self._persistence is not None:
+            await self._persistence.persist(snapshots, self.export_metadata())

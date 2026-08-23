@@ -1,5 +1,14 @@
 {
   "$defs": {
+    "DependencyKind": {
+      "enum": [
+        "assumption",
+        "precondition",
+        "predecessor_outcome"
+      ],
+      "title": "DependencyKind",
+      "type": "string"
+    },
     "ErrorDetail": {
       "additionalProperties": false,
       "properties": {
@@ -85,6 +94,13 @@
             "type": "integer"
           },
           "title": "State Versions",
+          "type": "object"
+        },
+        "dependency_kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DependencyKind"
+          },
+          "title": "Dependency Kinds",
           "type": "object"
         },
         "capability_fingerprints": {

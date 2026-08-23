@@ -48,6 +48,7 @@ def choose_policy(
                 policy_id=policy.id,
                 action=policy.action,
                 reason=f"Matched policy {policy.id}",
+                allows_stale=policy.allows_stale,
             )
     return PolicyDecision(
         action=PolicyAction.ALLOW,

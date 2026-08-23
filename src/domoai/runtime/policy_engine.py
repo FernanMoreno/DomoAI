@@ -58,5 +58,6 @@ class PolicyEngine:
                 reason=(
                     f"Risk class {effective_risk.value} requires explicit operator confirmation"
                 ),
+                allows_stale=decision.allows_stale,
             )
         return decision

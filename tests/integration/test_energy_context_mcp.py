@@ -25,6 +25,7 @@ async def test_energy_context_provider_is_available_through_semantic_mcp_read() 
         "base_load_forecast",
         "export_tariffs",
         "battery",
+        "ev_states",
         "source_revision",
         "observed_at",
     }

@@ -1,0 +1,74 @@
+# AI-PROJECT-MANAGER-COMPOSITION-V2
+#
+# Derived from actual imports in src/domoai (see `uv run lint-imports` output
+# and the Composition Review Report). Do not hand-wave these — they encode
+# the real dependency direction found by grepping every `from domoai.` /
+# `import domoai.` line in each subpackage.
+
+[importlinter]
+root_package = domoai
+
+# Whole-tree safety net: no two siblings may depend on each other in both
+# directions, no matter what new subpackage gets added later.
+[importlinter:contract:acyclic-siblings]
+name = Sibling packages must remain acyclic
+type = acyclic_siblings
+ancestors = domoai
+depth = 10
+
+# domoai.domain is the innermost core: pydantic models, error types, and
+# domain rules. Nothing in domain may reach out to any other subpackage.
+[importlinter:contract:domain-independence]
+name = domain must not depend on any other domoai subpackage
+type = independence
+modules =
+    domoai.domain
+
+# Intended layering, high (entrypoint/composition) to low (core), each layer
+# may import any layer below it but never one above:
+#   mcp / lab    - process entrypoints (MCP servers, lab CLI)
+#   application  - composition root / use-case orchestration
+#   skills       - agent-facing workflow layer (imports optimizer)
+#   adapters     - protocol adapters (home_assistant, knx, matter, modbus,
+#                  zigbee2mqtt) + adapter SDK/fixtures
+#   optimizer    - CP-SAT / energy optimization
+#   persistence  - sqlite repositories
+#   config       - policy/settings loaders
+#   runtime      - clock, execution_context, ports, events, state_store,
+#                  registry, metrics, approval_store, risk_classifier
+#   domain       - core models
+#
+# KNOWN VIOLATION (see Composition Review Report): domoai.runtime also
+# contains orchestration modules (executor, event_consumer, twin, replay,
+# scheduler, bundle_commit, policy_engine) that import application, adapters,
+# persistence and config, i.e. modules *above* runtime in this layering. This
+# contract is intentionally left strict so the violation stays visible rather
+# than being defined away; see the migration note in the review report.
+[importlinter:contract:layers]
+name = Composition-root layers must depend only downward
+type = layers
+layers =
+    domoai.mcp
+    domoai.lab
+    domoai.application
+    domoai.skills
+    domoai.adapters
+    domoai.optimizer
+    domoai.persistence
+    domoai.config
+    domoai.runtime
+    domoai.domain
+
+# Protocol adapters must stay mutually independent: knx must not reach into
+# modbus, home_assistant must not reach into zigbee2mqtt, etc. Each adapter
+# only depends on domoai.adapters.sdk / domoai.adapters.fixtures, domain and
+# runtime today.
+[importlinter:contract:adapter-independence]
+name = Protocol adapters must not depend on each other
+type = independence
+modules =
+    domoai.adapters.home_assistant
+    domoai.adapters.knx
+    domoai.adapters.matter
+    domoai.adapters.modbus
+    domoai.adapters.zigbee2mqtt

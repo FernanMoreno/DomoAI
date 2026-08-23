@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "profile_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Profile Digest",
+      "type": "string"
+    },
+    "hardware_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Hardware Id",
+      "type": "string"
+    },
+    "firmware_version": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Firmware Version",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "checks": {
+      "additionalProperties": {
+        "type": "boolean"
+      },
+      "minProperties": 1,
+      "title": "Checks",
+      "type": "object"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "profile_digest",
+    "hardware_id",
+    "firmware_version",
+    "completed_at",
+    "checks",
+    "run_id"
+  ],
+  "title": "BatteryHILEvidence",
+  "type": "object"
+}

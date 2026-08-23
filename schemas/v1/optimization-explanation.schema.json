@@ -73,6 +73,7 @@
         "feasible",
         "optimal_hierarchy",
         "feasible_hierarchy",
+        "no_action_required",
         "infeasible",
         "invalid",
         "timeout",

@@ -39,6 +39,10 @@ class CompositeAdapter:
         registry: DeviceRegistry | None = None,
         event_queue_max_size: int = 1000,
         diagnostics_max_size: int = DEFAULT_DIAGNOSTICS_MAX_SIZE,
+        reconnect_initial_delay: float = 1.0,
+        reconnect_max_delay: float = 60.0,
+        max_reconnect_attempts: int = 3,
+        reconnect_on_stream_end: bool = False,
     ) -> None:
         if not adapters:
             raise ValueError("CompositeAdapter requires at least one adapter")
@@ -46,6 +50,10 @@ class CompositeAdapter:
             raise ValueError("CompositeAdapter event_queue_max_size must be positive")
         if diagnostics_max_size <= 0:
             raise ValueError("CompositeAdapter diagnostics_max_size must be positive")
+        if reconnect_initial_delay < 0 or reconnect_max_delay < reconnect_initial_delay:
+            raise ValueError("CompositeAdapter reconnect delays are invalid")
+        if max_reconnect_attempts <= 0:
+            raise ValueError("CompositeAdapter max_reconnect_attempts must be positive")
         adapter_ids = [adapter.adapter_id for adapter in adapters]
         if len(set(adapter_ids)) != len(adapter_ids):
             raise ValueError("CompositeAdapter requires unique adapter IDs")
@@ -59,8 +67,15 @@ class CompositeAdapter:
         self._dropped_events_by_adapter: defaultdict[str, int] = defaultdict(int)
         self._dropped_events_by_kind: defaultdict[str, int] = defaultdict(int)
         self._coalesced_events_total = 0
+        self._reconnect_attempts_total = 0
+        self._reconnect_success_total = 0
+        self._reconnect_failure_total = 0
         self._bulk_queue: asyncio.Queue[Any] | None = None
         self._priority_queue: asyncio.Queue[Any] | None = None
+        self._reconnect_initial_delay = reconnect_initial_delay
+        self._reconnect_max_delay = reconnect_max_delay
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._reconnect_on_stream_end = reconnect_on_stream_end
 
     @property
     def dropped_events_total(self) -> int:
@@ -77,6 +92,14 @@ class CompositeAdapter:
     @property
     def coalesced_events_total(self) -> int:
         return self._coalesced_events_total
+
+    @property
+    def reconnect_metrics(self) -> dict[str, int]:
+        return {
+            "attempts_total": self._reconnect_attempts_total,
+            "success_total": self._reconnect_success_total,
+            "failure_total": self._reconnect_failure_total,
+        }
 
     @property
     def event_queue_depth(self) -> dict[str, int]:
@@ -231,28 +254,74 @@ class CompositeAdapter:
 
         async def pump(adapter: AdapterPort) -> None:
             cancelled = False
-            try:
-                async for event in adapter.subscribe_events():
-                    if isinstance(event, StateChangedEvent):
-                        key = self._state_event_key(adapter.adapter_id, event, next(sequence))
-                        if key in bulk_pending:
-                            bulk_pending[key] = (adapter.adapter_id, event)
-                            self._coalesced_events_total += 1
-                        elif len(bulk_pending) < self._event_queue_max_size:
-                            bulk_pending[key] = (adapter.adapter_id, event)
-                            bulk_queue.put_nowait(key)
+            delay = self._reconnect_initial_delay
+            stream_end_reconnects = 0
+            while not cancelled:
+                try:
+                    async for event in adapter.subscribe_events():
+                        if isinstance(event, StateChangedEvent):
+                            key = self._state_event_key(adapter.adapter_id, event, next(sequence))
+                            if key in bulk_pending:
+                                bulk_pending[key] = (adapter.adapter_id, event)
+                                self._coalesced_events_total += 1
+                            elif len(bulk_pending) < self._event_queue_max_size:
+                                bulk_pending[key] = (adapter.adapter_id, event)
+                                bulk_queue.put_nowait(key)
+                            else:
+                                self._record_drop(adapter.adapter_id, event)
                         else:
-                            self._record_drop(adapter.adapter_id, event)
-                    else:
-                        await priority_queue.put((adapter.adapter_id, event, None))
-            except asyncio.CancelledError:
-                cancelled = True
-                raise
-            except (ConnectionError, OSError, TimeoutError) as error:
-                await priority_queue.put((adapter.adapter_id, None, error))
-            finally:
-                if not cancelled:
-                    await priority_queue.put((adapter.adapter_id, None, None))
+                            await priority_queue.put((adapter.adapter_id, event, None))
+                    if not self._reconnect_on_stream_end or stream_end_reconnects >= 1:
+                        break
+                    stream_end_reconnects += 1
+                    raise ConnectionError("Adapter event stream ended unexpectedly")
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                except (ConnectionError, OSError, TimeoutError) as error:
+                    self._record_failure(adapter.adapter_id, "adapter_event_stream_failed", error)
+                    await priority_queue.put((adapter.adapter_id, None, error))
+                    recovered = False
+                    for _ in range(self._max_reconnect_attempts):
+                        self._reconnect_attempts_total += 1
+                        await asyncio.sleep(delay)
+                        try:
+                            await adapter.connect()
+                        except (ConnectionError, OSError, TimeoutError) as reconnect_error:
+                            self._record_failure(
+                                adapter.adapter_id,
+                                "adapter_reconnect_failed",
+                                reconnect_error,
+                            )
+                            self._reconnect_failure_total += 1
+                            await priority_queue.put((adapter.adapter_id, None, reconnect_error))
+                            delay = min(
+                                max(delay * 2, self._reconnect_initial_delay),
+                                self._reconnect_max_delay,
+                            )
+                            continue
+                        self._connected.add(adapter.adapter_id)
+                        self._reconnect_success_total += 1
+                        recovered = True
+                        await priority_queue.put(
+                            (
+                                adapter.adapter_id,
+                                AdapterDiagnosticEvent(
+                                    source_adapter_id=adapter.adapter_id,
+                                    payload={
+                                        "source_adapter_id": adapter.adapter_id,
+                                        "event": "adapter_reconnected",
+                                    },
+                                ),
+                                None,
+                            )
+                        )
+                        delay = self._reconnect_initial_delay
+                        break
+                    if not recovered:
+                        break
+            if not cancelled:
+                await priority_queue.put((adapter.adapter_id, None, None))
 
         tasks = [asyncio.create_task(pump(adapter)) for adapter in active]
         remaining = len(tasks)
@@ -313,11 +382,25 @@ class CompositeAdapter:
         health = await asyncio.gather(
             *(adapter.health() for adapter in self.adapters), return_exceptions=True
         )
-        connected = any(isinstance(item, AdapterHealth) and item.connected for item in health)
-        messages = [
-            item.message for item in health if isinstance(item, AdapterHealth) and item.message
-        ]
-        components = [item for item in health if isinstance(item, AdapterHealth)]
+        components: list[AdapterHealth] = []
+        for adapter, item in zip(self.adapters, health, strict=True):
+            if isinstance(item, BaseException):
+                self._connected.discard(adapter.adapter_id)
+                self._record_failure(adapter.adapter_id, "adapter_health_failed", item)
+                components.append(
+                    AdapterHealth(
+                        adapter_id=adapter.adapter_id,
+                        connected=False,
+                        message=f"health check failed: {item}",
+                    )
+                )
+                continue
+            connected = item.connected and adapter.adapter_id in self._connected
+            if not connected:
+                self._connected.discard(adapter.adapter_id)
+            components.append(item.model_copy(update={"connected": connected}))
+        connected = any(item.connected for item in components)
+        messages = [item.message for item in components if item.message]
         return AdapterHealth(
             adapter_id=self.adapter_id,
             connected=connected,
@@ -375,6 +458,7 @@ class CompositeAdapter:
         return ()
 
     def _record_failure(self, adapter_id: str, kind: str, error: BaseException) -> None:
+        self._connected.discard(adapter_id)
         if self.registry is not None:
             self.registry.mark_source_unavailable(adapter_id)
         self._diagnostics.append(

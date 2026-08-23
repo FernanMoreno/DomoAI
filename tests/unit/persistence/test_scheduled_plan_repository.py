@@ -4,15 +4,29 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from domoai.domain.models import Command, Plan
+from domoai.domain.models import Command, ExecutionWindow, Plan, ValidationResult, ValidationStatus
 from domoai.persistence.repositories import ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 
 
 def _scheduled_plan(*, plan_id: str = "plan-scheduled-1", minutes: int = 30) -> Plan:
+    execute_at = datetime.now(UTC) + timedelta(minutes=minutes)
     return Plan(
         id=plan_id,
-        execute_at=datetime.now(UTC) + timedelta(minutes=minutes),
+        execute_at=execute_at,
+        execution_window=ExecutionWindow(
+            intended_at=execute_at,
+            not_before=execute_at - timedelta(minutes=1),
+            not_after=execute_at + timedelta(minutes=1),
+            timezone="UTC",
+            revision=0,
+        ),
+        validation=ValidationResult(
+            status=ValidationStatus.VALID,
+            validated_at=datetime.now(UTC),
+            runtime_revision="runtime:policy",
+            digest="sha256:validated-schedule",
+        ),
         commands=[
             Command(
                 id=f"{plan_id}:command",
@@ -64,9 +78,62 @@ async def test_reschedule_succeeds_only_while_pending(tmp_path) -> None:
     await repository.schedule(plan)
 
     new_time = datetime.now(UTC) + timedelta(hours=2)
-    assert await repository.reschedule(plan.id, new_time) is True
+    assert await repository.reschedule(plan.id, new_time) is False
     stored_plan, _ = await repository.get(plan.id)
-    assert stored_plan.execute_at == new_time
+    assert stored_plan.execute_at == plan.execute_at
+
+
+@pytest.mark.asyncio
+async def test_reschedule_requires_new_validated_temporal_evidence_and_cas(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = ScheduledPlanRepository(database)
+    plan = _scheduled_plan()
+    await repository.schedule(plan)
+    current = await repository.get(plan.id)
+    assert current is not None
+    stored, status = current
+    assert status == "pending"
+    assert stored.execution_window is not None
+
+    new_time = stored.execute_at + timedelta(hours=2)
+    replacement_window = stored.execution_window.model_copy(
+        update={
+            "intended_at": new_time,
+            "not_before": new_time - timedelta(minutes=1),
+            "not_after": new_time + timedelta(minutes=1),
+            "revision": stored.schedule_revision + 1,
+        }
+    )
+    replacement = stored.model_copy(
+        update={
+            "execute_at": new_time,
+            "execution_window": replacement_window,
+            "schedule_revision": stored.schedule_revision + 1,
+            "validation": stored.validation.model_copy(update={"digest": "sha256:new-window"}),
+        }
+    )
+
+    assert await repository.reschedule(
+        plan.id,
+        new_time,
+        expected_revision=stored.schedule_revision,
+        expected_validation_digest=stored.validation.digest,
+        replacement_plan=replacement,
+    ) is True
+    updated, updated_status = await repository.get(plan.id)
+    assert updated_status == "pending"
+    assert updated is not None
+    assert updated.schedule_revision == 1
+    assert updated.validation.digest == "sha256:new-window"
+
+    assert await repository.reschedule(
+        plan.id,
+        new_time + timedelta(minutes=1),
+        expected_revision=stored.schedule_revision,
+        expected_validation_digest=stored.validation.digest,
+        replacement_plan=replacement,
+    ) is False
 
     await repository.mark_executed(plan.id)
     assert await repository.reschedule(plan.id, new_time) is False
@@ -87,6 +154,12 @@ async def test_pending_schedule_survives_a_fresh_repository_instance(tmp_path) -
 
     pending = await restarted_repository.list_pending()
     assert [item.id for item in pending] == [plan.id]
+    persisted, status = await restarted_repository.get(plan.id)
+    assert status == "pending"
+    assert persisted is not None
+    assert persisted.execution_window is not None
+    assert persisted.execution_window.timezone == "UTC"
+    assert persisted.schedule_revision == 0
 
 
 @pytest.mark.asyncio

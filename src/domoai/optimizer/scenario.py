@@ -19,7 +19,9 @@ __all__ = [
     "Load",
     "Objective",
     "OptimizationScenario",
+    "TerminalSOCPolicy",
     "validate_scenario",
+    "validate_executable_scenario",
 ]
 
 
@@ -106,6 +108,26 @@ class Objective(StrictModel):
     priority: int = 0
 
 
+class TerminalSOCPolicy(StrictModel):
+    """Explicit rolling-horizon reserve/terminal-value policy."""
+
+    minimum_kwh: float | None = Field(default=None, ge=0)
+    target_kwh: float | None = Field(default=None, ge=0)
+    value_eur_per_kwh: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> TerminalSOCPolicy:
+        if self.minimum_kwh is None and self.target_kwh is None and self.value_eur_per_kwh is None:
+            raise ValueError("terminal SOC policy must declare a minimum, target or value")
+        if (
+            self.minimum_kwh is not None
+            and self.target_kwh is not None
+            and self.target_kwh < self.minimum_kwh
+        ):
+            raise ValueError("terminal SOC target must not be below terminal minimum")
+        return self
+
+
 class OptimizationScenario(StrictModel):
     schema_version: str = "v1"
     id: str = Field(min_length=1)
@@ -116,6 +138,7 @@ class OptimizationScenario(StrictModel):
     constraints: list[Constraint] = Field(default_factory=list)
     objectives: list[Objective] = Field(default_factory=list)
     energy_context: EnergyContext | None = None
+    terminal_soc_policy: TerminalSOCPolicy | None = None
     inputs: list[dict[str, Any]] = Field(default_factory=list)
     assumptions: dict[str, Any] = Field(default_factory=dict)
     solver_time_limit_seconds: float = Field(default=5.0, ge=0)
@@ -250,6 +273,28 @@ def validate_scenario(
         battery = scenario.energy_context.battery
         if battery is not None and battery.actuator is not None:
             errors.extend(_validate_battery_actuator(registry, battery.actuator))
+    if scenario.terminal_soc_policy is not None:
+        battery = scenario.energy_context.battery if scenario.energy_context else None
+        if battery is None:
+            errors.append(
+                _diagnostic(
+                    "terminal_soc_requires_battery",
+                    "Terminal SOC policy requires a battery energy context",
+                )
+            )
+        else:
+            policy = scenario.terminal_soc_policy
+            for name, value in (
+                ("minimum_kwh", policy.minimum_kwh),
+                ("target_kwh", policy.target_kwh),
+            ):
+                if value is not None and value > battery.max_soc_kwh:
+                    errors.append(
+                        _diagnostic(
+                            "terminal_soc_out_of_range",
+                            f"Terminal SOC {name} exceeds battery maximum",
+                        )
+                    )
     if scenario.conservative and scenario.energy_context is not None:
         if not all(
             point.confidence is not None for point in scenario.energy_context.solar_forecast
@@ -362,6 +407,71 @@ def validate_scenario(
         }:
             errors.append(
                 _diagnostic("unsupported_objective", f"Unsupported objective {objective.name!r}")
+            )
+    return errors
+
+
+def validate_executable_scenario(
+    scenario: OptimizationScenario, registry: DeviceRegistry
+) -> list[ErrorDetail]:
+    """Add provider-evidence gates required before physical proposal validation."""
+
+    errors = validate_scenario(scenario, registry)
+    if not scenario.ev_loads:
+        return errors
+    context = scenario.energy_context
+    states = {state.device_id: state for state in context.ev_states} if context else {}
+    for ev_load in scenario.ev_loads:
+        state = states.get(ev_load.device_id)
+        if state is None:
+            errors.append(
+                _diagnostic(
+                    "ev_state_provenance_missing",
+                    f"EV {ev_load.device_id!r} has no provider-observed state",
+                )
+            )
+            continue
+        if state.quality.value != "good":
+            errors.append(
+                _diagnostic(
+                    "ev_state_unavailable",
+                    f"EV {ev_load.device_id!r} state quality is not good",
+                )
+            )
+        if context is not None and state.source_revision != context.source_revision:
+            errors.append(
+                _diagnostic(
+                    "ev_state_conflict",
+                    f"EV {ev_load.device_id!r} state revision does not match energy context",
+                )
+            )
+        if not state.connected:
+            errors.append(
+                _diagnostic(
+                    "ev_disconnected",
+                    f"EV {ev_load.device_id!r} is not connected",
+                )
+            )
+        if abs(ev_load.initial_soc_kwh - state.soc_kwh) > 1e-6:
+            errors.append(
+                _diagnostic(
+                    "ev_state_conflict",
+                    f"EV {ev_load.device_id!r} caller SOC differs from observed state",
+                )
+            )
+        if ev_load.capacity_kwh != state.capacity_kwh:
+            errors.append(
+                _diagnostic(
+                    "ev_state_conflict",
+                    f"EV {ev_load.device_id!r} caller capacity differs from observed state",
+                )
+            )
+        if ev_load.max_charge_kw > state.max_charge_kw:
+            errors.append(
+                _diagnostic(
+                    "ev_state_conflict",
+                    f"EV {ev_load.device_id!r} requested charge limit exceeds observed limit",
+                )
             )
     return errors
 

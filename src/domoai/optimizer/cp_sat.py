@@ -105,7 +105,7 @@ class CpSatOptimizer:
         )
         return build_result(
             scenario_id=scenario.id,
-            status=_status(status),
+            status=(OptimizationStatus.NO_ACTION_REQUIRED if not plans else _status(status)),
             plan=plans[0] if plans else None,
             plans=plans,
             objective_values={"start_slot_sum": float(sum(selected_slots.values()))},
@@ -304,6 +304,13 @@ class CpSatOptimizer:
                 >= to_energy_int(ev_load.target_soc_kwh)
             )
 
+        terminal_policy = scenario.terminal_soc_policy
+        if battery is not None and terminal_policy is not None:
+            if terminal_policy.minimum_kwh is not None:
+                model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.minimum_kwh))
+            if terminal_policy.target_kwh is not None:
+                model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.target_kwh))
+
         solver, status, solved_tiers, wall_time, degraded = _solve_tiers(
             model,
             scenario,
@@ -316,6 +323,7 @@ class CpSatOptimizer:
             context=context,
             charge_variables=charge_variables,
             discharge_variables=discharge_variables,
+            terminal_soc_variable=(soc_variables[-1] if battery is not None else None),
         )
         failure = _failure_result(scenario, status)
         if failure is not None:
@@ -425,7 +433,11 @@ class CpSatOptimizer:
         )
         return build_result(
             scenario_id=scenario.id,
-            status=_status_for_tiers(status, degraded),
+            status=(
+                OptimizationStatus.NO_ACTION_REQUIRED
+                if not plans and scenario.terminal_soc_policy is None
+                else _status_for_tiers(status, degraded)
+            ),
             plan=plans[0] if plans else None,
             plans=plans,
             objective_values={
@@ -437,6 +449,20 @@ class CpSatOptimizer:
                 "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
                 "battery_throughput_kwh": battery_throughput_kwh,
                 "battery_degradation_cost": battery_degradation_cost,
+                "terminal_soc_kwh": (
+                    solver.Value(soc_variables[-1]) / SOC_SCALE if battery is not None else 0.0
+                ),
+                "terminal_soc_value_eur": (
+                    (
+                        solver.Value(soc_variables[-1])
+                        / SOC_SCALE
+                        * scenario.terminal_soc_policy.value_eur_per_kwh
+                    )
+                    if battery is not None
+                    and scenario.terminal_soc_policy is not None
+                    and scenario.terminal_soc_policy.value_eur_per_kwh is not None
+                    else 0.0
+                ),
             },
             constraint_summary={
                 "hard_satisfied": True,
@@ -445,6 +471,11 @@ class CpSatOptimizer:
                 "violations": [],
                 "soft_violations": _reported_soft_violations(solver, soft_violations),
                 "forecast_confidence": forecast_confidence,
+                "terminal_soc_policy": (
+                    scenario.terminal_soc_policy.model_dump(mode="json")
+                    if scenario.terminal_soc_policy is not None
+                    else None
+                ),
             },
             solver_evidence=solver_evidence,
         )
@@ -633,6 +664,7 @@ def _solve_tiers(
     context: Any,
     charge_variables: list[Any] | None = None,
     discharge_variables: list[Any] | None = None,
+    terminal_soc_variable: Any | None = None,
 ) -> tuple[Any, int, list[SolvedTier], float, bool]:
     tiers: list[dict[str, Any]] = []
     if soft_violations:
@@ -668,6 +700,30 @@ def _solve_tiers(
                     "tier_terms": tier_terms,
                 }
             )
+    terminal_value = (
+        scenario.terminal_soc_policy.value_eur_per_kwh
+        if scenario.terminal_soc_policy is not None
+        else None
+    )
+    if terminal_value is not None and terminal_value > 0 and terminal_soc_variable is not None:
+        next_priority = (
+            max(
+                (
+                    objective.priority
+                    for priority_group in _energy_objective_tiers(scenario)
+                    for objective in priority_group
+                ),
+                default=0,
+            )
+            + 1
+        )
+        tiers.append(
+            {
+                "priority": next_priority,
+                "terms": ["terminal_soc_value"],
+                "tier_terms": [-round(terminal_value * OBJECTIVE_SCALE) * terminal_soc_variable],
+            }
+        )
 
     solver: Any = None
     status: Any = cp_model.UNKNOWN
@@ -839,16 +895,17 @@ def _proposal_plan(
                     command=comfort_load.end_command,
                     value=comfort_load.end_value,
                     unit=comfort_load.unit,
-                    idempotency_key=(
-                        f"optimization:{scenario.id}:{comfort_load.id}:end:{run_end}"
-                    ),
+                    idempotency_key=(f"optimization:{scenario.id}:{comfort_load.id}:end:{run_end}"),
                     intent=f"scheduled_slot:{run_end}",
                 )
             )
     battery = scenario.energy_context.battery if scenario.energy_context is not None else None
     actuator = battery.actuator if battery is not None else None
     if actuator is not None:
-        previous_state: tuple[str, float | None] = (actuator.stop_command, None)
+        # The physical inverter state is not known to the optimizer.  A
+        # synthetic STOPPED predecessor must therefore never suppress slot 0:
+        # takeover and readback own the real baseline.
+        previous_state: tuple[str, float | None] | None = None
         for slot in range(scenario.horizon.slots):
             charge_kw, discharge_kw = (battery_dispatch_slots or {}).get(slot, (0.0, 0.0))
             if charge_kw > 0 and discharge_kw > 0:
@@ -862,7 +919,7 @@ def _proposal_plan(
             else:
                 state = (actuator.stop_command, None)
                 unit = None
-            if state == previous_state:
+            if previous_state is not None and state == previous_state:
                 continue
             if state[1] is None:
                 feedback_value = 0.0
@@ -882,15 +939,17 @@ def _proposal_plan(
                     value=state[1],
                     unit=unit,
                     idempotency_key=f"optimization:{scenario.id}:battery:{slot}",
-                    intent=f"scheduled_slot:{slot}",
+                    intent=(
+                        f"takeover_first_slot:{slot}"
+                        if previous_state is None
+                        else f"scheduled_slot:{slot}"
+                    ),
                     postconditions=[
                         CommandPostcondition(
                             capability=actuator.power_feedback_capability,
                             expected=feedback_value,
                             tolerance=actuator.power_feedback_tolerance_kw,
-                            settle_timeout_seconds=(
-                                actuator.power_feedback_settle_timeout_seconds
-                            ),
+                            settle_timeout_seconds=(actuator.power_feedback_settle_timeout_seconds),
                             poll_interval_seconds=actuator.power_feedback_poll_interval_seconds,
                             reconcile_capabilities=(
                                 [actuator.soc_reconciliation_capability]
@@ -902,7 +961,7 @@ def _proposal_plan(
                 )
             )
             previous_state = state
-        if previous_state[0] != actuator.stop_command:
+        if previous_state is not None and previous_state[0] != actuator.stop_command:
             horizon_slot = scenario.horizon.slots
             groups.setdefault(_slot_execute_at(horizon_slot), []).append(
                 Command(
@@ -916,9 +975,7 @@ def _proposal_plan(
                             capability=actuator.power_feedback_capability,
                             expected=0.0,
                             tolerance=actuator.power_feedback_tolerance_kw,
-                            settle_timeout_seconds=(
-                                actuator.power_feedback_settle_timeout_seconds
-                            ),
+                            settle_timeout_seconds=(actuator.power_feedback_settle_timeout_seconds),
                             poll_interval_seconds=actuator.power_feedback_poll_interval_seconds,
                             reconcile_capabilities=(
                                 [actuator.soc_reconciliation_capability]

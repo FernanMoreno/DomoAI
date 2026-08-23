@@ -69,6 +69,10 @@ does not grant authorization and it never calls a physical adapter directly.
 ## Safety rules
 
 - A missing approval is a stop condition, not an invitation to retry execution.
+- An authenticated operator principal is not consent by itself. The trusted
+  host must provide a one-time human `ApprovalAssertion` bound to the exact
+  plan or `bundle_digest`; missing, mismatching, replayed or expired assertions
+  stop before a grant or physical mutation is created.
 - A changed runtime revision or validation digest requires revalidation.
 - Battery telemetry or mathematical limits without an explicit actuator
   binding are analysis-only. Non-zero battery dispatch must stop with

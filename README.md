@@ -82,10 +82,11 @@ uv run pytest -q tests/integration/test_energy_skill_workflow.py
 ```
 
 The workflow uses the same connection for semantic reads, proposals,
-explanations and plan validation, and never executes outside `execute_plan`.
-Sensitive plans pause for explicit operator approval.
+explanations and plan validation. The published v3 skill hands every mutation
+to `commit_or_schedule_bundle`; it never calls an adapter directly. Sensitive
+bundles pause for explicit operator approval.
 
-For energy-aware scenarios, the portable v2 procedure reads a complete typed
+For energy-aware scenarios, the portable v3 procedure reads a complete typed
 context through `mcp.get_energy_context` before calling the proposal-only
 optimizer. The context aligns tariffs and solar forecasts to a fixed horizon
 and may include one battery profile. CP-SAT returns cost, peak-import and
@@ -115,6 +116,26 @@ The profile is strict, versioned and credential-free. It must contain real
 installation values before using the result for optimization; the example's
 Madrid values only document the shape. The older individual `DOMOAI_SOLAR_*`
 variables remain available as a mutually exclusive compatibility fallback.
+
+Physical battery dispatch is `software-qualified` when its server-owned
+binding is configured. It becomes `hil-qualified` only with matching complete
+inverter evidence. Set `DOMOAI_BATTERY_DISPATCH_PRODUCTION=1` together with
+`DOMOAI_BATTERY_HIL_EVIDENCE_PATH` only after the opt-in HIL run has passed;
+the runtime fails closed otherwise. A deterministic test run never certifies
+real hardware.
+
+Dispatchable battery control is opt-in through a complete, server-owned
+canonical profile:
+
+```bash
+export DOMOAI_BATTERY_DISPATCH_PROFILE_PATH=config/dispatchable-battery-profile.json
+uv run domoai-mcp
+```
+
+The profile is strict v1 JSON and must contain the canonical device, actuator,
+feedback, SOC and capacity evidence. A mapping declaration alone never enables
+physical dispatch; live energy mode, the profile and the runtime safety gates
+are all required.
 
 ## Universal Provider SDK
 

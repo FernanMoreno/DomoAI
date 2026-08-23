@@ -4,22 +4,28 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
 from domoai.domain.models import (
     AuditEvent,
     BundleCommit,
     BundleCommitStatus,
+    BundleMemberCommit,
     BundleMemberCommitStatus,
     Command,
     Device,
     ExecutionOutcome,
+    ExecutionStatus,
+    ExecutionWindow,
     Plan,
     PlanStatus,
     RecurrenceRule,
     StateSnapshot,
 )
+from domoai.domain.transitions import assert_plan_transition
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import redact_payload
@@ -176,21 +182,80 @@ class PlanRepository:
         self._repository = SQLiteJsonRepository(database, "plans")
         self.clock = clock or SystemClock()
 
+    async def save_validation(self, plan: Plan) -> None:
+        """Persist validation evidence without bypassing lifecycle guards."""
+
+        await self.save(plan)
+
+    async def save_approval(self, plan: Plan) -> None:
+        """Persist an approval transition without accepting arbitrary states."""
+
+        if plan.status is not PlanStatus.APPROVED:
+            raise InvalidTransitionError(plan.status.value, PlanStatus.APPROVED.value)
+        await self.save(plan)
+
+    async def settle_execution(self, plan: Plan) -> None:
+        """Persist terminal execution evidence without reopening the plan."""
+
+        terminal_statuses = {
+            PlanStatus.COMPLETED,
+            PlanStatus.PARTIALLY_FAILED,
+            PlanStatus.FAILED,
+            PlanStatus.UNKNOWN,
+            PlanStatus.CANCELLED,
+        }
+        if plan.status not in terminal_statuses:
+            raise InvalidTransitionError(plan.status.value, "terminal")
+        persisted = await self.get(plan.id)
+        if persisted is None or persisted.status is not PlanStatus.EXECUTING:
+            current = persisted.status.value if persisted is not None else "missing"
+            raise InvalidTransitionError(current, plan.status.value)
+        await self.save(plan)
+
     async def save(self, plan: Plan) -> None:
-        timestamp = self.clock.now().isoformat()
-        self._repository.database.connection.execute(
-            """INSERT INTO plans (id, payload, status, updated_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-               payload=excluded.payload, status=excluded.status, updated_at=excluded.updated_at""",
-            (
-                plan.id,
-                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
-                plan.status.value,
-                timestamp,
-            ),
-        )
-        self._repository.database.connection.commit()
+        connection = self._repository.database.connection
+        try:
+            # Lifecycle evidence and identity checks must observe the same
+            # snapshot as the write. This serializes competing writers before
+            # either can replace the definition bound to a plan id.
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT status, payload FROM plans WHERE id = ?",
+                (plan.id,),
+            ).fetchone()
+            if existing is not None:
+                current_status = PlanStatus(existing[0])
+                if current_status is not plan.status:
+                    assert_plan_transition(current_status, plan.status)
+                stored_plan = Plan.model_validate(json.loads(existing[1]))
+                if (
+                    stored_plan.definition_digest is not None
+                    and stored_plan.definition_digest != plan.definition_digest
+                ):
+                    raise DomainError(
+                        ErrorCode.PLAN_IDENTITY_CONFLICT,
+                        "Plan identity is already bound to a different definition",
+                        details={"plan_id": plan.id},
+                    )
+            timestamp = self.clock.now().isoformat()
+            connection.execute(
+                """INSERT INTO plans (id, payload, status, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                   payload=excluded.payload,
+                   status=excluded.status,
+                   updated_at=excluded.updated_at""",
+                (
+                    plan.id,
+                    json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                    plan.status.value,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     async def get(self, plan_id: str) -> Plan | None:
         payload = await self._repository.get(plan_id)
@@ -238,22 +303,52 @@ class PlanRepository:
             return False
         placeholders = ",".join("?" for _ in claimable_statuses)
         timestamp = self.clock.now().isoformat()
-        cursor = self._repository.database.connection.execute(
-            f"""INSERT INTO plans (id, payload, status, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                payload=excluded.payload, status=excluded.status, updated_at=excluded.updated_at
-                WHERE plans.status IN ({placeholders})""",
-            (
-                plan.id,
-                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
-                plan.status.value,
-                timestamp,
-                *(status.value for status in claimable_statuses),
-            ),
-        )
-        self._repository.database.connection.commit()
-        return cursor.rowcount > 0
+        connection = self._repository.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT status, payload FROM plans WHERE id = ?",
+                (plan.id,),
+            ).fetchone()
+            if existing is not None:
+                stored_plan = Plan.model_validate(json.loads(existing[1]))
+                if (
+                    stored_plan.definition_digest is not None
+                    and stored_plan.definition_digest != plan.definition_digest
+                ):
+                    raise DomainError(
+                        ErrorCode.PLAN_IDENTITY_CONFLICT,
+                        "Plan identity is already bound to a different definition",
+                        details={"plan_id": plan.id},
+                    )
+                cursor = connection.execute(
+                    f"""UPDATE plans
+                        SET payload = ?, status = ?, updated_at = ?
+                        WHERE id = ? AND status IN ({placeholders})""",
+                    (
+                        json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                        plan.status.value,
+                        timestamp,
+                        plan.id,
+                        *(status.value for status in claimable_statuses),
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    """INSERT INTO plans (id, payload, status, updated_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        plan.id,
+                        json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                        plan.status.value,
+                        timestamp,
+                    ),
+                )
+            connection.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            connection.rollback()
+            raise
 
     async def list_by_status(self, statuses: frozenset[PlanStatus]) -> list[Plan]:
         placeholders = ",".join("?" for _ in statuses)
@@ -311,14 +406,158 @@ class BundleCommitRepository:
         cursor.close()
         return BundleCommit.model_validate(json.loads(row[0])) if row else None
 
+    async def get_for_plan(self, plan_id: str) -> BundleCommit | None:
+        cursor = self.database.connection.execute("SELECT payload FROM bundle_commits")
+        rows = cursor.fetchall()
+        cursor.close()
+        for row in rows:
+            bundle = BundleCommit.model_validate(json.loads(row[0]))
+            if any(member.plan_id == plan_id for member in bundle.members):
+                return bundle
+        return None
+
+    async def record_member_outcome(
+        self,
+        plan_id: str,
+        *,
+        status: BundleMemberCommitStatus,
+        execution_status: ExecutionStatus | None,
+        details: dict[str, Any],
+    ) -> BundleCommit | None:
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("SELECT id, payload FROM bundle_commits").fetchall()
+            stored: BundleCommit | None = None
+            for row in rows:
+                candidate = BundleCommit.model_validate(json.loads(row[1]))
+                if any(member.plan_id == plan_id for member in candidate.members):
+                    stored = candidate
+                    break
+            if stored is None:
+                connection.commit()
+                return None
+            index = next(
+                index for index, member in enumerate(stored.members) if member.plan_id == plan_id
+            )
+            current = stored.members[index]
+            if current.status in {
+                BundleMemberCommitStatus.EXECUTED,
+                BundleMemberCommitStatus.FAILED,
+                BundleMemberCommitStatus.UNKNOWN,
+                BundleMemberCommitStatus.MISSED,
+            }:
+                # Re-delivery is safe only when it carries the same terminal
+                # evidence. A conflicting second settlement is not allowed to
+                # rewrite the fulfillment ledger.
+                if current.status is status and current.execution_status is execution_status:
+                    connection.commit()
+                    return stored
+                connection.rollback()
+                raise ValueError(f"bundle member {plan_id} is already terminal")
+            members = list(stored.members)
+            members[index] = current.model_copy(
+                update={
+                    "status": status,
+                    "execution_status": execution_status,
+                    "details": details,
+                    "scheduled": True,
+                }
+            )
+            aggregate_status = self._aggregate_fulfillment_status(members)
+            updated = stored.model_copy(
+                update={
+                    "members": members,
+                    "status": aggregate_status,
+                    "updated_at": self.clock.now(),
+                }
+            )
+            cursor = connection.execute(
+                """UPDATE bundle_commits
+                   SET status = ?, payload = ?, updated_at = ?
+                   WHERE id = ? AND status IN (?, ?, ?)""",
+                (
+                    updated.status.value,
+                    json.dumps(updated.model_dump(mode="json"), sort_keys=True),
+                    updated.updated_at.isoformat(),
+                    updated.id,
+                    BundleCommitStatus.SCHEDULED.value,
+                    BundleCommitStatus.PARTIALLY_COMMITTED.value,
+                    BundleCommitStatus.COMMITTING.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"bundle {updated.id} fulfillment CAS failed")
+            connection.commit()
+            return updated
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _aggregate_fulfillment_status(
+        members: Sequence[BundleMemberCommit],
+    ) -> BundleCommitStatus:
+        statuses = {member.status for member in members}
+        if statuses == {BundleMemberCommitStatus.EXECUTED}:
+            return BundleCommitStatus.COMPLETED
+        if BundleMemberCommitStatus.PENDING in statuses:
+            return BundleCommitStatus.COMMITTING
+        if statuses & {BundleMemberCommitStatus.SCHEDULED}:
+            return BundleCommitStatus.SCHEDULED
+        if BundleMemberCommitStatus.UNKNOWN in statuses:
+            return (
+                BundleCommitStatus.PARTIALLY_COMMITTED
+                if BundleMemberCommitStatus.EXECUTED in statuses
+                else BundleCommitStatus.UNKNOWN
+            )
+        if BundleMemberCommitStatus.MISSED in statuses:
+            return (
+                BundleCommitStatus.MISSED
+                if statuses == {BundleMemberCommitStatus.MISSED}
+                else BundleCommitStatus.PARTIALLY_COMMITTED
+            )
+        if BundleMemberCommitStatus.FAILED in statuses:
+            return (
+                BundleCommitStatus.PARTIALLY_COMMITTED
+                if BundleMemberCommitStatus.EXECUTED in statuses
+                else BundleCommitStatus.FAILED
+            )
+        return BundleCommitStatus.UNKNOWN
+
     async def list_non_terminal(self) -> list[BundleCommit]:
+        placeholders = ",".join("?" for _ in ("committing", "scheduled", "partial"))
         cursor = self.database.connection.execute(
-            "SELECT payload FROM bundle_commits WHERE status = ? ORDER BY updated_at",
-            (BundleCommitStatus.COMMITTING.value,),
+            (
+                "SELECT payload FROM bundle_commits "
+                f"WHERE status IN ({placeholders}) ORDER BY updated_at"
+            ),
+            (
+                BundleCommitStatus.COMMITTING.value,
+                BundleCommitStatus.SCHEDULED.value,
+                BundleCommitStatus.PARTIALLY_COMMITTED.value,
+            ),
         )
         rows = cursor.fetchall()
         cursor.close()
         return [BundleCommit.model_validate(json.loads(row[0])) for row in rows]
+
+    async def is_scheduled_member(self, plan_id: str) -> bool:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM bundle_commits WHERE status = ?",
+            (BundleCommitStatus.SCHEDULED.value,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        for row in rows:
+            bundle = BundleCommit.model_validate(json.loads(row[0]))
+            if any(
+                member.plan_id == plan_id
+                and member.status is BundleMemberCommitStatus.SCHEDULED
+                for member in bundle.members
+            ):
+                return True
+        return False
 
     async def schedule_members_transaction(
         self,
@@ -505,6 +744,71 @@ class RuntimeStateMetadataRepository:
         self.database.connection.commit()
 
 
+class RuntimeStatePersistenceRepository:
+    """Atomically persist normalized snapshots and StateStore metadata."""
+
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+        self.database = database
+        self.clock = clock or SystemClock()
+
+    async def persist(
+        self, snapshots: Sequence[StateSnapshot], metadata: StateStoreMetadata
+    ) -> None:
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for snapshot in snapshots:
+                connection.execute(
+                    """INSERT INTO state_snapshots
+                       (device_id, capability, payload, observed_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(device_id, capability) DO UPDATE SET
+                       payload=excluded.payload, observed_at=excluded.observed_at""",
+                    (
+                        snapshot.device_id,
+                        snapshot.capability,
+                        json.dumps(snapshot.model_dump(mode="json"), sort_keys=True),
+                        snapshot.observed_at.isoformat(),
+                    ),
+                )
+            self._save_metadata_without_commit(connection, metadata)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    async def delete(self, device_id: str, metadata: StateStoreMetadata) -> None:
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM state_snapshots WHERE device_id = ?", (device_id,))
+            self._save_metadata_without_commit(connection, metadata)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _save_metadata_without_commit(
+        self, connection: sqlite3.Connection, metadata: StateStoreMetadata
+    ) -> None:
+        payload = {
+            "inventory_revision": metadata.inventory_revision,
+            "version_counter": metadata.version_counter,
+            "state_versions": {
+                f"{device_id}::{capability}": version
+                for (device_id, capability), version in metadata.state_versions.items()
+            },
+            "inventory_fingerprint": metadata.inventory_fingerprint,
+        }
+        connection.execute(
+            """INSERT INTO runtime_state_metadata (id, payload, updated_at)
+               VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               payload=excluded.payload, updated_at=excluded.updated_at""",
+            (json.dumps(payload, sort_keys=True), self.clock.now().isoformat()),
+        )
+
+
 class ExecutionOutcomeRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
@@ -562,6 +866,21 @@ class ScheduledPlanRepository:
     async def schedule(self, plan: Plan) -> None:
         if plan.execute_at is None:
             raise ValueError("plan.execute_at is required to schedule a plan")
+        scheduled_plan = plan
+        if plan.execution_window is None:
+            scheduled_plan = plan.model_copy(
+                update={
+                    "execution_window": ExecutionWindow(
+                        intended_at=plan.execute_at,
+                        not_before=plan.execute_at,
+                        not_after=plan.execute_at,
+                        timezone=getattr(plan.execute_at.tzinfo, "key", None)
+                        or plan.execute_at.tzname()
+                        or "UTC",
+                        revision=plan.schedule_revision,
+                    )
+                }
+            )
         now = self.clock.now().isoformat()
         self.database.connection.execute(
             """INSERT INTO scheduled_plans
@@ -570,7 +889,7 @@ class ScheduledPlanRepository:
             (
                 plan.id,
                 plan.execute_at.isoformat(),
-                json.dumps(plan.model_dump(mode="json"), sort_keys=True),
+                json.dumps(scheduled_plan.model_dump(mode="json"), sort_keys=True),
                 now,
             ),
         )
@@ -614,24 +933,75 @@ class ScheduledPlanRepository:
     async def cancel(self, plan_id: str) -> bool:
         return await self._transition(plan_id, "cancelled")
 
-    async def reschedule(self, plan_id: str, execute_at: datetime) -> bool:
-        existing = await self.get(plan_id)
-        if existing is None or existing[1] != "pending":
+    async def reschedule(
+        self,
+        plan_id: str,
+        execute_at: datetime,
+        *,
+        expected_revision: int | None = None,
+        expected_validation_digest: str | None = None,
+        replacement_plan: Plan | None = None,
+    ) -> bool:
+        """Replace pending temporal evidence only through a validated CAS.
+
+        The historical two-argument form is intentionally inert. Moving only
+        ``execute_at`` would preserve an approval for a different physical
+        intent, so callers must provide the complete replacement plan and the
+        evidence they observed when making the request.
+        """
+
+        if (
+            expected_revision is None
+            or expected_validation_digest is None
+            or replacement_plan is None
+        ):
             return False
-        plan, _status = existing
-        updated_plan = plan.model_copy(update={"execute_at": execute_at})
-        cursor = self.database.connection.execute(
-            """UPDATE scheduled_plans SET execute_at = ?, payload = ?, updated_at = ?
-               WHERE plan_id = ? AND status = 'pending'""",
-            (
-                execute_at.isoformat(),
-                json.dumps(updated_plan.model_dump(mode="json"), sort_keys=True),
-                self.clock.now().isoformat(),
-                plan_id,
-            ),
-        )
-        self.database.connection.commit()
-        return cursor.rowcount > 0
+        if replacement_plan.id != plan_id or replacement_plan.execute_at != execute_at:
+            return False
+        if replacement_plan.execution_window is None or replacement_plan.validation is None:
+            return False
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload, status FROM scheduled_plans WHERE plan_id = ?",
+                (plan_id,),
+            ).fetchone()
+            if row is None or row[1] != "pending":
+                connection.rollback()
+                return False
+            stored = Plan.model_validate(json.loads(row[0]))
+            if stored.schedule_revision != expected_revision:
+                connection.rollback()
+                return False
+            if stored.validation is None or stored.validation.digest != expected_validation_digest:
+                connection.rollback()
+                return False
+            if replacement_plan.schedule_revision != stored.schedule_revision + 1:
+                connection.rollback()
+                return False
+            if replacement_plan.validation.digest == stored.validation.digest:
+                connection.rollback()
+                return False
+            cursor = connection.execute(
+                """UPDATE scheduled_plans SET execute_at = ?, payload = ?, updated_at = ?
+                   WHERE plan_id = ? AND status = 'pending'
+                     AND json_extract(payload, '$.schedule_revision') = ?
+                     AND json_extract(payload, '$.validation.digest') = ?""",
+                (
+                    execute_at.isoformat(),
+                    json.dumps(replacement_plan.model_dump(mode="json"), sort_keys=True),
+                    self.clock.now().isoformat(),
+                    plan_id,
+                    expected_revision,
+                    expected_validation_digest,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            connection.rollback()
+            raise
 
     async def _transition(self, plan_id: str, status: str) -> bool:
         cursor = self.database.connection.execute(

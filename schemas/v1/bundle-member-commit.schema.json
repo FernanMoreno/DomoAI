@@ -6,7 +6,8 @@
         "executed",
         "scheduled",
         "failed",
-        "unknown"
+        "unknown",
+        "missed"
       ],
       "title": "BundleMemberCommitStatus",
       "type": "string"
@@ -86,6 +87,30 @@
       "additionalProperties": true,
       "title": "Details",
       "type": "object"
+    },
+    "predecessor_plan_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Predecessor Plan Id"
+    },
+    "predecessor_outcome_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Predecessor Outcome Digest"
     }
   },
   "required": [

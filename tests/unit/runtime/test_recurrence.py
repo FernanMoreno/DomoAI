@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from domoai.application.recurrence import next_occurrence
 from domoai.domain.models import RecurrenceRule
-from domoai.runtime.recurrence import next_occurrence
 
 
 def test_next_occurrence_survives_spring_forward() -> None:

@@ -7,8 +7,11 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.models import Command, Plan, Policy, PolicyAction
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
@@ -21,10 +24,7 @@ from domoai.runtime.approval_store import (
 )
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 
 

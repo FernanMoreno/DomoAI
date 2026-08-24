@@ -11,9 +11,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
+from domoai.application.bundle_commit import BundleCommitRequest, BundleCommitService
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
+from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_worker import OptimizationWorker, WorkerOperationError
+from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Command, DeviceType, Plan, PlanStatus, Policy, RecurrenceRule
@@ -37,11 +40,8 @@ from domoai.runtime.approval_store import (
     OperatorApprovalAssertionProvider,
     OperatorPrincipalProvider,
 )
-from domoai.runtime.bundle_commit import BundleCommitRequest, BundleCommitService
 from domoai.runtime.clock import Clock, SystemClock
-from domoai.runtime.metrics import RuntimeMetricsCollector
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.scheduler import Scheduler
 
 
 @dataclass

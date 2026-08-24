@@ -182,14 +182,6 @@ jobs:
       - run: uv run python scripts/check_runtime_contract_docs.py
 
   architecture:
-    # Renamed from "Architecture contracts" (spec 149): that name implied
-    # the full .importlinter policy (layers/acyclic-siblings/adapter
-    # independence) was enforced here. It wasn't -- this job only ever ran
-    # check_architecture_contracts.py, a narrower source-derived gate for
-    # domain purity, adapter independence, and .importlinter's presence.
-    # The full policy has a known, intentionally-undefined-away violation
-    # (see .importlinter's KNOWN VIOLATION note); it stays visible below as
-    # a non-blocking diagnostic instead of being silently unenforced.
     name: Source architecture invariants
     runs-on: ubuntu-latest
     steps:
@@ -202,7 +194,7 @@ jobs:
       - run: uv run python scripts/check_architecture_contracts.py
 
   import-linter-diagnostic:
-    name: Import Linter (diagnostic, non-blocking)
+    name: Import Linter (blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -211,11 +203,7 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      # Not required for merge (see the "architecture" job above for why):
-      # domoai.runtime's known orchestration-module violation makes this
-      # fail on every PR today. It still runs on every PR so the violation
-      # stays visible in CI logs instead of only living in a doc comment.
-      - run: uv run lint-imports || true
+      - run: uv run lint-imports
 
   dependency-audit:
     name: Dependency vulnerability audit

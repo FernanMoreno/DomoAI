@@ -71,6 +71,10 @@ def _pid_recording_slow_solve(scenario: OptimizationScenario) -> OptimizationRes
     without extra IPC plumbing), then sleeps past the timeout."""
     import os
 
+    if scenario.id == "warm-up":
+        return OptimizationResult(
+            scenario_id=scenario.id, status=OptimizationStatus.OPTIMAL, solver="warm-up"
+        )
     Path(f"/tmp/domoai-test-pid-{scenario.id}.txt").write_text(str(os.getpid()))
     time.sleep(30.0)
     return OptimizationResult(
@@ -170,6 +174,11 @@ async def test_timed_out_solve_process_is_actually_terminated() -> None:
     pid_file = Path(f"/tmp/domoai-test-pid-{scenario_id}.txt")
     pid_file.unlink(missing_ok=True)
     try:
+        # The timeout property must measure the running worker, not Pebble's
+        # one-time spawn/OR-Tools import cost. A cold process can legitimately
+        # take several seconds before it acknowledges its first task.
+        warmup = await worker.optimize(OptimizationScenario(id="warm-up", horizon=_horizon()))
+        assert warmup.status == OptimizationStatus.OPTIMAL
         scenario = OptimizationScenario(id=scenario_id, horizon=_horizon())
 
         started = time.monotonic()

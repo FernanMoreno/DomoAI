@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ExecutionSummary, Plan
 from domoai.runtime.approval_store import ApprovalGrant
-from domoai.runtime.executor import PlanExecutor
 
 
 class DomoticsFacade:

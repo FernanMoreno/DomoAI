@@ -5,9 +5,11 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
 from domoai.mcp.domotics_server import DomoticsMcpContext
 from domoai.mcp.ortools_server import OrtoolsMcpContext
@@ -16,8 +18,6 @@ from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 

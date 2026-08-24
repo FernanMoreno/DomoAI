@@ -1,3 +1,4 @@
+from domoai.application.policy_engine import PolicyEngine
 from domoai.config.policy_loader import choose_policy, load_policies
 from domoai.domain.models import (
     Capability,
@@ -9,7 +10,6 @@ from domoai.domain.models import (
     RiskClass,
     SourceRef,
 )
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.risk_classifier import RiskClassifier, RiskOverride
 
 

@@ -10,14 +10,8 @@ cd "$(dirname "$0")/.."
 echo "== Source-derived architecture gate =="
 uv run python scripts/check_architecture_contracts.py
 
-echo "== Import Linter (diagnostic migration baseline) =="
-if ! uv run lint-imports; then
-    cat <<'EOF'
-WARNING: Import Linter still reports the documented historical runtime
-orchestration edges. The source-derived gate above remains blocking; see
-docs/architecture-contracts.md for the migration boundary.
-EOF
-fi
+echo "== Import Linter (blocking) =="
+uv run lint-imports
 
 if [[ "${1:-}" == "--fast" ]]; then
     echo "== pytest (unit + contract, no Docker-backed composition tests) =="

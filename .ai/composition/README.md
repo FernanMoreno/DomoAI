@@ -58,26 +58,16 @@ command to derive actual domain/layer boundaries from code and architecture.
   env-var-gated live smoke tests under `tests/integration/`; converting those
   to Testcontainers is future work (no ready-made simulator image was
   verified for this pass).
-- **Import Linter: layers contract reflects the real architecture, not an
-  aspirational one.** `domoai.runtime` is currently both the low-level
-  kernel (clock, ports, state_store, registry — depended on by
-  adapters/optimizer/persistence/config) and an orchestration layer
-  (executor, event_consumer, twin, replay, scheduler, bundle_commit,
-  policy_engine) that imports `application`/`adapters`/`persistence`/
-  `config`. The `layers` contract in `.importlinter` is intentionally left
-  strict, so this shows up as BROKEN under `uv run lint-imports` rather than
-  being defined away. Migration path: split `domoai.runtime` into a pure
-  kernel package and move the orchestration modules into `domoai.application`
-  (they already depend on it).
-  **CI status (spec 149):** the CI job that used to be named "Architecture
-  contracts" only ever ran `scripts/check_architecture_contracts.py` (domain
-  purity + adapter independence + `.importlinter` presence) — it never ran
-  `lint-imports`, so the layers/acyclic-siblings contracts were not actually
-  gating merges despite the name implying they were. It is now named "Source
-  architecture invariants" to describe what it actually checks, and a
-  separate non-blocking `import-linter-diagnostic` job runs `lint-imports` on
-  every PR so the known violation stays visible in CI logs. Branch
-  protection's required checks were updated to the new name.
+- **Import Linter: the package layers are now truthful and blocking.**
+  `domoai.runtime` contains only the low-level kernel (clock, ports,
+  execution context, state, registry, events and safety primitives).
+  Application owns executor, event consumer, scheduler, bundle commit,
+  recovery, policy, metrics and recurrence orchestration. Lab owns replay and
+  digital-twin fixtures. Battery dispatch contracts live under
+  `domoai.domain.energy`, so config does not depend on optimizer modules.
+  `uv run lint-imports` is required to report all contracts kept in local and
+  CI composition checks. New architecture exceptions require an owner,
+  rationale and removal condition.
 
 ## Commands
 

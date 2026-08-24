@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from domoai.application.executor import PlanExecutor
 from domoai.domain.models import (
     Command,
     CommandPostcondition,
@@ -11,7 +12,6 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
-from domoai.runtime.executor import PlanExecutor
 
 
 def _state(value: object) -> StateSnapshot:

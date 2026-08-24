@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from domoai.optimizer.energy import DispatchableBatteryBinding
+from domoai.domain.energy import DispatchableBatteryBinding
 
 
 class BatteryProfileConfigurationError(ValueError):

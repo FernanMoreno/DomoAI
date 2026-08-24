@@ -7,11 +7,11 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.mcp.ortools_server import OrtoolsMcpContext, create_ortools_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
 from domoai.runtime.events import AuditLog
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 

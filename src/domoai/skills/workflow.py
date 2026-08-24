@@ -27,7 +27,7 @@ def bundle_approval_digest(scenario_id: str, bundle: Sequence[Mapping[str, Any]]
     """Return the canonical identity of one ordered, validated plan bundle.
 
     Must stay byte-for-byte compatible with the runtime-side
-    ``domoai.runtime.bundle_commit.bundle_approval_digest``, which is the
+    ``domoai.application.bundle_commit.bundle_approval_digest``, which is the
     authoritative check the MCP boundary re-derives the digest against.
     """
 

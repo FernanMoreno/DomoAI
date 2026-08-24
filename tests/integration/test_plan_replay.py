@@ -4,15 +4,15 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import Command, ExecutionStatus, Plan, PlanStatus
+from domoai.lab.replay import PlanReplayer
 from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.replay import PlanReplayer
 from domoai.runtime.state_store import StateStore
 
 

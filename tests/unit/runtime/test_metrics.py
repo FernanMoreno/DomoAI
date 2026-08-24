@@ -5,8 +5,13 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.event_consumer import RuntimeEventConsumer
+from domoai.application.executor import PlanExecutor
+from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.scheduler import Scheduler
 from domoai.domain.models import (
     Command,
     Plan,
@@ -24,13 +29,8 @@ from domoai.persistence.repositories import (
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.composite_adapter import CompositeAdapter
-from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.metrics import RuntimeMetricsCollector
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
 

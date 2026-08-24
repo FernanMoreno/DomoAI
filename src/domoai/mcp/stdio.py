@@ -9,10 +9,13 @@ from mcp.server.fastmcp import FastMCP
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
+from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.optimization_worker import OptimizationWorker, WorkerBudget
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.application.process_optimization_worker import ProcessOptimizationWorker
 from domoai.application.runtime_factory import RuntimeComposition, build_runtime
 from domoai.application.state_service import StateService
@@ -26,9 +29,6 @@ from domoai.runtime.approval_store import (
     OperatorPrincipalProvider,
 )
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.metrics import RuntimeMetricsCollector
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 

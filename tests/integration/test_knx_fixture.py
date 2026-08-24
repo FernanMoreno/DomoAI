@@ -8,12 +8,12 @@ from domoai.adapters.knx.adapter import KnxAdapter
 from domoai.adapters.knx.config import KnxMappingDocument
 from domoai.adapters.knx.transport import InMemoryKnxTransport
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.event_consumer import RuntimeEventConsumer
+from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import Command, Plan, SourceRef, StateStatus
-from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.knx import group_values, mapping_payload, updated_group_value

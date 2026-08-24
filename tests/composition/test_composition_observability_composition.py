@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.runtime_factory import build_runtime
 from domoai.config.settings import Settings
-from domoai.runtime.metrics import RuntimeMetricsCollector
 
 
 @pytest.mark.composition

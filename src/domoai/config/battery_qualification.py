@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from domoai.domain.energy import DispatchableBatteryBinding
 from domoai.domain.models import StrictModel
-from domoai.optimizer.providers import DispatchableBatteryBinding
 
 REQUIRED_HIL_CHECKS = frozenset(
     {

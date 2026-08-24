@@ -17,17 +17,19 @@ from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
-from domoai.domain.models import StateSnapshot, StateStatus, StrictModel
-from domoai.domain.provider import Measurement, MeasurementQuality
-from domoai.optimizer.energy import (
+from domoai.domain.energy import (
     SOC_OBSERVATION_TOLERANCE_KWH,
     BatteryCapacityEvidence,
     BatteryProfile,
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
-    EnergyContext,
     NominalCapacityTrustPolicy,
+)
+from domoai.domain.models import StateSnapshot, StateStatus, StrictModel
+from domoai.domain.provider import Measurement, MeasurementQuality
+from domoai.optimizer.energy import (
+    EnergyContext,
     SolarForecastPoint,
     TariffPoint,
 )

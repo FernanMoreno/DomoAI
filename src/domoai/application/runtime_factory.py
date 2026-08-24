@@ -25,9 +25,15 @@ from domoai.adapters.modbus.config import load_mapping as load_modbus_mapping
 from domoai.adapters.modbus.transport import PyModbusTcpTransport
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
+from domoai.application.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.event_consumer import RuntimeEventConsumer
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.recovery import PlanRecoveryService
+from domoai.application.scheduler import Scheduler
 from domoai.config.battery_profile import load_dispatchable_battery_binding
 from domoai.config.battery_qualification import (
     BatteryQualificationError,
@@ -38,6 +44,7 @@ from domoai.config.risk_classification import load_risk_overrides_file
 from domoai.config.safety_kernel_loader import load_safety_limits_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
+from domoai.domain.energy import DispatchableBatteryBinding
 from domoai.domain.models import Plan
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
@@ -49,7 +56,6 @@ from domoai.optimizer.ports import EnergyContextProvider
 from domoai.optimizer.providers import (
     BatteryProvider,
     ComposedEnergyContextProvider,
-    DispatchableBatteryBinding,
     StateStoreBatteryProvider,
 )
 from domoai.persistence.repositories import (
@@ -71,21 +77,15 @@ from domoai.runtime.approval_store import (
     OperatorApprovalAssertionProvider,
     OperatorPrincipalProvider,
 )
-from domoai.runtime.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.control_takeover import BatteryControlCoordinator
-from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.provider_sdk import ProviderRegistry
-from domoai.runtime.recovery import PlanRecoveryService
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.risk_classifier import RiskClassifier
 from domoai.runtime.safety_kernel import SafetyKernel
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 
 

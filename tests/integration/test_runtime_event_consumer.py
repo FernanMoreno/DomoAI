@@ -8,6 +8,7 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.domain.models import (
     AdapterHealth,
     AdapterSnapshot,
@@ -16,7 +17,6 @@ from domoai.domain.models import (
     StateStatus,
 )
 from domoai.runtime.composite_adapter import CompositeAdapter
-from domoai.runtime.event_consumer import RuntimeEventConsumer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
@@ -286,7 +286,7 @@ async def test_health_exception_is_supervised_and_retried(
     async def fake_sleep(delay: float) -> None:
         recorded_delays.append(delay)
 
-    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("domoai.application.event_consumer.asyncio.sleep", fake_sleep)
     adapter = _HealthRaisesThenStopsAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -329,7 +329,7 @@ async def test_clean_stream_end_is_audited_and_reconnected(
     async def fake_sleep(delay: float) -> None:
         recorded_delays.append(delay)
 
-    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("domoai.application.event_consumer.asyncio.sleep", fake_sleep)
     adapter = _EndsThenStopsAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -374,7 +374,7 @@ async def test_backoff_grows_on_repeated_connect_failure(monkeypatch: pytest.Mon
     async def fake_sleep(delay: float) -> None:
         recorded_delays.append(delay)
 
-    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("domoai.application.event_consumer.asyncio.sleep", fake_sleep)
     adapter = _AlwaysFailsToConnectAdapter(fail_until_attempt=5)
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -422,7 +422,7 @@ async def test_backoff_resets_to_initial_delay_after_successful_reconnect(
     async def fake_sleep(delay: float) -> None:
         recorded_delays.append(delay)
 
-    monkeypatch.setattr("domoai.runtime.event_consumer.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("domoai.application.event_consumer.asyncio.sleep", fake_sleep)
     adapter = _RecoversThenDropsAdapter(fail_connects=2)
     registry = DeviceRegistry()
     state_store = StateStore()

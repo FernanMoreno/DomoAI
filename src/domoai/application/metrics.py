@@ -11,12 +11,12 @@ from domoai.runtime.ports import AdapterPort, PlanRecordPort
 from domoai.runtime.state_store import StateStore
 
 if TYPE_CHECKING:
+    from domoai.application.event_consumer import RuntimeEventConsumer
     from domoai.application.optimization_service import OptimizationService
+    from domoai.application.scheduler import Scheduler
     from domoai.persistence.serialized import SerializedStorageExecutor, StorageMetrics
     from domoai.persistence.sqlite import SQLiteDatabase
-    from domoai.runtime.event_consumer import RuntimeEventConsumer
     from domoai.runtime.events import AuditLog
-    from domoai.runtime.scheduler import Scheduler
 
 
 class OptimizerWorkerLike(Protocol):

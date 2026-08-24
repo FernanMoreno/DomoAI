@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     Approval,
@@ -33,7 +34,6 @@ from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executable_fingerprint import capability_fingerprint
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 

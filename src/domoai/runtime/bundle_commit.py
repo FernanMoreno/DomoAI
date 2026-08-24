@@ -527,6 +527,14 @@ class BundleRecoveryService:
             has_missed = False
             all_scheduled = True
             for index, member in enumerate(members):
+                if member.status is BundleMemberCommitStatus.DEPENDENCY_FAILED:
+                    # Already a settled terminal outcome; the scheduler never
+                    # dispatched this plan, so there is no scheduled/plan row
+                    # to reconcile it against, and recomputing from those
+                    # rows would silently downgrade it to a generic FAILED.
+                    has_failed = True
+                    all_scheduled = False
+                    continue
                 scheduled = await self.scheduled_repository.get(member.plan_id)
                 plan = (
                     await self.plan_repository.get(member.plan_id)

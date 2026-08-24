@@ -54,11 +54,17 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uv run pytest tests/unit --cov=domoai --cov-report=term-missing --cov-report=xml
+      - run: uv run pytest tests/unit --cov=domoai --cov-report=term-missing --cov-report=xml --junitxml=junit-unit.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: coverage.xml
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-unit
+          path: junit-unit.xml
           if-no-files-found: ignore
 
   test-contract:
@@ -71,7 +77,13 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uv run pytest tests/contract
+      - run: uv run pytest tests/contract --junitxml=junit-contract.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-contract
+          path: junit-contract.xml
+          if-no-files-found: ignore
 
   test-integration:
     name: Test (integration)
@@ -83,7 +95,13 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uv run pytest tests/integration
+      - run: uv run pytest tests/integration --junitxml=junit-integration.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-integration
+          path: junit-integration.xml
+          if-no-files-found: ignore
 
   test-performance:
     name: Test (performance)
@@ -95,7 +113,35 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uv run pytest tests/performance
+      - run: uv run pytest tests/performance --junitxml=junit-performance.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-performance
+          path: junit-performance.xml
+          if-no-files-found: ignore
+
+  test-composition:
+    name: Test (composition)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      # ubuntu-latest ships a running Docker daemon; the one Docker-backed
+      # composition test (real Mosquitto via Testcontainers) skips itself if
+      # it isn't reachable, so this job stays green on runners without
+      # Docker instead of failing the build.
+      - run: uv run pytest tests/composition --junitxml=junit-composition.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-composition
+          path: junit-composition.xml
+          if-no-files-found: ignore
 
   package:
     name: Package build and entrypoints
@@ -136,7 +182,15 @@ jobs:
       - run: uv run python scripts/check_runtime_contract_docs.py
 
   architecture:
-    name: Architecture contracts
+    # Renamed from "Architecture contracts" (spec 149): that name implied
+    # the full .importlinter policy (layers/acyclic-siblings/adapter
+    # independence) was enforced here. It wasn't -- this job only ever ran
+    # check_architecture_contracts.py, a narrower source-derived gate for
+    # domain purity, adapter independence, and .importlinter's presence.
+    # The full policy has a known, intentionally-undefined-away violation
+    # (see .importlinter's KNOWN VIOLATION note); it stays visible below as
+    # a non-blocking diagnostic instead of being silently unenforced.
+    name: Source architecture invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -146,6 +200,22 @@ jobs:
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
       - run: uv run python scripts/check_architecture_contracts.py
+
+  import-linter-diagnostic:
+    name: Import Linter (diagnostic, non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      # Not required for merge (see the "architecture" job above for why):
+      # domoai.runtime's known orchestration-module violation makes this
+      # fail on every PR today. It still runs on every PR so the violation
+      # stays visible in CI logs instead of only living in a doc comment.
+      - run: uv run lint-imports || true
 
   dependency-audit:
     name: Dependency vulnerability audit
@@ -158,3 +228,63 @@ jobs:
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
       - run: uv run --with pip-audit pip-audit --local
+
+  # Closes P2.4 (spec 149): a single, SHA-tagged evidence bundle so
+  # "the tests pass" is a downloadable artifact tied to this exact commit,
+  # not a claim in a README that may predate the commit it's cited for.
+  # Runs after every other job (`if: always()` so it still runs, and still
+  # records the truth, when something upstream failed) and never itself
+  # fails the build -- it is a report, not a gate.
+  evidence-summary:
+    name: CI evidence summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lock-check
+      - lint
+      - typecheck
+      - test-unit
+      - test-contract
+      - test-integration
+      - test-performance
+      - test-composition
+      - package
+      - schema-check
+      - contract-docs
+      - architecture
+      - import-linter-diagnostic
+      - dependency-audit
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: evidence
+          pattern: "junit-*"
+          merge-multiple: true
+        continue-on-error: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: evidence
+          pattern: "coverage-report"
+          merge-multiple: true
+        continue-on-error: true
+      - name: Write evidence-summary.json
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          cat <<EOF > evidence/evidence-summary.json
+          {
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "run_id": "${{ github.run_id }}",
+            "run_attempt": "${{ github.run_attempt }}",
+            "workflow_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "job_results": ${NEEDS_JSON}
+          }
+          EOF
+          cat evidence/evidence-summary.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-evidence-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: warn

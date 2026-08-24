@@ -648,6 +648,41 @@ async def test_cancel_recurring_schedule_stops_future_occurrences(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_recurring_schedule_with_expires_at_stops_firing_past_expiry(tmp_path) -> None:
+    now = datetime(2026, 8, 24, 0, 0, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(
+        tmp_path, clock=clock
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(
+        time_of_day=time(0, 0),
+        timezone="UTC",
+        expires_at=now + timedelta(days=1, minutes=30),
+    )
+    schedule_id = "recurring-expires"
+    await scheduler.schedule_recurring(
+        schedule_id, [_command(device_id, plan_id=schedule_id)], rule
+    )
+
+    # First occurrence (day 1) is before expires_at: fires normally.
+    first_results = await scheduler.run_due_recurring(now=now + timedelta(days=1))
+    assert first_results == [{"schedule_id": schedule_id, "outcome": "executed"}]
+    assert len(adapter.calls) == 1
+    assert await scheduler.list_recurring() != []
+
+    # Second occurrence (day 2) is past expires_at: the schedule expires
+    # instead of firing, and the audit trail records why.
+    second_results = await scheduler.run_due_recurring(now=now + timedelta(days=2))
+    assert second_results == [{"schedule_id": schedule_id, "outcome": "expired"}]
+    assert len(adapter.calls) == 1  # unchanged -- no second dispatch
+    assert await scheduler.list_recurring() == []
+    assert any(event.event_type == "recurring_schedule_expired" for event in audit.events)
+
+
+@pytest.mark.asyncio
 async def test_run_due_uses_injected_clock_when_no_explicit_now_given(tmp_path) -> None:
     initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
     clock = FixedClock(initial)

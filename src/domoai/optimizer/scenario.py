@@ -132,14 +132,20 @@ class OptimizationScenario(StrictModel):
     schema_version: str = "v1"
     id: str = Field(min_length=1)
     horizon: Horizon
-    loads: list[Load] = Field(default_factory=list)
-    ev_loads: list[EVChargingLoad] = Field(default_factory=list)
-    comfort_loads: list[ComfortLoad] = Field(default_factory=list)
-    constraints: list[Constraint] = Field(default_factory=list)
-    objectives: list[Objective] = Field(default_factory=list)
+    # Bounds on every agent-facing list field below (spec 148): the MCP
+    # boundary parses this scenario from an untrusted caller before the
+    # solve ever reaches the bounded OptimizationWorker (P2.1) -- Pydantic
+    # parsing, validate_scenario, and registry lookups all run inline on
+    # the event loop first, so an unbounded scenario is itself a resource
+    # exhaustion vector independent of solver time limits.
+    loads: list[Load] = Field(default_factory=list, max_length=100)
+    ev_loads: list[EVChargingLoad] = Field(default_factory=list, max_length=16)
+    comfort_loads: list[ComfortLoad] = Field(default_factory=list, max_length=32)
+    constraints: list[Constraint] = Field(default_factory=list, max_length=64)
+    objectives: list[Objective] = Field(default_factory=list, max_length=16)
     energy_context: EnergyContext | None = None
     terminal_soc_policy: TerminalSOCPolicy | None = None
-    inputs: list[dict[str, Any]] = Field(default_factory=list)
+    inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
     assumptions: dict[str, Any] = Field(default_factory=dict)
     solver_time_limit_seconds: float = Field(default=5.0, ge=0)
     conservative: bool = False

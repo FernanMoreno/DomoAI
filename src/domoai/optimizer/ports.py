@@ -67,6 +67,15 @@ class OptimizerPort(Protocol):
     def optimize(self, scenario: OptimizationScenario) -> OptimizationResult: ...
 
 
+class BoundedOptimizerWorkerPort(Protocol):
+    """Async worker boundary both `OptimizationWorker` (thread-backed) and
+    `ProcessOptimizationWorker` (spec 150, process-backed) satisfy --
+    referenced structurally so callers like `OrtoolsMcpContext` don't need
+    to import either concrete worker class."""
+
+    async def optimize(self, scenario: OptimizationScenario) -> OptimizationResult: ...
+
+
 class EnergyContextProvider(Protocol):
     """Read-only semantic provider for one complete optimization horizon."""
 

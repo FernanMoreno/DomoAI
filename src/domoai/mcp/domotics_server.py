@@ -175,10 +175,12 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if context.energy_context_provider is None:
                 raise ValueError("Energy context provider is unavailable")
             requested_horizon = Horizon.model_validate(horizon)
-            if (
-                context.blocking_worker is None
-                or context.blocking_worker.service is not context.energy_context_provider
-            ):
+            if context.blocking_worker is None:
+                # Fallback for a context built without a pre-wired worker
+                # (e.g. ad-hoc test contexts). The production path
+                # (mcp/stdio.py build_configured_server) always pre-supplies
+                # one registered with RuntimeComposition.close(), so this
+                # branch's worker is intentionally unowned/best-effort here.
                 context.blocking_worker = OptimizationWorker(context.energy_context_provider)
             worker = context.blocking_worker
             energy_context = await worker.run_blocking(
@@ -616,11 +618,16 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         name="schedule_recurring_plan",
         description=(
             "Schedule a plan's commands to run repeatedly at a fixed local "
-            "time, optionally restricted to specific weekdays. Every "
-            "occurrence is independently revalidated against live state "
-            "before it executes; an occurrence requiring confirmation is "
+            "time, optionally restricted to specific weekdays. Creating a "
+            "standing automation is its own authority act, distinct from "
+            "running the commands once: if the template plan currently "
+            "requires confirmation, an approval_id from request_approval is "
+            "required to create the schedule at all. Every occurrence is "
+            "still independently revalidated against live state before it "
+            "executes; an occurrence requiring confirmation at run time is "
             "skipped and audited, never auto-approved, and recurrence "
-            "continues to its next scheduled time."
+            "continues to its next scheduled time. An optional expires_at "
+            "bounds how long the automation stays active."
         ),
         annotations=mutation_annotations,
         structured_output=True,
@@ -630,6 +637,8 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         time_of_day: str,
         timezone: str,
         days_of_week: list[int] | None = None,
+        approval_id: str | None = None,
+        expires_at: str | None = None,
     ) -> dict[str, Any]:
         try:
             if context.scheduler is None:
@@ -637,22 +646,34 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             plan = await _resolve_plan(context, plan_id)
             if plan is None:
                 raise ValueError(f"Unknown plan: {plan_id}")
+            grant = None
+            if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
+                if approval_id is None:
+                    raise DomainError(
+                        ErrorCode.APPROVAL_REQUIRED,
+                        "Creating a recurring automation from a plan that requires "
+                        "confirmation needs an approval_id from request_approval",
+                    )
+                grant = context.approval_store.consume(approval_id, plan)
             hour, minute = (int(part) for part in time_of_day.split(":"))
             rule = RecurrenceRule(
                 time_of_day=time(hour=hour, minute=minute),
                 timezone=timezone,
                 days_of_week=days_of_week,
+                expires_at=(
+                    _parse_timezone_aware_datetime(expires_at) if expires_at is not None else None
+                ),
             )
             schedule_id = f"recurring:{plan_id}:{context.clock.now().isoformat()}"
             first_occurrence = await context.scheduler.schedule_recurring(
-                schedule_id, plan.commands, rule
+                schedule_id, plan.commands, rule, plan=plan, approval=grant
             )
             return {
                 "schema_version": "v1",
                 "schedule_id": schedule_id,
                 "next_execute_at": first_occurrence.isoformat(),
             }
-        except (ValueError, ValidationError) as error:
+        except (ValueError, ValidationError, DomainError) as error:
             return error_envelope(error)
 
     @server.tool(

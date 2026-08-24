@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import cast
+from typing import Protocol, TypeVar, cast
 from urllib.parse import urlparse
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
@@ -267,12 +268,26 @@ def _create_energy_context_provider(
     return provider, (omie_client.close, solar_client.close)
 
 
+class ClosableWorker(Protocol):
+    """What `RuntimeComposition.close()` actually needs from a blocking
+    worker (spec 150): thread- and process-backed workers (`OptimizationWorker`,
+    `ProcessOptimizationWorker`) both satisfy this without either module
+    importing the other."""
+
+    def close(self) -> None: ...
+
+
+_W = TypeVar("_W", bound=ClosableWorker)
+
+
 @dataclass
 class RuntimeComposition:
     settings: Settings
     adapter: AdapterPort
     database: SQLiteDatabase
+    audit_database: SQLiteDatabase
     storage: SerializedStorageExecutor
+    audit_storage: SerializedStorageExecutor
     audit_repository: AuditEventRepository
     plan_repository: PlanRepository
     outcome_repository: ExecutionOutcomeRepository
@@ -301,15 +316,35 @@ class RuntimeComposition:
     operator_principal_provider: OperatorPrincipalProvider | None = None
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None
     battery_qualification: str = "unsupported"
+    blocking_workers: list[ClosableWorker] = field(default_factory=list)
+
+    def register_blocking_worker(self, worker: _W) -> _W:
+        """Give this composition ownership of a blocking worker (thread- or
+        process-backed) so `close()` shuts it down. Callers that construct
+        an `OptimizationWorker`/`ProcessOptimizationWorker` after
+        `build_runtime` returns (e.g. the MCP entry points wiring the
+        optimizer/energy-context boundaries) MUST route it through here --
+        an unregistered worker's threads/processes outlive the runtime.
+
+        Generic over `_W` (not just `ClosableWorker`) so callers keep the
+        concrete worker type -- they usually need more than `close()` (e.g.
+        `.optimize()`, `.last_wall_time_seconds`) from what this returns."""
+
+        self.blocking_workers.append(worker)
+        return worker
 
     async def close(self) -> None:
         try:
             await self.adapter.disconnect()
         finally:
+            for worker in self.blocking_workers:
+                await asyncio.to_thread(worker.close)
             for close in self.energy_closers:
                 close()
             await self.storage.close()
+            await self.audit_storage.close()
             await self.database.close()
+            await self.audit_database.close()
 
 
 async def build_runtime(
@@ -382,14 +417,30 @@ async def build_runtime(
         queue_wait_seconds=resolved_settings.sqlite_worker_queue_wait_seconds,
         operation_timeout_seconds=resolved_settings.sqlite_operation_timeout_seconds,
     )
+    # Audit gets its own admission queue/worker thread and its own SQLite
+    # connection. Separate queues prevent admission starvation; separate
+    # connections preserve the single-owner transaction invariant of each
+    # storage worker instead of relying on check_same_thread=False to make
+    # concurrent use of one sqlite3.Connection safe.
+    audit_storage = SerializedStorageExecutor(
+        queue_capacity=resolved_settings.sqlite_worker_queue_capacity,
+        queue_wait_seconds=resolved_settings.sqlite_worker_queue_wait_seconds,
+        operation_timeout_seconds=resolved_settings.sqlite_operation_timeout_seconds,
+    )
     await storage.run_async(database.initialize)
-    raw_audit_repository = AuditEventRepository(database)
+    audit_database = SQLiteDatabase(
+        resolved_settings.database_path,
+        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+        clock=clock,
+    )
+    await audit_storage.run_async(audit_database.initialize)
+    raw_audit_repository = AuditEventRepository(audit_database)
     raw_device_repository = DeviceRepository(database, clock=clock)
     raw_state_snapshot_repository = StateSnapshotRepository(database)
     raw_runtime_state_metadata_repository = RuntimeStateMetadataRepository(database, clock=clock)
     raw_state_persistence_repository = RuntimeStatePersistenceRepository(database, clock=clock)
     audit_repository = cast(
-        AuditEventRepository, SerializedRepositoryProxy(raw_audit_repository, storage)
+        AuditEventRepository, SerializedRepositoryProxy(raw_audit_repository, audit_storage)
     )
     device_repository = cast(
         DeviceRepository, SerializedRepositoryProxy(raw_device_repository, storage)
@@ -562,7 +613,9 @@ async def build_runtime(
         settings=resolved_settings,
         adapter=selected_adapter,
         database=database,
+        audit_database=audit_database,
         storage=storage,
+        audit_storage=audit_storage,
         audit_repository=audit_repository,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,

@@ -43,442 +43,454 @@ class CpSatOptimizer:
                 solver="cp-sat",
                 diagnostics=diagnostics,
             )
-        if scenario.solver_time_limit_seconds == 0:
-            return build_result(
-                scenario_id=scenario.id,
-                status=OptimizationStatus.TIMEOUT,
-                diagnostics=[{"code": "timeout", "message": "Solver budget is zero"}],
-            )
-        if scenario.energy_context is not None:
-            return self._optimize_energy(scenario)
-        return self._optimize_legacy(scenario)
+        return solve_validated_scenario(scenario)
 
-    def _optimize_legacy(self, scenario: OptimizationScenario) -> OptimizationResult:
-        model: Any = cp_model.CpModel()
-        start_variables = _start_variables(model, scenario)
-        horizon_slots = scenario.horizon.slots
 
-        for constraint in scenario.constraints:
-            if constraint.type != "max_house_power" or not constraint.hard:
-                continue
-            limit = to_solver_int(constraint.value, constraint.unit)
-            for slot in range(horizon_slots):
-                active_terms = _active_load_terms(scenario, start_variables, slot)
-                model.Add(sum(active_terms) <= limit)
+def solve_validated_scenario(scenario: OptimizationScenario) -> OptimizationResult:
+    """Pure solve over an already-validated scenario.
 
-        objective_terms: list[Any] = []
-        objectives = sorted(scenario.objectives, key=lambda item: (item.priority, item.name))
-        for load in scenario.loads:
-            for start, variable in start_variables[load.id].items():
-                weight = _objective_weight(objectives, "minimize_start")
-                if weight:
-                    objective_terms.append(int(weight * start) * variable)
-        if objective_terms:
-            model.Minimize(sum(objective_terms))
-
-        solver, status = _solve(model, scenario, time_limit=scenario.solver_time_limit_seconds)
-        failure = _failure_result(scenario, status)
-        if failure is not None:
-            return failure
-
-        selected_slots = _selected_slots(solver, start_variables)
-        plans = _proposal_plan(scenario, selected_slots)
-        minimize_start_objective = next(
-            (objective for objective in objectives if objective.name == "minimize_start"), None
-        )
-        solver_evidence = SolverEvidence(
-            solver_name="cp-sat",
-            solver_version=_SOLVER_VERSION,
-            num_search_workers=solver.parameters.num_search_workers,
-            random_seed=solver.parameters.random_seed,
-            wall_time_seconds=solver.WallTime(),
-            tiers=[
-                SolvedTier(
-                    priority=(
-                        minimize_start_objective.priority if minimize_start_objective else None
-                    ),
-                    terms=["minimize_start"] if objective_terms else [],
-                    achieved_value=(solver.Value(sum(objective_terms)) if objective_terms else 0),
-                )
-            ],
-            scenario_fingerprint=_scenario_fingerprint(scenario),
-        )
+    No `DeviceRegistry` dependency -- this is the function
+    `ProcessOptimizationWorker` schedules into its process pool (spec 150).
+    `CpSatOptimizer.optimize` (in-process callers) calls this too, after its
+    own `validate_scenario` check, so behavior is identical either way.
+    """
+    if scenario.solver_time_limit_seconds == 0:
         return build_result(
             scenario_id=scenario.id,
-            status=(OptimizationStatus.NO_ACTION_REQUIRED if not plans else _status(status)),
-            plan=plans[0] if plans else None,
-            plans=plans,
-            objective_values={"start_slot_sum": float(sum(selected_slots.values()))},
-            constraint_summary={"hard_satisfied": True, "soft_violations": []},
-            solver_evidence=solver_evidence,
+            status=OptimizationStatus.TIMEOUT,
+            diagnostics=[{"code": "timeout", "message": "Solver budget is zero"}],
         )
+    if scenario.energy_context is not None:
+        return _optimize_energy(scenario)
+    return _optimize_legacy(scenario)
 
-    def _optimize_energy(self, scenario: OptimizationScenario) -> OptimizationResult:
-        context = scenario.energy_context
-        assert context is not None
-        model: Any = cp_model.CpModel()
-        start_variables = _start_variables(model, scenario)
-        horizon_slots = scenario.horizon.slots
-        load_powers = {
-            load.id: _load_power(load, scenario.horizon.resolution_minutes)
-            for load in scenario.loads
-        }
-        solar_powers = [
+
+def _optimize_legacy(scenario: OptimizationScenario) -> OptimizationResult:
+    model: Any = cp_model.CpModel()
+    start_variables = _start_variables(model, scenario)
+    horizon_slots = scenario.horizon.slots
+
+    for constraint in scenario.constraints:
+        if constraint.type != "max_house_power" or not constraint.hard:
+            continue
+        limit = to_solver_int(constraint.value, constraint.unit)
+        for slot in range(horizon_slots):
+            active_terms = _active_load_terms(scenario, start_variables, slot)
+            model.Add(sum(active_terms) <= limit)
+
+    objective_terms: list[Any] = []
+    objectives = sorted(scenario.objectives, key=lambda item: (item.priority, item.name))
+    for load in scenario.loads:
+        for start, variable in start_variables[load.id].items():
+            weight = _objective_weight(objectives, "minimize_start")
+            if weight:
+                objective_terms.append(int(weight * start) * variable)
+    if objective_terms:
+        model.Minimize(sum(objective_terms))
+
+    solver, status = _solve(model, scenario, time_limit=scenario.solver_time_limit_seconds)
+    failure = _failure_result(scenario, status)
+    if failure is not None:
+        return failure
+
+    selected_slots = _selected_slots(solver, start_variables)
+    plans = _proposal_plan(scenario, selected_slots)
+    minimize_start_objective = next(
+        (objective for objective in objectives if objective.name == "minimize_start"), None
+    )
+    solver_evidence = SolverEvidence(
+        solver_name="cp-sat",
+        solver_version=_SOLVER_VERSION,
+        num_search_workers=solver.parameters.num_search_workers,
+        random_seed=solver.parameters.random_seed,
+        wall_time_seconds=solver.WallTime(),
+        tiers=[
+            SolvedTier(
+                priority=(
+                    minimize_start_objective.priority if minimize_start_objective else None
+                ),
+                terms=["minimize_start"] if objective_terms else [],
+                achieved_value=(solver.Value(sum(objective_terms)) if objective_terms else 0),
+            )
+        ],
+        scenario_fingerprint=_scenario_fingerprint(scenario),
+    )
+    return build_result(
+        scenario_id=scenario.id,
+        status=(OptimizationStatus.NO_ACTION_REQUIRED if not plans else _status(status)),
+        plan=plans[0] if plans else None,
+        plans=plans,
+        objective_values={"start_slot_sum": float(sum(selected_slots.values()))},
+        constraint_summary={"hard_satisfied": True, "soft_violations": []},
+        solver_evidence=solver_evidence,
+    )
+
+def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
+    context = scenario.energy_context
+    assert context is not None
+    model: Any = cp_model.CpModel()
+    start_variables = _start_variables(model, scenario)
+    horizon_slots = scenario.horizon.slots
+    load_powers = {
+        load.id: _load_power(load, scenario.horizon.resolution_minutes)
+        for load in scenario.loads
+    }
+    solar_powers = [
+        to_solver_int(
+            point.confidence.low
+            if scenario.conservative and point.confidence is not None
+            else point.power,
+            point.unit,
+        )
+        for point in context.solar_forecast
+    ]
+    base_load_powers = (
+        [
             to_solver_int(
-                point.confidence.low
+                point.confidence.high
                 if scenario.conservative and point.confidence is not None
                 else point.power,
                 point.unit,
             )
-            for point in context.solar_forecast
+            for point in context.base_load_forecast
         ]
-        base_load_powers = (
-            [
-                to_solver_int(
-                    point.confidence.high
-                    if scenario.conservative and point.confidence is not None
-                    else point.power,
-                    point.unit,
-                )
-                for point in context.base_load_forecast
-            ]
+        if context.base_load_forecast is not None
+        else [0] * horizon_slots
+    )
+    forecast_confidence = {
+        "solar_bounded": all(point.confidence is not None for point in context.solar_forecast),
+        "base_load_bounded": (
+            all(point.confidence is not None for point in context.base_load_forecast)
             if context.base_load_forecast is not None
-            else [0] * horizon_slots
-        )
-        forecast_confidence = {
-            "solar_bounded": all(point.confidence is not None for point in context.solar_forecast),
-            "base_load_bounded": (
-                all(point.confidence is not None for point in context.base_load_forecast)
-                if context.base_load_forecast is not None
-                else None
-            ),
+            else None
+        ),
+    }
+
+    battery = context.battery
+    charge_variables: list[Any] = []
+    discharge_variables: list[Any] = []
+    soc_variables: list[Any] = []
+    if battery is not None:
+        max_charge = to_solver_int(battery.max_charge_kw, "kW")
+        max_discharge = to_solver_int(battery.max_discharge_kw, "kW")
+        min_soc = to_energy_int(battery.min_soc_kwh)
+        max_soc = to_energy_int(battery.max_soc_kwh)
+        soc_variables = [
+            model.NewIntVar(min_soc, max_soc, f"battery_soc_{slot}")
+            for slot in range(horizon_slots + 1)
+        ]
+        model.Add(soc_variables[0] == to_energy_int(battery.initial_soc_kwh))
+        charge_gain = round(battery.charge_efficiency * EFFICIENCY_SCALE)
+        discharge_cost = round(EFFICIENCY_SCALE / battery.discharge_efficiency)
+    else:
+        max_charge = 0
+        max_discharge = 0
+        charge_gain = EFFICIENCY_SCALE
+        discharge_cost = EFFICIENCY_SCALE
+
+    ev_soc_variables: dict[str, list[Any]] = {}
+    ev_charge_variables: dict[str, list[Any]] = {}
+    for ev_load in scenario.ev_loads:
+        ev_capacity = to_energy_int(ev_load.capacity_kwh)
+        soc_vars = [
+            model.NewIntVar(0, ev_capacity, f"ev_soc_{ev_load.id}_{slot}")
+            for slot in range(horizon_slots + 1)
+        ]
+        model.Add(soc_vars[0] == to_energy_int(ev_load.initial_soc_kwh))
+        ev_soc_variables[ev_load.id] = soc_vars
+        ev_charge_variables[ev_load.id] = []
+
+    comfort_active_variables: dict[str, dict[int, Any]] = {}
+    for comfort_load in scenario.comfort_loads:
+        variables = {
+            slot: model.NewBoolVar(f"comfort_{comfort_load.id}_{slot}")
+            for slot in range(comfort_load.earliest_slot, comfort_load.deadline_slot)
         }
+        model.Add(sum(variables.values()) >= comfort_load.min_active_slots)
+        comfort_active_variables[comfort_load.id] = variables
 
-        battery = context.battery
-        charge_variables: list[Any] = []
-        discharge_variables: list[Any] = []
-        soc_variables: list[Any] = []
+    ev_charge_bound = sum(
+        to_solver_int(ev_load.max_charge_kw, "kW") for ev_load in scenario.ev_loads
+    )
+    comfort_power_bound = sum(
+        to_solver_int(comfort_load.power, comfort_load.power_unit)
+        for comfort_load in scenario.comfort_loads
+    )
+    load_bound = (
+        sum(load_powers.values())
+        + max(base_load_powers, default=0)
+        + ev_charge_bound
+        + comfort_power_bound
+    )
+    solar_bound = max(solar_powers, default=0)
+    grid_bound = max(1, load_bound + solar_bound + max_charge + max_discharge) * 2
+    for constraint in scenario.constraints:
+        if constraint.type in {"max_grid_import", "max_grid_export"}:
+            grid_bound = max(grid_bound, to_solver_int(constraint.value, constraint.unit))
+
+    grid_import: list[Any] = []
+    grid_export: list[Any] = []
+    peak_import = model.NewIntVar(0, grid_bound, "peak_grid_import")
+    soft_violations: list[tuple[str, int, Any]] = []
+    for slot in range(horizon_slots):
+        importing = model.NewBoolVar(f"grid_importing_{slot}")
+        grid_in = model.NewIntVar(0, grid_bound, f"grid_import_{slot}")
+        grid_out = model.NewIntVar(0, grid_bound, f"grid_export_{slot}")
+        grid_import.append(grid_in)
+        grid_export.append(grid_out)
+        model.Add(grid_in == 0).OnlyEnforceIf(importing.Not())
+        model.Add(grid_out == 0).OnlyEnforceIf(importing)
+        model.Add(peak_import >= grid_in)
+
         if battery is not None:
-            max_charge = to_solver_int(battery.max_charge_kw, "kW")
-            max_discharge = to_solver_int(battery.max_discharge_kw, "kW")
-            min_soc = to_energy_int(battery.min_soc_kwh)
-            max_soc = to_energy_int(battery.max_soc_kwh)
-            soc_variables = [
-                model.NewIntVar(min_soc, max_soc, f"battery_soc_{slot}")
-                for slot in range(horizon_slots + 1)
-            ]
-            model.Add(soc_variables[0] == to_energy_int(battery.initial_soc_kwh))
-            charge_gain = round(battery.charge_efficiency * EFFICIENCY_SCALE)
-            discharge_cost = round(EFFICIENCY_SCALE / battery.discharge_efficiency)
+            charge = model.NewIntVar(0, max_charge, f"battery_charge_{slot}")
+            discharge = model.NewIntVar(0, max_discharge, f"battery_discharge_{slot}")
+            charging = model.NewBoolVar(f"battery_charging_{slot}")
+            model.Add(charge == 0).OnlyEnforceIf(charging.Not())
+            model.Add(discharge == 0).OnlyEnforceIf(charging)
+            charge_variables.append(charge)
+            discharge_variables.append(discharge)
+            model.Add(
+                soc_variables[slot + 1] * EFFICIENCY_SCALE * 60
+                == soc_variables[slot] * EFFICIENCY_SCALE * 60
+                + charge * scenario.horizon.resolution_minutes * charge_gain
+                - discharge * scenario.horizon.resolution_minutes * discharge_cost
+            )
         else:
-            max_charge = 0
-            max_discharge = 0
-            charge_gain = EFFICIENCY_SCALE
-            discharge_cost = EFFICIENCY_SCALE
+            charge = 0
+            discharge = 0
 
-        ev_soc_variables: dict[str, list[Any]] = {}
-        ev_charge_variables: dict[str, list[Any]] = {}
         for ev_load in scenario.ev_loads:
-            ev_capacity = to_energy_int(ev_load.capacity_kwh)
-            soc_vars = [
-                model.NewIntVar(0, ev_capacity, f"ev_soc_{ev_load.id}_{slot}")
-                for slot in range(horizon_slots + 1)
-            ]
-            model.Add(soc_vars[0] == to_energy_int(ev_load.initial_soc_kwh))
-            ev_soc_variables[ev_load.id] = soc_vars
-            ev_charge_variables[ev_load.id] = []
+            max_ev_charge = to_solver_int(ev_load.max_charge_kw, "kW")
+            min_ev_charge = to_solver_int(ev_load.min_charge_kw, "kW")
+            ev_charge = model.NewIntVar(0, max_ev_charge, f"ev_charge_{ev_load.id}_{slot}")
+            if slot >= ev_load.deadline_slot:
+                model.Add(ev_charge == 0)
+            if min_ev_charge > 0:
+                ev_charging = model.NewBoolVar(f"ev_charging_{ev_load.id}_{slot}")
+                model.Add(ev_charge == 0).OnlyEnforceIf(ev_charging.Not())
+                model.Add(ev_charge >= min_ev_charge).OnlyEnforceIf(ev_charging)
+            ev_charge_variables[ev_load.id].append(ev_charge)
+            soc_vars = ev_soc_variables[ev_load.id]
+            ev_charge_gain = round(ev_load.charge_efficiency * EFFICIENCY_SCALE)
+            model.Add(
+                soc_vars[slot + 1] * EFFICIENCY_SCALE * 60
+                == soc_vars[slot] * EFFICIENCY_SCALE * 60
+                + ev_charge * scenario.horizon.resolution_minutes * ev_charge_gain
+            )
 
-        comfort_active_variables: dict[str, dict[int, Any]] = {}
-        for comfort_load in scenario.comfort_loads:
-            variables = {
-                slot: model.NewBoolVar(f"comfort_{comfort_load.id}_{slot}")
-                for slot in range(comfort_load.earliest_slot, comfort_load.deadline_slot)
-            }
-            model.Add(sum(variables.values()) >= comfort_load.min_active_slots)
-            comfort_active_variables[comfort_load.id] = variables
-
-        ev_charge_bound = sum(
-            to_solver_int(ev_load.max_charge_kw, "kW") for ev_load in scenario.ev_loads
+        ev_charge_total = sum(
+            ev_charge_variables[ev_load.id][slot] for ev_load in scenario.ev_loads
         )
-        comfort_power_bound = sum(
+        comfort_total = sum(
             to_solver_int(comfort_load.power, comfort_load.power_unit)
+            * comfort_active_variables[comfort_load.id][slot]
             for comfort_load in scenario.comfort_loads
+            if slot in comfort_active_variables[comfort_load.id]
         )
-        load_bound = (
-            sum(load_powers.values())
-            + max(base_load_powers, default=0)
-            + ev_charge_bound
-            + comfort_power_bound
+        active_load = (
+            sum(_active_load_terms(scenario, start_variables, slot, load_powers))
+            + ev_charge_total
+            + comfort_total
         )
-        solar_bound = max(solar_powers, default=0)
-        grid_bound = max(1, load_bound + solar_bound + max_charge + max_discharge) * 2
-        for constraint in scenario.constraints:
-            if constraint.type in {"max_grid_import", "max_grid_export"}:
-                grid_bound = max(grid_bound, to_solver_int(constraint.value, constraint.unit))
-
-        grid_import: list[Any] = []
-        grid_export: list[Any] = []
-        peak_import = model.NewIntVar(0, grid_bound, "peak_grid_import")
-        soft_violations: list[tuple[str, int, Any]] = []
-        for slot in range(horizon_slots):
-            importing = model.NewBoolVar(f"grid_importing_{slot}")
-            grid_in = model.NewIntVar(0, grid_bound, f"grid_import_{slot}")
-            grid_out = model.NewIntVar(0, grid_bound, f"grid_export_{slot}")
-            grid_import.append(grid_in)
-            grid_export.append(grid_out)
-            model.Add(grid_in == 0).OnlyEnforceIf(importing.Not())
-            model.Add(grid_out == 0).OnlyEnforceIf(importing)
-            model.Add(peak_import >= grid_in)
-
-            if battery is not None:
-                charge = model.NewIntVar(0, max_charge, f"battery_charge_{slot}")
-                discharge = model.NewIntVar(0, max_discharge, f"battery_discharge_{slot}")
-                charging = model.NewBoolVar(f"battery_charging_{slot}")
-                model.Add(charge == 0).OnlyEnforceIf(charging.Not())
-                model.Add(discharge == 0).OnlyEnforceIf(charging)
-                charge_variables.append(charge)
-                discharge_variables.append(discharge)
-                model.Add(
-                    soc_variables[slot + 1] * EFFICIENCY_SCALE * 60
-                    == soc_variables[slot] * EFFICIENCY_SCALE * 60
-                    + charge * scenario.horizon.resolution_minutes * charge_gain
-                    - discharge * scenario.horizon.resolution_minutes * discharge_cost
-                )
-            else:
-                charge = 0
-                discharge = 0
-
-            for ev_load in scenario.ev_loads:
-                max_ev_charge = to_solver_int(ev_load.max_charge_kw, "kW")
-                min_ev_charge = to_solver_int(ev_load.min_charge_kw, "kW")
-                ev_charge = model.NewIntVar(0, max_ev_charge, f"ev_charge_{ev_load.id}_{slot}")
-                if slot >= ev_load.deadline_slot:
-                    model.Add(ev_charge == 0)
-                if min_ev_charge > 0:
-                    ev_charging = model.NewBoolVar(f"ev_charging_{ev_load.id}_{slot}")
-                    model.Add(ev_charge == 0).OnlyEnforceIf(ev_charging.Not())
-                    model.Add(ev_charge >= min_ev_charge).OnlyEnforceIf(ev_charging)
-                ev_charge_variables[ev_load.id].append(ev_charge)
-                soc_vars = ev_soc_variables[ev_load.id]
-                ev_charge_gain = round(ev_load.charge_efficiency * EFFICIENCY_SCALE)
-                model.Add(
-                    soc_vars[slot + 1] * EFFICIENCY_SCALE * 60
-                    == soc_vars[slot] * EFFICIENCY_SCALE * 60
-                    + ev_charge * scenario.horizon.resolution_minutes * ev_charge_gain
-                )
-
-            ev_charge_total = sum(
-                ev_charge_variables[ev_load.id][slot] for ev_load in scenario.ev_loads
-            )
-            comfort_total = sum(
-                to_solver_int(comfort_load.power, comfort_load.power_unit)
-                * comfort_active_variables[comfort_load.id][slot]
-                for comfort_load in scenario.comfort_loads
-                if slot in comfort_active_variables[comfort_load.id]
-            )
-            active_load = (
-                sum(_active_load_terms(scenario, start_variables, slot, load_powers))
-                + ev_charge_total
-                + comfort_total
-            )
-            model.Add(
-                active_load + charge + base_load_powers[slot]
-                == solar_powers[slot] + grid_in + discharge - grid_out
-            )
-            _add_energy_constraints(
-                model,
-                scenario,
-                slot,
-                active_load + base_load_powers[slot],
-                charge,
-                grid_in,
-                grid_out,
-                soc_variables,
-                grid_bound,
-                soft_violations,
-            )
-
-        for ev_load in scenario.ev_loads:
-            model.Add(
-                ev_soc_variables[ev_load.id][ev_load.deadline_slot]
-                >= to_energy_int(ev_load.target_soc_kwh)
-            )
-
-        terminal_policy = scenario.terminal_soc_policy
-        if battery is not None and terminal_policy is not None:
-            if terminal_policy.minimum_kwh is not None:
-                model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.minimum_kwh))
-            if terminal_policy.target_kwh is not None:
-                model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.target_kwh))
-
-        solver, status, solved_tiers, wall_time, degraded = _solve_tiers(
+        model.Add(
+            active_load + charge + base_load_powers[slot]
+            == solar_powers[slot] + grid_in + discharge - grid_out
+        )
+        _add_energy_constraints(
             model,
             scenario,
-            start_variables,
-            grid_import,
-            grid_export,
-            peak_import,
+            slot,
+            active_load + base_load_powers[slot],
+            charge,
+            grid_in,
+            grid_out,
+            soc_variables,
+            grid_bound,
             soft_violations,
-            resolution_hours=scenario.horizon.resolution_minutes / 60,
-            context=context,
-            charge_variables=charge_variables,
-            discharge_variables=discharge_variables,
-            terminal_soc_variable=(soc_variables[-1] if battery is not None else None),
         )
-        failure = _failure_result(scenario, status)
-        if failure is not None:
-            return failure
 
-        selected_slots = _selected_slots(solver, start_variables)
-        ev_charge_slots: dict[str, dict[int, float]] = {
-            ev_load.id: {
-                slot: solver.Value(variable) / POWER_SCALE
-                for slot, variable in enumerate(ev_charge_variables[ev_load.id])
-                if solver.Value(variable) > 0
-            }
+    for ev_load in scenario.ev_loads:
+        model.Add(
+            ev_soc_variables[ev_load.id][ev_load.deadline_slot]
+            >= to_energy_int(ev_load.target_soc_kwh)
+        )
+
+    terminal_policy = scenario.terminal_soc_policy
+    if battery is not None and terminal_policy is not None:
+        if terminal_policy.minimum_kwh is not None:
+            model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.minimum_kwh))
+        if terminal_policy.target_kwh is not None:
+            model.Add(soc_variables[-1] >= to_energy_int(terminal_policy.target_kwh))
+
+    solver, status, solved_tiers, wall_time, degraded = _solve_tiers(
+        model,
+        scenario,
+        start_variables,
+        grid_import,
+        grid_export,
+        peak_import,
+        soft_violations,
+        resolution_hours=scenario.horizon.resolution_minutes / 60,
+        context=context,
+        charge_variables=charge_variables,
+        discharge_variables=discharge_variables,
+        terminal_soc_variable=(soc_variables[-1] if battery is not None else None),
+    )
+    failure = _failure_result(scenario, status)
+    if failure is not None:
+        return failure
+
+    selected_slots = _selected_slots(solver, start_variables)
+    ev_charge_slots: dict[str, dict[int, float]] = {
+        ev_load.id: {
+            slot: solver.Value(variable) / POWER_SCALE
+            for slot, variable in enumerate(ev_charge_variables[ev_load.id])
+            if solver.Value(variable) > 0
+        }
+        for ev_load in scenario.ev_loads
+    }
+    comfort_active_slots: dict[str, list[int]] = {
+        comfort_load.id: [
+            slot
+            for slot, variable in comfort_active_variables[comfort_load.id].items()
+            if solver.Value(variable)
+        ]
+        for comfort_load in scenario.comfort_loads
+    }
+    battery_dispatch_slots: dict[int, tuple[float, float]] | None = None
+    if battery is not None:
+        battery_dispatch_slots = {
+            slot: (
+                solver.Value(charge_variables[slot]) / POWER_SCALE,
+                solver.Value(discharge_variables[slot]) / POWER_SCALE,
+            )
+            for slot in range(horizon_slots)
+        }
+    plans = _proposal_plan(
+        scenario,
+        selected_slots,
+        ev_charge_slots,
+        comfort_active_slots,
+        battery_dispatch_slots,
+    )
+    slots: list[dict[str, float | int]] = []
+    energy_cost = 0.0
+    export_revenue = 0.0
+    export_kwh = 0.0
+    solar_kwh = 0.0
+    battery_throughput_kwh = 0.0
+    resolution_hours = scenario.horizon.resolution_minutes / 60
+    for slot in range(horizon_slots):
+        load_power = sum(
+            load_powers[load.id]
+            for load in scenario.loads
+            if any(
+                start <= slot < start + load.duration_slots and solver.Value(variable)
+                for start, variable in start_variables[load.id].items()
+            )
+        )
+        solar_kw = solar_powers[slot] / POWER_SCALE
+        import_kw = solver.Value(grid_import[slot]) / POWER_SCALE
+        export_kw = solver.Value(grid_export[slot]) / POWER_SCALE
+        charge_kw = solver.Value(charge_variables[slot]) / POWER_SCALE if battery else 0.0
+        discharge_kw = solver.Value(discharge_variables[slot]) / POWER_SCALE if battery else 0.0
+        soc_kwh = solver.Value(soc_variables[slot]) / SOC_SCALE if battery else 0.0
+        ev_charge_kw = sum(
+            solver.Value(ev_charge_variables[ev_load.id][slot]) / POWER_SCALE
             for ev_load in scenario.ev_loads
-        }
-        comfort_active_slots: dict[str, list[int]] = {
-            comfort_load.id: [
-                slot
-                for slot, variable in comfort_active_variables[comfort_load.id].items()
-                if solver.Value(variable)
-            ]
+        )
+        comfort_power_kw = sum(
+            to_solver_int(comfort_load.power, comfort_load.power_unit) / POWER_SCALE
             for comfort_load in scenario.comfort_loads
-        }
-        battery_dispatch_slots: dict[int, tuple[float, float]] | None = None
-        if battery is not None:
-            battery_dispatch_slots = {
-                slot: (
-                    solver.Value(charge_variables[slot]) / POWER_SCALE,
-                    solver.Value(discharge_variables[slot]) / POWER_SCALE,
-                )
-                for slot in range(horizon_slots)
+            if slot in comfort_active_variables[comfort_load.id]
+            and solver.Value(comfort_active_variables[comfort_load.id][slot])
+        )
+        battery_throughput_kwh += (charge_kw + discharge_kw) * resolution_hours
+        energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
+        if context.export_tariffs is not None:
+            export_revenue += (
+                export_kw * resolution_hours * context.export_tariffs[slot].price_per_kwh
+            )
+        export_kwh += export_kw * resolution_hours
+        solar_kwh += solar_kw * resolution_hours
+        slots.append(
+            {
+                "slot": slot,
+                "load_power_kw": load_power / POWER_SCALE,
+                "solar_power_kw": solar_kw,
+                "grid_import_kw": import_kw,
+                "grid_export_kw": export_kw,
+                "battery_charge_kw": charge_kw,
+                "battery_discharge_kw": discharge_kw,
+                "battery_soc_kwh": soc_kwh,
+                "ev_charge_kw": ev_charge_kw,
+                "comfort_power_kw": comfort_power_kw,
             }
-        plans = _proposal_plan(
-            scenario,
-            selected_slots,
-            ev_charge_slots,
-            comfort_active_slots,
-            battery_dispatch_slots,
         )
-        slots: list[dict[str, float | int]] = []
-        energy_cost = 0.0
-        export_revenue = 0.0
-        export_kwh = 0.0
-        solar_kwh = 0.0
-        battery_throughput_kwh = 0.0
-        resolution_hours = scenario.horizon.resolution_minutes / 60
-        for slot in range(horizon_slots):
-            load_power = sum(
-                load_powers[load.id]
-                for load in scenario.loads
-                if any(
-                    start <= slot < start + load.duration_slots and solver.Value(variable)
-                    for start, variable in start_variables[load.id].items()
-                )
-            )
-            solar_kw = solar_powers[slot] / POWER_SCALE
-            import_kw = solver.Value(grid_import[slot]) / POWER_SCALE
-            export_kw = solver.Value(grid_export[slot]) / POWER_SCALE
-            charge_kw = solver.Value(charge_variables[slot]) / POWER_SCALE if battery else 0.0
-            discharge_kw = solver.Value(discharge_variables[slot]) / POWER_SCALE if battery else 0.0
-            soc_kwh = solver.Value(soc_variables[slot]) / SOC_SCALE if battery else 0.0
-            ev_charge_kw = sum(
-                solver.Value(ev_charge_variables[ev_load.id][slot]) / POWER_SCALE
-                for ev_load in scenario.ev_loads
-            )
-            comfort_power_kw = sum(
-                to_solver_int(comfort_load.power, comfort_load.power_unit) / POWER_SCALE
-                for comfort_load in scenario.comfort_loads
-                if slot in comfort_active_variables[comfort_load.id]
-                and solver.Value(comfort_active_variables[comfort_load.id][slot])
-            )
-            battery_throughput_kwh += (charge_kw + discharge_kw) * resolution_hours
-            energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
-            if context.export_tariffs is not None:
-                export_revenue += (
-                    export_kw * resolution_hours * context.export_tariffs[slot].price_per_kwh
-                )
-            export_kwh += export_kw * resolution_hours
-            solar_kwh += solar_kw * resolution_hours
-            slots.append(
-                {
-                    "slot": slot,
-                    "load_power_kw": load_power / POWER_SCALE,
-                    "solar_power_kw": solar_kw,
-                    "grid_import_kw": import_kw,
-                    "grid_export_kw": export_kw,
-                    "battery_charge_kw": charge_kw,
-                    "battery_discharge_kw": discharge_kw,
-                    "battery_soc_kwh": soc_kwh,
-                    "ev_charge_kw": ev_charge_kw,
-                    "comfort_power_kw": comfort_power_kw,
-                }
-            )
-        battery_degradation_cost = (
-            battery_throughput_kwh * battery.degradation_cost_per_kwh
-            if battery is not None and battery.degradation_cost_per_kwh is not None
-            else 0.0
-        )
+    battery_degradation_cost = (
+        battery_throughput_kwh * battery.degradation_cost_per_kwh
+        if battery is not None and battery.degradation_cost_per_kwh is not None
+        else 0.0
+    )
 
-        solver_evidence = SolverEvidence(
-            solver_name="cp-sat",
-            solver_version=_SOLVER_VERSION,
-            num_search_workers=solver.parameters.num_search_workers,
-            random_seed=solver.parameters.random_seed,
-            wall_time_seconds=wall_time,
-            tiers=solved_tiers,
-            scenario_fingerprint=_scenario_fingerprint(scenario),
-        )
-        return build_result(
-            scenario_id=scenario.id,
-            status=(
-                OptimizationStatus.NO_ACTION_REQUIRED
-                if not plans and scenario.terminal_soc_policy is None
-                else _status_for_tiers(status, degraded)
+    solver_evidence = SolverEvidence(
+        solver_name="cp-sat",
+        solver_version=_SOLVER_VERSION,
+        num_search_workers=solver.parameters.num_search_workers,
+        random_seed=solver.parameters.random_seed,
+        wall_time_seconds=wall_time,
+        tiers=solved_tiers,
+        scenario_fingerprint=_scenario_fingerprint(scenario),
+    )
+    return build_result(
+        scenario_id=scenario.id,
+        status=(
+            OptimizationStatus.NO_ACTION_REQUIRED
+            if not plans and scenario.terminal_soc_policy is None
+            else _status_for_tiers(status, degraded)
+        ),
+        plan=plans[0] if plans else None,
+        plans=plans,
+        objective_values={
+            "start_slot_sum": float(sum(selected_slots.values())),
+            "energy_cost": energy_cost - export_revenue + battery_degradation_cost,
+            "export_revenue": export_revenue,
+            "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
+            "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
+            "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
+            "battery_throughput_kwh": battery_throughput_kwh,
+            "battery_degradation_cost": battery_degradation_cost,
+            "terminal_soc_kwh": (
+                solver.Value(soc_variables[-1]) / SOC_SCALE if battery is not None else 0.0
             ),
-            plan=plans[0] if plans else None,
-            plans=plans,
-            objective_values={
-                "start_slot_sum": float(sum(selected_slots.values())),
-                "energy_cost": energy_cost - export_revenue + battery_degradation_cost,
-                "export_revenue": export_revenue,
-                "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
-                "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
-                "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
-                "battery_throughput_kwh": battery_throughput_kwh,
-                "battery_degradation_cost": battery_degradation_cost,
-                "terminal_soc_kwh": (
-                    solver.Value(soc_variables[-1]) / SOC_SCALE if battery is not None else 0.0
-                ),
-                "terminal_soc_value_eur": (
-                    (
-                        solver.Value(soc_variables[-1])
-                        / SOC_SCALE
-                        * scenario.terminal_soc_policy.value_eur_per_kwh
-                    )
-                    if battery is not None
-                    and scenario.terminal_soc_policy is not None
-                    and scenario.terminal_soc_policy.value_eur_per_kwh is not None
-                    else 0.0
-                ),
-            },
-            constraint_summary={
-                "hard_satisfied": True,
-                "battery_actuator_bound": battery is not None and battery.actuator is not None,
-                "slots": slots,
-                "violations": [],
-                "soft_violations": _reported_soft_violations(solver, soft_violations),
-                "forecast_confidence": forecast_confidence,
-                "terminal_soc_policy": (
-                    scenario.terminal_soc_policy.model_dump(mode="json")
-                    if scenario.terminal_soc_policy is not None
-                    else None
-                ),
-            },
-            solver_evidence=solver_evidence,
-        )
+            "terminal_soc_value_eur": (
+                (
+                    solver.Value(soc_variables[-1])
+                    / SOC_SCALE
+                    * scenario.terminal_soc_policy.value_eur_per_kwh
+                )
+                if battery is not None
+                and scenario.terminal_soc_policy is not None
+                and scenario.terminal_soc_policy.value_eur_per_kwh is not None
+                else 0.0
+            ),
+        },
+        constraint_summary={
+            "hard_satisfied": True,
+            "battery_actuator_bound": battery is not None and battery.actuator is not None,
+            "slots": slots,
+            "violations": [],
+            "soft_violations": _reported_soft_violations(solver, soft_violations),
+            "forecast_confidence": forecast_confidence,
+            "terminal_soc_policy": (
+                scenario.terminal_soc_policy.model_dump(mode="json")
+                if scenario.terminal_soc_policy is not None
+                else None
+            ),
+        },
+        solver_evidence=solver_evidence,
+    )
 
 
 def _start_variables(model: Any, scenario: OptimizationScenario) -> dict[str, dict[int, Any]]:

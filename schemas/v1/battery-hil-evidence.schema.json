@@ -50,6 +50,34 @@
       "minLength": 1,
       "title": "Run Id",
       "type": "string"
+    },
+    "test_software_version": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Test Software Version"
+    },
+    "observations": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Observations",
+      "type": "object"
+    },
+    "manual_attestations": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Manual Attestations",
+      "type": "object"
     }
   },
   "required": [

@@ -26,7 +26,7 @@ modules =
 
 # Intended layering, high (entrypoint/composition) to low (core), each layer
 # may import any layer below it but never one above:
-#   mcp / lab    - process entrypoints (MCP servers, lab CLI)
+#   mcp / lab / hil - process entrypoints (MCP servers, lab CLI, HIL runner)
 #   application  - composition root / use-case orchestration
 #   skills       - agent-facing workflow layer (imports optimizer)
 #   adapters     - protocol adapters (home_assistant, knx, matter, modbus,
@@ -50,6 +50,7 @@ type = layers
 layers =
     domoai.mcp
     domoai.lab
+    domoai.hil
     domoai.application
     domoai.skills
     domoai.adapters

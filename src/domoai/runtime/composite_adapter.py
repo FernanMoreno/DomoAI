@@ -41,7 +41,6 @@ class CompositeAdapter:
         diagnostics_max_size: int = DEFAULT_DIAGNOSTICS_MAX_SIZE,
         reconnect_initial_delay: float = 1.0,
         reconnect_max_delay: float = 60.0,
-        max_reconnect_attempts: int = 3,
         reconnect_on_stream_end: bool = False,
     ) -> None:
         if not adapters:
@@ -52,8 +51,6 @@ class CompositeAdapter:
             raise ValueError("CompositeAdapter diagnostics_max_size must be positive")
         if reconnect_initial_delay < 0 or reconnect_max_delay < reconnect_initial_delay:
             raise ValueError("CompositeAdapter reconnect delays are invalid")
-        if max_reconnect_attempts <= 0:
-            raise ValueError("CompositeAdapter max_reconnect_attempts must be positive")
         adapter_ids = [adapter.adapter_id for adapter in adapters]
         if len(set(adapter_ids)) != len(adapter_ids):
             raise ValueError("CompositeAdapter requires unique adapter IDs")
@@ -74,7 +71,6 @@ class CompositeAdapter:
         self._priority_queue: asyncio.Queue[Any] | None = None
         self._reconnect_initial_delay = reconnect_initial_delay
         self._reconnect_max_delay = reconnect_max_delay
-        self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_on_stream_end = reconnect_on_stream_end
 
     @property
@@ -253,10 +249,15 @@ class CompositeAdapter:
         sequence = count()
 
         async def pump(adapter: AdapterPort) -> None:
+            # A child adapter never abandons the supervisor permanently: a
+            # dead Matter bridge that comes back an hour later must still
+            # reconnect. Reconnection retries unboundedly with exponential
+            # backoff capped at reconnect_max_delay; only explicit
+            # cancellation (composite shutdown) ends the pump for good.
             cancelled = False
             delay = self._reconnect_initial_delay
-            stream_end_reconnects = 0
             while not cancelled:
+                stream_error: BaseException | None = None
                 try:
                     async for event in adapter.subscribe_events():
                         if isinstance(event, StateChangedEvent):
@@ -271,55 +272,64 @@ class CompositeAdapter:
                                 self._record_drop(adapter.adapter_id, event)
                         else:
                             await priority_queue.put((adapter.adapter_id, event, None))
-                    if not self._reconnect_on_stream_end or stream_end_reconnects >= 1:
+                    if not self._reconnect_on_stream_end:
                         break
-                    stream_end_reconnects += 1
-                    raise ConnectionError("Adapter event stream ended unexpectedly")
+                    # A graceful stream end (e.g. the underlying websocket's
+                    # `async for` simply returning) is treated exactly like a
+                    # connection error for reconnection purposes -- the
+                    # topology-relevant question is "is this adapter still
+                    # streaming," not "did it fail loudly."
+                    stream_error = ConnectionError("Adapter event stream ended unexpectedly")
                 except asyncio.CancelledError:
                     cancelled = True
                     raise
                 except (ConnectionError, OSError, TimeoutError) as error:
-                    self._record_failure(adapter.adapter_id, "adapter_event_stream_failed", error)
-                    await priority_queue.put((adapter.adapter_id, None, error))
-                    recovered = False
-                    for _ in range(self._max_reconnect_attempts):
-                        self._reconnect_attempts_total += 1
-                        await asyncio.sleep(delay)
-                        try:
-                            await adapter.connect()
-                        except (ConnectionError, OSError, TimeoutError) as reconnect_error:
-                            self._record_failure(
-                                adapter.adapter_id,
-                                "adapter_reconnect_failed",
-                                reconnect_error,
-                            )
-                            self._reconnect_failure_total += 1
-                            await priority_queue.put((adapter.adapter_id, None, reconnect_error))
-                            delay = min(
-                                max(delay * 2, self._reconnect_initial_delay),
-                                self._reconnect_max_delay,
-                            )
-                            continue
-                        self._connected.add(adapter.adapter_id)
-                        self._reconnect_success_total += 1
-                        recovered = True
-                        await priority_queue.put(
-                            (
-                                adapter.adapter_id,
-                                AdapterDiagnosticEvent(
-                                    source_adapter_id=adapter.adapter_id,
-                                    payload={
-                                        "source_adapter_id": adapter.adapter_id,
-                                        "event": "adapter_reconnected",
-                                    },
-                                ),
-                                None,
-                            )
+                    stream_error = error
+
+                if stream_error is None:
+                    continue
+                self._record_failure(
+                    adapter.adapter_id, "adapter_event_stream_failed", stream_error
+                )
+                await priority_queue.put((adapter.adapter_id, None, stream_error))
+                while not cancelled:
+                    self._reconnect_attempts_total += 1
+                    await asyncio.sleep(delay)
+                    try:
+                        await adapter.connect()
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        raise
+                    except (ConnectionError, OSError, TimeoutError) as reconnect_error:
+                        self._record_failure(
+                            adapter.adapter_id,
+                            "adapter_reconnect_failed",
+                            reconnect_error,
                         )
-                        delay = self._reconnect_initial_delay
-                        break
-                    if not recovered:
-                        break
+                        self._reconnect_failure_total += 1
+                        await priority_queue.put((adapter.adapter_id, None, reconnect_error))
+                        delay = min(
+                            max(delay * 2, self._reconnect_initial_delay),
+                            self._reconnect_max_delay,
+                        )
+                        continue
+                    self._connected.add(adapter.adapter_id)
+                    self._reconnect_success_total += 1
+                    await priority_queue.put(
+                        (
+                            adapter.adapter_id,
+                            AdapterDiagnosticEvent(
+                                source_adapter_id=adapter.adapter_id,
+                                payload={
+                                    "source_adapter_id": adapter.adapter_id,
+                                    "event": "adapter_reconnected",
+                                },
+                            ),
+                            None,
+                        )
+                    )
+                    delay = self._reconnect_initial_delay
+                    break
             if not cancelled:
                 await priority_queue.put((adapter.adapter_id, None, None))
 

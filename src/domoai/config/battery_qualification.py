@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -42,6 +42,16 @@ class BatteryHILEvidence(StrictModel):
     completed_at: datetime
     checks: dict[str, bool] = Field(min_length=1)
     run_id: str = Field(min_length=1, max_length=128)
+    # Additive provenance fields (spec 146): distinguish a check the runner
+    # actually observed from a real adapter call (`observations`) from one
+    # an operator attests to separately because it cannot be derived from a
+    # single automated run (`manual_attestations`) -- e.g. verifying no
+    # native scheduler conflict, or that a restart did not replay a command,
+    # both require multi-phase/out-of-band verification a single CLI
+    # invocation cannot self-certify.
+    test_software_version: str | None = Field(default=None, max_length=200)
+    observations: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    manual_attestations: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_evidence(self) -> BatteryHILEvidence:
@@ -55,6 +65,9 @@ class BatteryHILEvidence(StrictModel):
             raise ValueError("battery HIL evidence is missing required checks")
         if self.status == "passed" and not all(self.checks.values()):
             raise ValueError("passed battery HIL evidence must pass every required check")
+        unknown_manual = set(self.manual_attestations) - REQUIRED_HIL_CHECKS
+        if unknown_manual:
+            raise ValueError("battery HIL manual attestations reference unknown checks")
         return self
 
     def qualifies(self, binding: DispatchableBatteryBinding) -> bool:

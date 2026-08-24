@@ -69,6 +69,15 @@ command to derive actual domain/layer boundaries from code and architecture.
   being defined away. Migration path: split `domoai.runtime` into a pure
   kernel package and move the orchestration modules into `domoai.application`
   (they already depend on it).
+  **CI status (spec 149):** the CI job that used to be named "Architecture
+  contracts" only ever ran `scripts/check_architecture_contracts.py` (domain
+  purity + adapter independence + `.importlinter` presence) — it never ran
+  `lint-imports`, so the layers/acyclic-siblings contracts were not actually
+  gating merges despite the name implying they were. It is now named "Source
+  architecture invariants" to describe what it actually checks, and a
+  separate non-blocking `import-linter-diagnostic` job runs `lint-imports` on
+  every PR so the known violation stays visible in CI logs. Branch
+  protection's required checks were updated to the new name.
 
 ## Commands
 

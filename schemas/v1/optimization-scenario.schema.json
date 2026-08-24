@@ -1328,6 +1328,7 @@
       "items": {
         "$ref": "#/$defs/Load"
       },
+      "maxItems": 100,
       "title": "Loads",
       "type": "array"
     },
@@ -1335,6 +1336,7 @@
       "items": {
         "$ref": "#/$defs/EVChargingLoad"
       },
+      "maxItems": 16,
       "title": "Ev Loads",
       "type": "array"
     },
@@ -1342,6 +1344,7 @@
       "items": {
         "$ref": "#/$defs/ComfortLoad"
       },
+      "maxItems": 32,
       "title": "Comfort Loads",
       "type": "array"
     },
@@ -1349,6 +1352,7 @@
       "items": {
         "$ref": "#/$defs/Constraint"
       },
+      "maxItems": 64,
       "title": "Constraints",
       "type": "array"
     },
@@ -1356,6 +1360,7 @@
       "items": {
         "$ref": "#/$defs/Objective"
       },
+      "maxItems": 16,
       "title": "Objectives",
       "type": "array"
     },
@@ -1386,6 +1391,7 @@
         "additionalProperties": true,
         "type": "object"
       },
+      "maxItems": 64,
       "title": "Inputs",
       "type": "array"
     },

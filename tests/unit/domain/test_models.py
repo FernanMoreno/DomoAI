@@ -11,6 +11,7 @@ from domoai.domain.models import (
     Device,
     DeviceType,
     Plan,
+    Precondition,
     RiskClass,
     SourceRef,
     StateSnapshot,
@@ -155,3 +156,34 @@ def test_plan_accepts_omitted_optional_timestamps() -> None:
     plan = Plan(id="plan-omitted-timestamps", commands=_single_command())
     assert plan.execute_at is None
     assert plan.expires_at is None
+
+
+def test_command_accepts_preconditions_within_the_limit() -> None:
+    Command(
+        id="command-preconditions-limit",
+        device_id="living_room.main_light",
+        command="set_brightness",
+        value=50,
+        idempotency_key="intent-preconditions-limit",
+        preconditions=[
+            Precondition(device_id="living_room.main_light", capability="power", expected=True)
+            for _ in range(16)
+        ],
+    )
+
+
+def test_command_rejects_preconditions_beyond_the_limit() -> None:
+    with pytest.raises(ValidationError):
+        Command(
+            id="command-preconditions-over-limit",
+            device_id="living_room.main_light",
+            command="set_brightness",
+            value=50,
+            idempotency_key="intent-preconditions-over-limit",
+            preconditions=[
+                Precondition(
+                    device_id="living_room.main_light", capability="power", expected=True
+                )
+                for _ in range(17)
+            ],
+        )

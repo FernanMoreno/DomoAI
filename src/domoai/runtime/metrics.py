@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from domoai.domain.models import PlanStatus, StateStatus
 from domoai.runtime.clock import Clock, SystemClock
@@ -12,17 +12,43 @@ from domoai.runtime.state_store import StateStore
 
 if TYPE_CHECKING:
     from domoai.application.optimization_service import OptimizationService
-    from domoai.application.optimization_worker import OptimizationWorker
-    from domoai.persistence.serialized import SerializedStorageExecutor
+    from domoai.persistence.serialized import SerializedStorageExecutor, StorageMetrics
     from domoai.persistence.sqlite import SQLiteDatabase
     from domoai.runtime.event_consumer import RuntimeEventConsumer
+    from domoai.runtime.events import AuditLog
     from domoai.runtime.scheduler import Scheduler
+
+
+class OptimizerWorkerLike(Protocol):
+    """Shape both `OptimizationWorker` (thread-backed) and
+    `ProcessOptimizationWorker` (spec 150, process-backed) satisfy --
+    referenced structurally so this module doesn't need to import either
+    concrete class."""
+
+    last_wall_time_seconds: float | None
+    last_queue_wait_seconds: float | None
 
 _PLAN_STATUSES_TRACKED: dict[str, PlanStatus] = {
     "pending": PlanStatus.READY,
     "executing": PlanStatus.EXECUTING,
     "unknown": PlanStatus.UNKNOWN,
 }
+
+
+def _storage_metrics_dict(storage_metrics: StorageMetrics | None) -> dict[str, Any] | None:
+    if storage_metrics is None:
+        return None
+    return {
+        "operation_count": storage_metrics.operation_count,
+        "completed_count": storage_metrics.completed_count,
+        "failed_count": storage_metrics.failed_count,
+        "timeout_count": storage_metrics.timeout_count,
+        "overloaded_count": storage_metrics.overloaded_count,
+        "queue_depth": storage_metrics.queue_depth,
+        "max_in_flight": storage_metrics.max_in_flight,
+        "total_queue_wait_seconds": storage_metrics.total_queue_wait_seconds,
+        "last_error": storage_metrics.last_error,
+    }
 
 
 class RuntimeMetricsCollector:
@@ -44,8 +70,10 @@ class RuntimeMetricsCollector:
         plan_repository: PlanRecordPort,
         database: SQLiteDatabase,
         storage: SerializedStorageExecutor | None = None,
+        audit_storage: SerializedStorageExecutor | None = None,
+        audit: AuditLog | None = None,
         battery_qualification: str = "unsupported",
-        optimization_worker: OptimizationWorker | None = None,
+        optimization_worker: OptimizerWorkerLike | None = None,
         optimization_service: OptimizationService | None = None,
         clock: Clock | None = None,
     ) -> None:
@@ -56,6 +84,8 @@ class RuntimeMetricsCollector:
         self.plan_repository = plan_repository
         self.database = database
         self.storage = storage
+        self.audit_storage = audit_storage
+        self.audit = audit
         self.battery_qualification = battery_qualification
         self.optimization_worker = optimization_worker
         self.optimization_service = optimization_service
@@ -108,11 +138,23 @@ class RuntimeMetricsCollector:
 
         db_metrics = self.database.metrics
         storage_metrics = self.storage.metrics if self.storage is not None else None
+        audit_storage_metrics = (
+            self.audit_storage.metrics if self.audit_storage is not None else None
+        )
         max_state_age_seconds = self.state_store.max_state_age_seconds(self.clock.now())
+        # Prefer the worker's own tracking (spec 150: ProcessOptimizationWorker
+        # bypasses OptimizationService.optimize entirely, so it never updates
+        # OptimizationService.last_wall_time_seconds; the thread-backed
+        # OptimizationWorker still routes through the service, so this falls
+        # back to it for that path / for callers that only wire a service).
         optimizer_last_wall_time_seconds = (
-            self.optimization_service.last_wall_time_seconds
-            if self.optimization_service is not None
-            else None
+            self.optimization_worker.last_wall_time_seconds
+            if self.optimization_worker is not None
+            else (
+                self.optimization_service.last_wall_time_seconds
+                if self.optimization_service is not None
+                else None
+            )
         )
 
         return {
@@ -147,20 +189,11 @@ class RuntimeMetricsCollector:
             ),
             "db_operation_count": db_metrics.operation_count,
             "db_busy_count": db_metrics.busy_count,
-            "storage": (
-                {
-                    "operation_count": storage_metrics.operation_count,
-                    "completed_count": storage_metrics.completed_count,
-                    "failed_count": storage_metrics.failed_count,
-                    "timeout_count": storage_metrics.timeout_count,
-                    "overloaded_count": storage_metrics.overloaded_count,
-                    "queue_depth": storage_metrics.queue_depth,
-                    "max_in_flight": storage_metrics.max_in_flight,
-                    "total_queue_wait_seconds": storage_metrics.total_queue_wait_seconds,
-                    "last_error": storage_metrics.last_error,
-                }
-                if storage_metrics is not None
-                else None
-            ),
+            "storage": _storage_metrics_dict(storage_metrics),
+            "audit": {
+                "storage": _storage_metrics_dict(audit_storage_metrics),
+                "sink_failure_count": self.audit.sink_failure_count if self.audit else None,
+                "last_sink_error": self.audit.last_sink_error if self.audit else None,
+            },
             "battery_qualification": self.battery_qualification,
         }

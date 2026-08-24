@@ -1,15 +1,17 @@
 """Optimization ports, models and implementations."""
 
-from domoai.optimizer.energy import (
+from domoai.domain.energy import (
     BatteryCapacityEvidence,
     BatteryControlPolicy,
     BatteryProfile,
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
+    NominalCapacityTrustPolicy,
+)
+from domoai.optimizer.energy import (
     EnergyContext,
     EVState,
-    NominalCapacityTrustPolicy,
     SolarForecastPoint,
     StaticEnergyContextProvider,
     TariffPoint,

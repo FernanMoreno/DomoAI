@@ -187,6 +187,7 @@
       "items": {
         "$ref": "#/$defs/Precondition"
       },
+      "maxItems": 16,
       "title": "Preconditions",
       "type": "array"
     },

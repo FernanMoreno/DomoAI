@@ -114,6 +114,8 @@ class AuditLog:
         self._events: deque[AuditEvent] = deque(maxlen=max_events)
         self._sink = sink
         self.clock = clock or SystemClock()
+        self.sink_failure_count = 0
+        self.last_sink_error: str | None = None
 
     @property
     def events(self) -> tuple[AuditEvent, ...]:
@@ -137,5 +139,17 @@ class AuditLog:
         )
         self._events.append(event)
         if self._sink is not None:
-            self._sink.append_event(event)
+            # A durable-sink failure (e.g. the storage boundary is
+            # momentarily overloaded) must never propagate into the caller:
+            # observability degrading to memory-only retention is an
+            # acceptable loss, but an in-flight plan/execution/schedule
+            # operation aborting because its *audit* write failed is not.
+            # The event is never dropped silently -- it stays in the bounded
+            # in-memory window above, and the failure is countable via
+            # sink_failure_count/last_sink_error for metrics/alerting.
+            try:
+                self._sink.append_event(event)
+            except Exception as error:
+                self.sink_failure_count += 1
+                self.last_sink_error = f"{type(error).__name__}: {error}"
         return event

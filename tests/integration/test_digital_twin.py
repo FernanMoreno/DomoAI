@@ -12,10 +12,10 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
+from domoai.lab.twin import DigitalTwin
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
-from domoai.runtime.twin import DigitalTwin
 
 
 async def _live_context() -> tuple[SimulatedHomeAdapter, DeviceRegistry, StateStore]:

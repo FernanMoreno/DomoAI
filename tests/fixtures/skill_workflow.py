@@ -9,10 +9,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+from domoai.application.bundle_commit import BundleCommitService
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.models import Policy, PolicyAction
 from domoai.mcp.domotics_server import DomoticsMcpContext
@@ -24,12 +28,9 @@ from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationSce
 from domoai.persistence.repositories import BundleCommitRepository, ScheduledPlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalStore
-from domoai.runtime.bundle_commit import BundleCommitService
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from domoai.skills.workflow import ApprovalDecision
 from tests.fixtures.energy import energy_context_for
@@ -97,9 +98,10 @@ async def build_workflow_fixture(
     approval_decisions: list[ApprovalDecision | None] | None = None,
     tool_aliases: dict[tuple[str, str], str] | None = None,
     horizon: Horizon | None = None,
+    clock: Clock | None = None,
 ) -> WorkflowFixture:
     domotics_adapter, domotics_context = await _build_domotics_context(
-        confirmation_required=confirmation_required, horizon=horizon
+        confirmation_required=confirmation_required, horizon=horizon, clock=clock
     )
     ortools_context = OrtoolsMcpContext(
         registry=domotics_context.registry,
@@ -155,12 +157,13 @@ def future_horizon(*, slots: int = 4, resolution_minutes: int = 15) -> Horizon:
 
 
 async def _build_domotics_context(
-    *, confirmation_required: bool, horizon: Horizon | None = None
+    *, confirmation_required: bool, horizon: Horizon | None = None, clock: Clock | None = None
 ) -> tuple[SimulatedHomeAdapter, DomoticsMcpContext]:
-    adapter = SimulatedHomeAdapter()
+    runtime_clock = clock or SystemClock()
+    adapter = SimulatedHomeAdapter(clock=runtime_clock)
     registry = DeviceRegistry()
-    state_store = StateStore()
-    audit = AuditLog()
+    state_store = StateStore(clock=runtime_clock)
+    audit = AuditLog(clock=runtime_clock)
     discovery = DiscoveryService(adapter, registry, state_store, audit)
     await discovery.refresh()
     policies = (
@@ -179,24 +182,38 @@ async def _build_domotics_context(
         if confirmation_required
         else []
     )
-    database = SQLiteDatabase(Path(tempfile.mkdtemp()) / "scheduler-fixture.sqlite3")
+    database = SQLiteDatabase(
+        Path(tempfile.mkdtemp()) / "scheduler-fixture.sqlite3", clock=runtime_clock
+    )
     await database.initialize()
-    plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
-    executor = PlanExecutor(adapter, plan_service, audit)
+    plan_service = PlanService(
+        registry, state_store, PolicyEngine(policies), audit, clock=runtime_clock
+    )
+    executor = PlanExecutor(adapter, plan_service, audit, clock=runtime_clock)
     facade = DomoticsFacade(plan_service, executor)
-    scheduled_repository = ScheduledPlanRepository(database)
-    scheduler = Scheduler(executor, scheduled_repository, audit)
+    scheduled_repository = ScheduledPlanRepository(database, clock=runtime_clock)
+    bundle_repository = BundleCommitRepository(database, clock=runtime_clock)
+    scheduler = Scheduler(
+        executor,
+        scheduled_repository,
+        audit,
+        bundle_repository=bundle_repository,
+        clock=runtime_clock,
+    )
     approval_store = ApprovalStore(
-        operator_token=FIXTURE_OPERATOR_TOKEN, allow_legacy_token=True
+        operator_token=FIXTURE_OPERATOR_TOKEN,
+        allow_legacy_token=True,
+        clock=runtime_clock,
     )
     plans: dict[str, Any] = {}
     bundle_commit_service = BundleCommitService(
         facade=facade,
         plans=plans,
         approval_store=approval_store,
-        bundle_repository=BundleCommitRepository(database),
+        bundle_repository=bundle_repository,
         scheduled_repository=scheduled_repository,
         audit=audit,
+        clock=runtime_clock,
     )
     return adapter, DomoticsMcpContext(
         discovery=discovery,
@@ -211,6 +228,7 @@ async def _build_domotics_context(
             energy_context_for(horizon or default_horizon(), with_battery=False)
         ),
         scheduler=scheduler,
+        clock=runtime_clock,
     )
 
 

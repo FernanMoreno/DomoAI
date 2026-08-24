@@ -7,6 +7,7 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import AdapterSnapshot, Capability, CapabilityKind, PlanStatus
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.energy import (
@@ -30,7 +31,6 @@ from domoai.optimizer.scenario import (
     validate_scenario,
 )
 from domoai.runtime.events import AuditLog
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.energy import energy_context_for, energy_horizon, flexible_load

@@ -9,10 +9,14 @@ from mcp.server.fastmcp import FastMCP
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
+from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.optimization_worker import OptimizationWorker, WorkerBudget
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.process_optimization_worker import ProcessOptimizationWorker
 from domoai.application.runtime_factory import RuntimeComposition, build_runtime
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
@@ -25,9 +29,6 @@ from domoai.runtime.approval_store import (
     OperatorPrincipalProvider,
 )
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.metrics import RuntimeMetricsCollector
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
@@ -76,15 +77,33 @@ async def build_configured_server(
         runtime.plan_service,
         CpSatOptimizer(runtime.registry),
     )
-    worker = OptimizationWorker(
-        optimization_service,
-        WorkerBudget(
-            max_solver_time_seconds=runtime.settings.optimization_max_solver_time_seconds,
-            queue_capacity=runtime.settings.optimization_worker_queue_capacity,
-            max_concurrency=runtime.settings.optimization_worker_concurrency,
-            queue_wait_seconds=runtime.settings.optimization_worker_queue_wait_seconds,
-            provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
-        ),
+    # CP-SAT-facing worker: process-backed (spec 150), not thread-backed.
+    # A timed-out solve's OS process is genuinely terminated instead of
+    # merely abandoned -- see specs/150-cp-sat-process-isolation/research.md
+    # for why a thread can't provide that guarantee. optimization_service
+    # itself is still used directly (validate_proposal, not through this
+    # worker) by mcp/ortools_server.py's optimize_scenario tool.
+    worker = runtime.register_blocking_worker(
+        ProcessOptimizationWorker(
+            runtime.registry,
+            WorkerBudget(
+                max_solver_time_seconds=runtime.settings.optimization_max_solver_time_seconds,
+                queue_capacity=runtime.settings.optimization_worker_queue_capacity,
+                max_concurrency=runtime.settings.optimization_worker_concurrency,
+                queue_wait_seconds=runtime.settings.optimization_worker_queue_wait_seconds,
+                provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
+            ),
+        )
+    )
+    # A second, separately-scoped worker for the energy-context provider
+    # boundary -- distinct `service`, so it cannot share the optimizer
+    # worker above (see DomoticsMcpContext.blocking_worker / spec 147).
+    # Constructed eagerly and registered here rather than lazily inside the
+    # get_energy_context tool, so `runtime.close()` actually owns it.
+    energy_worker = (
+        runtime.register_blocking_worker(OptimizationWorker(runtime.energy_context_provider))
+        if runtime.energy_context_provider is not None
+        else None
     )
     metrics = RuntimeMetricsCollector(
         adapter=runtime.adapter,
@@ -94,6 +113,8 @@ async def build_configured_server(
         plan_repository=runtime.plan_repository,
         database=runtime.database,
         storage=runtime.storage,
+        audit_storage=runtime.audit_storage,
+        audit=runtime.audit,
         battery_qualification=runtime.battery_qualification,
         optimization_worker=worker,
         optimization_service=optimization_service,
@@ -115,7 +136,7 @@ async def build_configured_server(
         bundle_commit_service=runtime.bundle_commit_service,
         operator_principal_provider=runtime.operator_principal_provider,
         operator_approval_assertion_provider=runtime.operator_approval_assertion_provider,
-        blocking_worker=worker,
+        blocking_worker=energy_worker,
         provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
         clock=runtime.clock,
     )

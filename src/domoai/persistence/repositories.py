@@ -446,6 +446,7 @@ class BundleCommitRepository:
                 BundleMemberCommitStatus.FAILED,
                 BundleMemberCommitStatus.UNKNOWN,
                 BundleMemberCommitStatus.MISSED,
+                BundleMemberCommitStatus.DEPENDENCY_FAILED,
             }:
                 # Re-delivery is safe only when it carries the same terminal
                 # evidence. A conflicting second settlement is not allowed to
@@ -517,7 +518,7 @@ class BundleCommitRepository:
                 if statuses == {BundleMemberCommitStatus.MISSED}
                 else BundleCommitStatus.PARTIALLY_COMMITTED
             )
-        if BundleMemberCommitStatus.FAILED in statuses:
+        if statuses & {BundleMemberCommitStatus.FAILED, BundleMemberCommitStatus.DEPENDENCY_FAILED}:
             return (
                 BundleCommitStatus.PARTIALLY_COMMITTED
                 if BundleMemberCommitStatus.EXECUTED in statuses

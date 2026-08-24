@@ -15,7 +15,12 @@ from domoai.application.plan_service import PlanService
 from domoai.domain.models import ErrorDetail, StrictModel
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
-from domoai.optimizer.ports import OptimizationResult, OptimizationStatus, build_result
+from domoai.optimizer.ports import (
+    BoundedOptimizerWorkerPort,
+    OptimizationResult,
+    OptimizationStatus,
+    build_result,
+)
 from domoai.optimizer.scenario import (
     OptimizationScenario,
     validate_executable_scenario,
@@ -43,7 +48,7 @@ class OrtoolsMcpContext:
     registry: DeviceRegistry
     plan_service: PlanService
     optimization_service: OptimizationService
-    optimization_worker: OptimizationWorker | None = None
+    optimization_worker: BoundedOptimizerWorkerPort | None = None
 
     @property
     def runtime_revision(self) -> str:
@@ -106,6 +111,11 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
 def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastMCP:
     ensure_fastmcp_settings_ready()
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+    # Fallback for a context built without a pre-wired worker (e.g. ad-hoc
+    # test contexts). The production path (mcp/stdio.py
+    # build_configured_server) always pre-supplies one registered with
+    # RuntimeComposition.close(), so this fallback's worker is intentionally
+    # unowned/best-effort -- see DomoticsMcpContext.blocking_worker.
     worker = context.optimization_worker or OptimizationWorker(context.optimization_service)
 
     @server.tool(

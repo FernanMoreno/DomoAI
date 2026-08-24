@@ -238,6 +238,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "ortools" },
+    { name = "pebble" },
     { name = "pydantic" },
     { name = "pymodbus" },
     { name = "websockets" },
@@ -262,6 +263,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "ortools", specifier = ">=9.12,<10" },
+    { name = "pebble", specifier = ">=5.1,<6" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pymodbus", specifier = ">=3.9,<4" },
     { name = "websockets", specifier = ">=15,<16" },
@@ -611,6 +613,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
+]
+
+[[package]]
+name = "pebble"
+version = "5.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/6b/fba8cb6ca12e6bbcfac48da790b6a9d262d5beb6f34dc1b63fccc32a9ff8/pebble-5.2.1.tar.gz", hash = "sha256:9743537aa0e40751a1cbf297928e141bd2202a24624a7c0f9fc14818a7f227b1", size = 40496, upload-time = "2026-07-19T20:18:17.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/cf/f838e54b229bb202575daf7542d39da3c38434959d7a9252d4be66cb7d9a/pebble-5.2.1-py3-none-any.whl", hash = "sha256:154feb48f187ffff842cbc2fe0768ed1524d6fa72e90577a78bcea21a2f929f9", size = 34984, upload-time = "2026-07-19T20:18:15.692Z" },
 ]
 
 [[package]]

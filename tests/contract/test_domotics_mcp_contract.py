@@ -7,9 +7,17 @@ import pytest
 from mcp import ClientSession
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+from domoai.application.bundle_commit import (
+    BundleCommitRequestMember,
+    BundleCommitService,
+    bundle_approval_digest,
+)
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError
 from domoai.domain.models import Policy, PolicyAction, StateStatus
@@ -19,6 +27,7 @@ from domoai.persistence.repositories import (
     AuditEventRepository,
     BundleCommitRepository,
     PlanRepository,
+    RecurringScheduleRepository,
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
@@ -27,17 +36,9 @@ from domoai.runtime.approval_store import (
     ApprovalStore,
     OperatorPrincipal,
 )
-from domoai.runtime.bundle_commit import (
-    BundleCommitRequestMember,
-    BundleCommitService,
-    bundle_approval_digest,
-)
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.energy import energy_context_for
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
@@ -1241,3 +1242,198 @@ async def test_schedule_plan_requires_existing_validation() -> None:
     )
 
     assert "error" in result
+
+
+async def build_context_with_scheduler_and_recurring(
+    tmp_path, *, require_confirmation: bool
+) -> DomoticsMcpContext:
+    """Same authority posture as build_confirmation_required_context, plus a
+    real durable Scheduler with recurring-schedule support -- needed to
+    exercise the schedule_recurring_plan approval gate (spec 145)."""
+
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    policies = (
+        [
+            Policy(
+                id="confirm-brightness",
+                target={"capability": "brightness"},
+                action=PolicyAction.CONFIRM,
+            )
+        ]
+        if require_confirmation
+        else []
+    )
+    plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    plan_repository = PlanRepository(database)
+    executor = PlanExecutor(adapter, plan_service, audit, plan_repository=plan_repository)
+    facade = DomoticsFacade(plan_service, executor)
+    scheduled_plan_repository = ScheduledPlanRepository(database)
+    recurring_repository = RecurringScheduleRepository(database)
+    scheduler = Scheduler(
+        executor,
+        scheduled_plan_repository,
+        audit,
+        recurring_repository=recurring_repository,
+    )
+    return DomoticsMcpContext(
+        discovery=discovery,
+        state_service=StateService(state_store),
+        facade=facade,
+        registry=registry,
+        policies=policies,
+        approval_store=ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=True),
+        plan_repository=plan_repository,
+        scheduler=scheduler,
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_recurring_plan_rejects_confirmation_required_plan_without_approval(
+    tmp_path,
+) -> None:
+    context = await build_context_with_scheduler_and_recurring(tmp_path, require_confirmation=True)
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    result = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+            },
+        )
+    )
+
+    assert result["error"]["code"] == "approval_required"
+    active = structured(await server.call_tool("list_recurring_schedules", {}))
+    assert active["schedules"] == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_recurring_plan_rejects_a_caller_fabricated_approval_id(
+    tmp_path,
+) -> None:
+    context = await build_context_with_scheduler_and_recurring(tmp_path, require_confirmation=True)
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    result = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+                "approval_id": "caller-fabricated-approval",
+            },
+        )
+    )
+
+    assert "error" in result
+    active = structured(await server.call_tool("list_recurring_schedules", {}))
+    assert active["schedules"] == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_recurring_plan_succeeds_after_request_approval(tmp_path) -> None:
+    context = await build_context_with_scheduler_and_recurring(tmp_path, require_confirmation=True)
+    server = create_domotics_server(context)
+    validated = await _validated_plan_requiring_confirmation(server, context)
+
+    approval = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approved_by": "operator",
+                "operator_token": OPERATOR_TOKEN,
+            },
+        )
+    )
+    assert "approval_id" in approval
+
+    scheduled = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+                "approval_id": approval["approval_id"],
+            },
+        )
+    )
+
+    assert "schedule_id" in scheduled
+    active = structured(await server.call_tool("list_recurring_schedules", {}))
+    assert len(active["schedules"]) == 1
+
+    # The approval grant is single-use: it was consumed by creating the
+    # recurring schedule and cannot also authorize a one-shot execution.
+    reuse = structured(
+        await server.call_tool(
+            "execute_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "approval_id": approval["approval_id"],
+            },
+        )
+    )
+    assert "error" in reuse
+
+
+@pytest.mark.asyncio
+async def test_schedule_recurring_plan_does_not_require_approval_for_safe_plan(
+    tmp_path,
+) -> None:
+    context = await build_context_with_scheduler_and_recurring(
+        tmp_path, require_confirmation=False
+    )
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    validated = structured(
+        await server.call_tool(
+            "validate_plan",
+            {
+                "plan": {
+                    "id": "plan-safe-recurring",
+                    "commands": [
+                        {
+                            "id": "command-safe-recurring",
+                            "device_id": device_id,
+                            "command": "turn_on",
+                            "idempotency_key": "safe-recurring-intent",
+                        }
+                    ],
+                },
+                "mode": "preview",
+            },
+        )
+    )
+    assert validated["validation"]["status"] == "valid"
+
+    scheduled = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+            },
+        )
+    )
+
+    assert "schedule_id" in scheduled

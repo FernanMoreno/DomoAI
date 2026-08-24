@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from domoai.application.executor import PlanExecutor
+from domoai.application.recurrence import next_occurrence
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     BundleMemberCommitStatus,
@@ -23,8 +26,13 @@ from domoai.persistence.repositories import (
 )
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.recurrence import next_occurrence
+
+
+@dataclass(frozen=True)
+class _PredecessorGateResult:
+    allowed: bool
+    predecessor_plan_id: str | None = None
+    state_version_overrides: dict[str, int] = field(default_factory=dict)
 
 
 class Scheduler:
@@ -244,35 +252,55 @@ class Scheduler:
                 "Plan repository evidence differs from the scheduled intent",
             )
 
-    async def _chain_state_version_overrides(self, plan: Plan) -> dict[str, int]:
-        if self.bundle_repository is None or plan.validation is None:
-            return {}
+    async def _predecessor_gate(self, plan: Plan) -> _PredecessorGateResult:
+        """Decide whether ``plan`` may be dispatched to the adapter at all.
+
+        A scheduled member with a ``predecessor_plan_id`` represents a
+        physical trajectory the optimizer computed assuming its predecessor
+        actually happened (e.g. a battery discharge plan that assumes an
+        earlier charge slot executed). If the predecessor did not reach
+        confirmed_success, dispatching the dependent command would act on a
+        state the optimizer never actually validated. ``allowed=False`` MUST
+        result in zero adapter calls for this plan.
+        """
+        if self.bundle_repository is None:
+            return _PredecessorGateResult(allowed=True)
         bundle = await self.bundle_repository.get_for_plan(plan.id)
         if bundle is None:
-            return {}
+            return _PredecessorGateResult(allowed=True)
         member = next((item for item in bundle.members if item.plan_id == plan.id), None)
         if member is None or member.predecessor_plan_id is None:
-            return {}
+            return _PredecessorGateResult(allowed=True)
+        predecessor_plan_id = member.predecessor_plan_id
         predecessor = next(
-            (item for item in bundle.members if item.plan_id == member.predecessor_plan_id),
+            (item for item in bundle.members if item.plan_id == predecessor_plan_id),
             None,
         )
-        if predecessor is None or predecessor.status.value != "executed":
-            return {}
+        if predecessor is None or predecessor.status is not BundleMemberCommitStatus.EXECUTED:
+            return _PredecessorGateResult(
+                allowed=False, predecessor_plan_id=predecessor_plan_id
+            )
         evidence = predecessor.details.get("dependency_evidence")
-        if not isinstance(evidence, dict) or evidence.get("status") != "confirmed_success":
-            return {}
+        if not isinstance(evidence, dict) or (
+            evidence.get("status") != ExecutionStatus.CONFIRMED_SUCCESS.value
+        ):
+            return _PredecessorGateResult(
+                allowed=False, predecessor_plan_id=predecessor_plan_id
+            )
+        overrides: dict[str, int] = {}
         versions = evidence.get("state_versions")
-        if not isinstance(versions, dict):
-            return {}
-        dependencies = plan.validation.dependencies
-        if dependencies is None:
-            return {}
-        return {
-            key: value
-            for key, value in versions.items()
-            if key in dependencies.state_versions and isinstance(value, int)
-        }
+        dependencies = plan.validation.dependencies if plan.validation is not None else None
+        if isinstance(versions, dict) and dependencies is not None:
+            overrides = {
+                key: value
+                for key, value in versions.items()
+                if key in dependencies.state_versions and isinstance(value, int)
+            }
+        return _PredecessorGateResult(
+            allowed=True,
+            predecessor_plan_id=predecessor_plan_id,
+            state_version_overrides=overrides,
+        )
 
     async def _record_bundle_outcome(
         self, plan: Plan, execution: ExecutionSummary
@@ -385,10 +413,30 @@ class Scheduler:
                 continue
             try:
                 await self._assert_schedule_evidence(plan)
-                state_version_overrides = await self._chain_state_version_overrides(plan)
-                if state_version_overrides:
+                gate = await self._predecessor_gate(plan)
+                if not gate.allowed:
+                    await self.repository.reconcile_terminal(plan.id, "failed")
+                    if self.bundle_repository is not None:
+                        await self.bundle_repository.record_member_outcome(
+                            plan.id,
+                            status=BundleMemberCommitStatus.DEPENDENCY_FAILED,
+                            execution_status=None,
+                            details={
+                                "reason": "predecessor_not_confirmed_success",
+                                "predecessor_plan_id": gate.predecessor_plan_id,
+                            },
+                        )
+                    self.audit.append(
+                        event_type="schedule_dependency_failed",
+                        actor="runtime",
+                        subject_id=plan.id,
+                        payload={"predecessor_plan_id": gate.predecessor_plan_id},
+                    )
+                    results.append({"plan_id": plan.id, "outcome": "dependency_failed"})
+                    continue
+                if gate.state_version_overrides:
                     execution = await self.executor.execute(
-                        plan, state_version_overrides=state_version_overrides
+                        plan, state_version_overrides=gate.state_version_overrides
                     )
                 else:
                     execution = await self.executor.execute(plan)
@@ -454,12 +502,46 @@ class Scheduler:
         return results
 
     async def schedule_recurring(
-        self, schedule_id: str, commands: list[Command], rule: RecurrenceRule
+        self,
+        schedule_id: str,
+        commands: list[Command],
+        rule: RecurrenceRule,
+        *,
+        plan: Plan | None = None,
+        approval: Any | None = None,
     ) -> datetime:
         if self.recurring_repository is None:
             raise ValueError("Recurring scheduling is unavailable in this deployment")
         first_occurrence = next_occurrence(rule, self.clock.now())
+        if rule.expires_at is not None and first_occurrence > rule.expires_at:
+            raise ValueError("Recurring schedule expires_at is before its first occurrence")
         await self.recurring_repository.create(schedule_id, commands, rule, first_occurrence)
+        # Creating a standing automation is a distinct authority act from
+        # executing a command once (see spec 145): the digest, policy
+        # decisions, and (when required) the approval evidence that
+        # justified it are recorded durably here, not just at each
+        # occurrence's own JIT re-validation.
+        self.audit.append(
+            event_type="recurring_schedule_created",
+            actor="runtime",
+            subject_id=schedule_id,
+            payload={
+                "requires_confirmation": (
+                    plan.status is PlanStatus.REQUIRES_CONFIRMATION if plan is not None else None
+                ),
+                "validation_digest": (
+                    plan.validation.digest if plan is not None and plan.validation else None
+                ),
+                "policy_decisions": (
+                    [decision.model_dump(mode="json") for decision in plan.policy_decisions]
+                    if plan is not None
+                    else []
+                ),
+                "approval_id": getattr(approval, "approval_id", None),
+                "approved_by": getattr(approval, "approved_by", None),
+                "expires_at": rule.expires_at.isoformat() if rule.expires_at else None,
+            },
+        )
         return first_occurrence
 
     async def cancel_recurring(self, schedule_id: str) -> bool:
@@ -479,6 +561,16 @@ class Scheduler:
         results: list[dict[str, Any]] = []
         active_schedules = await self.recurring_repository.list_active()
         for schedule_id, commands, rule, execute_at in active_schedules:
+            if rule.expires_at is not None and execute_at > rule.expires_at:
+                await self.recurring_repository.cancel(schedule_id)
+                self.audit.append(
+                    event_type="recurring_schedule_expired",
+                    actor="runtime",
+                    subject_id=schedule_id,
+                    payload={"expires_at": rule.expires_at.isoformat()},
+                )
+                results.append({"schedule_id": schedule_id, "outcome": "expired"})
+                continue
             if execute_at > sweep_time:
                 continue
             plan = Plan(

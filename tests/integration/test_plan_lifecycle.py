@@ -5,7 +5,11 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
+from domoai.application.recovery import PlanRecoveryService
+from domoai.application.scheduler import Scheduler
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     AdapterSnapshot,
@@ -34,13 +38,9 @@ from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
-from domoai.runtime.recovery import PlanRecoveryService
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.risk_classifier import RiskClassifier, RiskOverride
 from domoai.runtime.safety_kernel import SafetyKernel
-from domoai.runtime.scheduler import Scheduler
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.failure_injection import FailureInjectingAdapter
 from tests.fixtures.multi_adapter import RecordingAdapter, entity, power_capability

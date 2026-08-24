@@ -1,9 +1,8 @@
 # AI-PROJECT-MANAGER-COMPOSITION-V2
 #
-# Derived from actual imports in src/domoai (see `uv run lint-imports` output
-# and the Composition Review Report). Do not hand-wave these — they encode
-# the real dependency direction found by grepping every `from domoai.` /
-# `import domoai.` line in each subpackage.
+# Derived from the actual import graph in src/domoai. These contracts are
+# authoritative: a new reverse dependency must fail validation, not become a
+# silent exception.
 
 [importlinter]
 root_package = domoai
@@ -24,32 +23,26 @@ type = independence
 modules =
     domoai.domain
 
-# Intended layering, high (entrypoint/composition) to low (core), each layer
-# may import any layer below it but never one above:
-#   mcp / lab    - process entrypoints (MCP servers, lab CLI)
-#   application  - composition root / use-case orchestration
+# Layering, high (entrypoint/composition) to low (core). Each layer may import
+# any layer below it but never one above:
+#   mcp / lab / hil - process entrypoints (MCP servers, lab CLI, HIL runner)
+#   application  - use-case orchestration and composition root
 #   skills       - agent-facing workflow layer (imports optimizer)
 #   adapters     - protocol adapters (home_assistant, knx, matter, modbus,
 #                  zigbee2mqtt) + adapter SDK/fixtures
 #   optimizer    - CP-SAT / energy optimization
 #   persistence  - sqlite repositories
 #   config       - policy/settings loaders
-#   runtime      - clock, execution_context, ports, events, state_store,
-#                  registry, metrics, approval_store, risk_classifier
+#   runtime      - low-level clock, execution_context, ports, events,
+#                  state_store, registry, approval_store and risk classifier
 #   domain       - core models
-#
-# KNOWN VIOLATION (see Composition Review Report): domoai.runtime also
-# contains orchestration modules (executor, event_consumer, twin, replay,
-# scheduler, bundle_commit, policy_engine) that import application, adapters,
-# persistence and config, i.e. modules *above* runtime in this layering. This
-# contract is intentionally left strict so the violation stays visible rather
-# than being defined away; see the migration note in the review report.
 [importlinter:contract:layers]
 name = Composition-root layers must depend only downward
 type = layers
 layers =
     domoai.mcp
     domoai.lab
+    domoai.hil
     domoai.application
     domoai.skills
     domoai.adapters

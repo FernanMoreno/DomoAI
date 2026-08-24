@@ -130,6 +130,11 @@ class BundleMemberCommitStatus(StrEnum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     MISSED = "missed"
+    # Never dispatched: a required predecessor did not reach
+    # confirmed_success. Distinct from FAILED (adapter was called and the
+    # outcome was not success) so operators/replan logic can tell "we tried
+    # and it failed" from "we correctly refused to try".
+    DEPENDENCY_FAILED = "dependency_failed"
 
 
 class SourceRef(StrictModel):
@@ -347,7 +352,7 @@ class Command(StrictModel):
     command: str = Field(min_length=1)
     value: ScalarValue | None = None
     unit: str | None = None
-    preconditions: list[Precondition] = Field(default_factory=list)
+    preconditions: list[Precondition] = Field(default_factory=list, max_length=16)
     risk_class: RiskClass = RiskClass.SAFE
     idempotency_key: str = Field(min_length=1)
     intent: str | None = None
@@ -603,6 +608,10 @@ class RecurrenceRule(StrictModel):
     time_of_day: time
     timezone: str = Field(min_length=1)
     days_of_week: list[int] | None = None
+    # Optional bound on how long this automation stays active. None means
+    # unbounded (unchanged default behavior); callers that want a
+    # self-expiring automation (e.g. a seasonal schedule) set it explicitly.
+    expires_at: datetime | None = None
 
     @model_validator(mode="after")
     def validate_days_of_week(self) -> RecurrenceRule:
@@ -611,6 +620,8 @@ class RecurrenceRule(StrictModel):
                 raise ValueError("days_of_week, if provided, must not be empty")
             if any(day < 0 or day > 6 for day in self.days_of_week):
                 raise ValueError("days_of_week entries must be in 0..6 (0=Monday)")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
         return self
 
 

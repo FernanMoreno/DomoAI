@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
+from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import AdapterSnapshot, Command, Plan
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.events import AuditLog
-from domoai.runtime.executor import PlanExecutor
-from domoai.runtime.policy_engine import PolicyEngine
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 from tests.fixtures.multi_adapter import (

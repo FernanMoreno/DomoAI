@@ -24,19 +24,28 @@ from domoai.skills.validator import (
 
 
 def bundle_approval_digest(scenario_id: str, bundle: Sequence[Mapping[str, Any]]) -> str:
-    """Return the canonical identity of one ordered, validated plan bundle."""
+    """Return the canonical identity of one ordered, validated plan bundle.
 
+    Must stay byte-for-byte compatible with the runtime-side
+    ``domoai.application.bundle_commit.bundle_approval_digest``, which is the
+    authoritative check the MCP boundary re-derives the digest against.
+    """
+
+    canonical_members: list[dict[str, Any]] = []
+    for member in bundle:
+        member_payload: dict[str, Any] = {
+            "plan_id": member["plan_id"],
+            "validation_digest": member["validation_digest"],
+            "execute_at": member.get("execute_at"),
+        }
+        predecessor_plan_id = member.get("predecessor_plan_id")
+        if predecessor_plan_id is not None:
+            member_payload["predecessor_plan_id"] = predecessor_plan_id
+        canonical_members.append(member_payload)
     payload = {
         "schema": "bundle-approval-v1",
         "scenario_id": scenario_id,
-        "members": [
-            {
-                "plan_id": member["plan_id"],
-                "validation_digest": member["validation_digest"],
-                "execute_at": member.get("execute_at"),
-            }
-            for member in bundle
-        ],
+        "members": canonical_members,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -319,6 +328,15 @@ class EnergySkillWorkflow:
 
             bundle: list[dict[str, Any]] = []
             first_confirming_plan_dict: dict[str, Any] | None = None
+            # Physical-continuity chain: the optimizer emits one Plan per
+            # distinct execute_at, but a battery/EV trajectory (e.g. "charge
+            # at 10:00" then "discharge at 11:00") is only valid if the
+            # earlier step actually happened. Track the most recent bundle
+            # member touching each device so later members that share a
+            # device inherit a hard predecessor gate (see
+            # Scheduler._predecessor_gate) instead of dispatching blind to a
+            # trajectory the optimizer never re-validated.
+            last_member_index_for_device: dict[str, int] = {}
             for member_plan in self._required_plans(proposal):
                 validation_response = await self._call(
                     "validate_plan",
@@ -348,6 +366,15 @@ class EnergySkillWorkflow:
                 )
                 if member_requires_confirmation and first_confirming_plan_dict is None:
                     first_confirming_plan_dict = validation_response["plan"]
+                devices_touched = {command.device_id for command in member_plan.commands}
+                predecessor_indexes = {
+                    last_member_index_for_device[device_id]
+                    for device_id in devices_touched
+                    if device_id in last_member_index_for_device
+                }
+                predecessor_plan_id = (
+                    bundle[max(predecessor_indexes)]["plan_id"] if predecessor_indexes else None
+                )
                 bundle.append(
                     {
                         "plan_id": member_plan_id,
@@ -356,8 +383,11 @@ class EnergySkillWorkflow:
                         "execute_at": member_plan.execute_at.isoformat()
                         if member_plan.execute_at is not None
                         else None,
+                        "predecessor_plan_id": predecessor_plan_id,
                     }
                 )
+                for device_id in devices_touched:
+                    last_member_index_for_device[device_id] = len(bundle) - 1
             completed.append("validate_plan")
             self._transition(history, WorkflowStage.VALIDATED)
 
@@ -806,6 +836,7 @@ class EnergySkillWorkflow:
                     "validation_digest": entry["validation_digest"],
                     "execute_at": entry["execute_at"],
                     "approval_id": approval_id,
+                    "predecessor_plan_id": entry.get("predecessor_plan_id"),
                 }
             )
         response = await self._call(

@@ -55,6 +55,36 @@ def test_evicted_events_still_reached_the_sink_exactly_once() -> None:
     assert [event.subject_id for event in sink.events] == [str(index) for index in range(10)]
 
 
+class _FailingSink:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def append_event(self, event: AuditEvent) -> None:
+        self.attempts += 1
+        raise RuntimeError("storage boundary overloaded")
+
+
+def test_sink_failure_never_propagates_to_the_caller() -> None:
+    # Closes P1.6 (2026-08-24 re-audit): a durable-sink failure (e.g. the
+    # SQLite storage boundary rejecting admission under load) must degrade
+    # audit to memory-only retention, not raise into whatever plan/execution
+    # lifecycle code called audit.append().
+    sink = _FailingSink()
+    audit = AuditLog(sink=sink, max_events=5)
+
+    event = audit.append(
+        event_type="plan_execution_started",
+        actor="runtime",
+        subject_id="plan-1",
+        payload={},
+    )
+
+    assert event in audit.events
+    assert sink.attempts == 1
+    assert audit.sink_failure_count == 1
+    assert "storage boundary overloaded" in (audit.last_sink_error or "")
+
+
 def test_negative_indexing_and_slicing_work_within_the_retained_window() -> None:
     audit = AuditLog(max_events=1000)
 

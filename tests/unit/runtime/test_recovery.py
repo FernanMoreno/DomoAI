@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from domoai.application.recovery import PlanRecoveryService
 from domoai.domain.models import Command, Plan, PlanStatus
 from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import AuditLog
-from domoai.runtime.recovery import PlanRecoveryService
 
 
 def _plan(plan_id: str, status: PlanStatus) -> Plan:

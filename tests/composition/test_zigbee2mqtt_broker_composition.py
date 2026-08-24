@@ -89,10 +89,10 @@ async def test_discovery_over_real_mosquitto_matches_fixture_registry(
         registry = DeviceRegistry()
         discovery = DiscoveryService(adapter, registry, StateStore(), AuditLog())
         snapshot = await discovery.refresh()
+        health = await adapter.health()
     finally:
         await adapter.disconnect()
 
     assert len(snapshot.devices) == 3
     assert all(device.protocol == "zigbee2mqtt" for device in snapshot.devices)
-    health = await adapter.health()
     assert health.connected is True

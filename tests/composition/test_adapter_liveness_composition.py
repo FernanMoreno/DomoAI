@@ -44,7 +44,6 @@ async def test_dead_child_reconnects_without_hiding_partial_health() -> None:
         registry=registry,
         reconnect_initial_delay=0.05,
         reconnect_max_delay=0.05,
-        max_reconnect_attempts=2,
     )
     await composite.connect()
     await composite.discover()

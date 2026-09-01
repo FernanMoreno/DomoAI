@@ -42,7 +42,7 @@ def main() -> None:
     # Keep the unified MCP page in the same contract family; this assertion is
     # intentionally small because its generic execute_plan discussion remains
     # valid for non-energy MCP callers.
-    if "one public local MCP process" not in unified:
+    if "All clients connect to the same process" not in unified:
         raise SystemExit("unified MCP front-door contract is missing")
     print("runtime contract documentation is coherent")
 

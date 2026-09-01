@@ -189,3 +189,26 @@ def test_same_source_capability_metadata_refresh_replaces_previous_value() -> No
     assert len(routes) == 1
     assert routes[0].source_ref.external_type == "light-v2"
     assert registry.diagnostics == []
+
+
+def test_same_source_rediscovery_removes_capability_no_longer_advertised() -> None:
+    registry = DeviceRegistry()
+    first = entity(
+        entity_id="sensor.battery",
+        source_device_id="battery-device",
+        canonical_id="battery.home",
+        name="Battery",
+        capabilities=[
+            {**power_capability(), "name": "battery.power"},
+            {**power_capability(), "name": "value"},
+        ],
+    )
+    second = {**first, "capabilities": [{**power_capability(), "name": "battery.power"}]}
+
+    registry.apply_snapshot(AdapterSnapshot(source_entities=[first]), "fixture")
+    registry.apply_snapshot(AdapterSnapshot(source_entities=[second]), "fixture")
+
+    device = registry.get("battery.home")
+    assert device is not None
+    assert [capability.name for capability in device.capabilities] == ["battery.power"]
+    assert registry.routes_for("battery.home", "value") == ()

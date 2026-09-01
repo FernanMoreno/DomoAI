@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from aiomqtt import MqttError
+
 from domoai.runtime.execution_context import ExecutionContext
 
 
@@ -205,6 +207,8 @@ class AiomqttTransport:
         except TimeoutError:
             return None
         except (ConnectionError, OSError) as error:
+            raise ConnectionError("MQTT receive failed") from error
+        except MqttError as error:
             raise ConnectionError("MQTT receive failed") from error
         return MqttMessage(
             topic=str(message.topic),

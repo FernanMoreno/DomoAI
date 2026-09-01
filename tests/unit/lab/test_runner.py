@@ -7,11 +7,30 @@ import pytest
 
 from domoai.lab.runner import (
     DEFAULT_UP_SERVICES,
+    SERVICE_NAMES,
     LabConfig,
     LabRunner,
     LabRunnerError,
     parse_env_file,
 )
+
+
+class FakeBridgeSupervisor:
+    def __init__(self, events: list[str], *, start_result: int = 0) -> None:
+        self.events = events
+        self.start_result = start_result
+
+    def start(self) -> int:
+        self.events.append("bridge.start")
+        return self.start_result
+
+    def status(self) -> int:
+        self.events.append("bridge.status")
+        return 0
+
+    def stop(self) -> int:
+        self.events.append("bridge.stop")
+        return 0
 
 
 def test_parse_env_file_accepts_export_and_does_not_expand_values(tmp_path: Path) -> None:
@@ -125,6 +144,10 @@ def test_default_up_services_are_only_core_local_services() -> None:
     assert DEFAULT_UP_SERVICES == ("mqtt", "zigbee2mqtt", "modbus")
 
 
+def test_knx_gateway_is_available_as_an_explicit_lab_service() -> None:
+    assert "knx-gateway" in SERVICE_NAMES
+
+
 def test_windows_docker_gets_a_repo_relative_compose_path(tmp_path: Path) -> None:
     compose_file = tmp_path / "dev" / "lab" / "compose.yaml"
     compose_file.parent.mkdir(parents=True)
@@ -141,3 +164,58 @@ def test_windows_docker_gets_a_repo_relative_compose_path(tmp_path: Path) -> Non
 
     assert runner.status() == 0
     assert calls[0][5] == "dev/lab/compose.yaml"
+
+
+def test_up_starts_compose_before_the_external_knx_bridge(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    events: list[str] = []
+
+    def execute(argv: Sequence[str], _env: Mapping[str, str]) -> int:
+        events.append("compose:" + " ".join(argv[-4:]))
+        return 0
+
+    runner = LabRunner(
+        LabConfig(repo_root=tmp_path, compose_file=compose_file),
+        execute=execute,
+        bridge_supervisor=FakeBridgeSupervisor(events),
+    )
+
+    assert runner.up(("mqtt", "battery", "knx-bridge")) == 0
+    assert events[0].startswith("compose:")
+    assert events[-1] == "bridge.start"
+
+
+def test_down_stops_external_knx_bridge_before_compose(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    events: list[str] = []
+
+    def execute(_argv: Sequence[str], _env: Mapping[str, str]) -> int:
+        events.append("compose.down")
+        return 0
+
+    runner = LabRunner(
+        LabConfig(repo_root=tmp_path, compose_file=compose_file),
+        execute=execute,
+        bridge_supervisor=FakeBridgeSupervisor(events),
+    )
+
+    assert runner.down() == 0
+    assert events == ["bridge.stop", "compose.down"]
+
+
+def test_bridge_service_can_be_statused_without_launching_compose(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    events: list[str] = []
+    calls: list[Sequence[str]] = []
+    runner = LabRunner(
+        LabConfig(repo_root=tmp_path, compose_file=compose_file),
+        execute=lambda argv, _env: calls.append(argv) or 0,
+        bridge_supervisor=FakeBridgeSupervisor(events),
+    )
+
+    assert runner.status(("knx-bridge",)) == 0
+    assert events == ["bridge.status"]
+    assert calls == []

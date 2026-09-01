@@ -70,6 +70,18 @@ def test_time_of_day_inside_spring_forward_gap_shifts_forward_once() -> None:
     assert (local.hour, local.minute) == (3, 30)
 
 
+def test_spring_forward_gap_created_after_gap_still_runs_same_day() -> None:
+    zone = ZoneInfo("Europe/Madrid")
+    rule = RecurrenceRule(time_of_day=time(2, 30), timezone="Europe/Madrid")
+    after = datetime(2026, 3, 29, 3, 10, tzinfo=zone)
+
+    occurrence = next_occurrence(rule, after)
+
+    local = occurrence.astimezone(zone)
+    assert local.date().isoformat() == "2026-03-29"
+    assert (local.hour, local.minute) == (3, 30)
+
+
 def test_time_of_day_inside_spring_forward_gap_sequence_is_strictly_increasing() -> None:
     zone = ZoneInfo("Europe/Madrid")
     rule = RecurrenceRule(time_of_day=time(2, 30), timezone="Europe/Madrid")

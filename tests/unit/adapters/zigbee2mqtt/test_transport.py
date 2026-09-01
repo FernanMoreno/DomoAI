@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
+from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport, MqttMessage
 
 
 def _write_self_signed_cert_and_key(directory: Path, common_name: str) -> tuple[Path, Path]:
@@ -130,6 +130,17 @@ class _FakeMessages:
         return self
 
 
+class _DisconnectedMessages:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def __aiter__(self) -> "_DisconnectedMessages":
+        return self
+
+    async def __anext__(self) -> MqttMessage:
+        raise self.error
+
+
 @pytest.mark.asyncio
 async def test_plaintext_connect_passes_no_tls_context(monkeypatch: pytest.MonkeyPatch) -> None:
     import aiomqtt
@@ -152,3 +163,14 @@ async def test_mqtts_connect_passes_a_tls_context(monkeypatch: pytest.MonkeyPatc
     await transport.connect()
 
     assert isinstance(_FakeAiomqttClient.captured_kwargs["tls_context"], ssl.SSLContext)
+
+
+@pytest.mark.asyncio
+async def test_receive_converts_aiomqtt_disconnect_to_connection_error() -> None:
+    import aiomqtt
+
+    transport = AiomqttTransport("broker.test")
+    transport._messages = _DisconnectedMessages(aiomqtt.MqttError("broker disconnected"))
+
+    with pytest.raises(ConnectionError, match="MQTT receive failed"):
+        await transport.receive()

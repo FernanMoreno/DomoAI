@@ -1,0 +1,63 @@
+{
+  "properties": {
+    "provider_id": {
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "capacity_kwh": {
+      "title": "Capacity Kwh",
+      "type": "number"
+    },
+    "initial_soc_kwh": {
+      "title": "Initial Soc Kwh",
+      "type": "number"
+    },
+    "min_soc_kwh": {
+      "title": "Min Soc Kwh",
+      "type": "number"
+    },
+    "max_soc_kwh": {
+      "title": "Max Soc Kwh",
+      "type": "number"
+    },
+    "max_charge_kw": {
+      "title": "Max Charge Kw",
+      "type": "number"
+    },
+    "max_discharge_kw": {
+      "title": "Max Discharge Kw",
+      "type": "number"
+    },
+    "charge_efficiency": {
+      "title": "Charge Efficiency",
+      "type": "number"
+    },
+    "discharge_efficiency": {
+      "title": "Discharge Efficiency",
+      "type": "number"
+    },
+    "tick_seconds": {
+      "default": 1.0,
+      "title": "Tick Seconds",
+      "type": "number"
+    }
+  },
+  "required": [
+    "provider_id",
+    "device_id",
+    "capacity_kwh",
+    "initial_soc_kwh",
+    "min_soc_kwh",
+    "max_soc_kwh",
+    "max_charge_kw",
+    "max_discharge_kw",
+    "charge_efficiency",
+    "discharge_efficiency"
+  ],
+  "title": "BatterySimulationProfile",
+  "type": "object"
+}

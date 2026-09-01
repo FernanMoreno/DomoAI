@@ -1,0 +1,54 @@
+name: domoai
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - mqtt-data:/mosquitto/data
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: ${TZ:-Europe/Madrid}
+    volumes:
+      - homeassistant-config:/config
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["domoai-mcp-gateway"]
+    restart: unless-stopped
+    env_file:
+      - gateway.env
+    depends_on:
+      - mqtt
+      - homeassistant
+    ports:
+      - "8124:8124"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - domoai-data:/app/data
+      - ${DOMOAI_MCP_CLIENT_TOKEN_FILE_HOST:-./clients.json}:/run/secrets/mcp-clients.json:ro
+      - ${DOMOAI_KNX_CONFIG_PATH_HOST:-./knx-config.json}:/app/config/knx-config.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8124/healthz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  domoai-data:
+  homeassistant-config:
+  mqtt-data:

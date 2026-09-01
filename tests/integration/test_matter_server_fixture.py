@@ -117,10 +117,20 @@ async def test_plan_executor_reaches_matter_adapter_with_readback() -> None:
 
     assert validated.status is PlanStatus.READY
     assert summary.outcomes[0].status.value == "confirmed_success"
-    assert transport.requests[-1].args == {
+    command_requests = [
+        request for request in transport.requests if request.command == "device_command"
+    ]
+    read_requests = [
+        request for request in transport.requests if request.command == "read_attribute"
+    ]
+    assert command_requests[-1].args == {
         "node_id": 1001,
         "endpoint_id": 1,
         "cluster_id": 6,
         "command_name": "On",
         "payload": {},
     }
+    assert any(
+        request.args == {"node_id": 1001, "attribute_path": "1/6/0"}
+        for request in read_requests
+    )

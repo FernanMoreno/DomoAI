@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "BatteryControlPolicy": {
+      "additionalProperties": false,
+      "description": "Deployment declaration for physical control ownership.",
+      "properties": {
+        "owner": {
+          "default": "domoai",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Owner",
+          "type": "string"
+        },
+        "native_scheduler_status": {
+          "default": "unknown",
+          "enum": [
+            "disabled",
+            "inactive",
+            "active",
+            "unknown"
+          ],
+          "title": "Native Scheduler Status",
+          "type": "string"
+        },
+        "allow_native_takeover": {
+          "default": false,
+          "title": "Allow Native Takeover",
+          "type": "boolean"
+        },
+        "lease_seconds": {
+          "default": 300.0,
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Lease Seconds",
+          "type": "number"
+        }
+      },
+      "title": "BatteryControlPolicy",
+      "type": "object"
+    },
+    "EVActuator": {
+      "additionalProperties": false,
+      "description": "Explicit server-owned binding for a latched EV charge surface.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "charge_command": {
+          "minLength": 1,
+          "title": "Charge Command",
+          "type": "string"
+        },
+        "stop_command": {
+          "minLength": 1,
+          "title": "Stop Command",
+          "type": "string"
+        },
+        "connected_capability": {
+          "default": "ev.connected",
+          "minLength": 1,
+          "title": "Connected Capability",
+          "type": "string"
+        },
+        "departure_capability": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "ev.departure_at",
+          "title": "Departure Capability"
+        },
+        "max_charge_kw": {
+          "exclusiveMinimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "power_unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Power Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "charge_command",
+        "stop_command",
+        "max_charge_kw"
+      ],
+      "title": "EVActuator",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Explicit server-owned binding required to supply EV charging state.\n\nDeliberately lighter than `DispatchableBatteryBinding`: `EVState.\ncapacity_kwh` is an ordinary observed value describing the connected\nvehicle, not a regulatory nominal-capacity claim, so no capacity\nattestation/trust-policy ceremony applies here (spec 162, research.md\nDecision 1).",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "device_id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Device Id",
+      "type": "string"
+    },
+    "actuator": {
+      "$ref": "#/$defs/EVActuator"
+    },
+    "control_policy": {
+      "$ref": "#/$defs/BatteryControlPolicy"
+    },
+    "soc_capability": {
+      "default": "ev.soc",
+      "minLength": 1,
+      "title": "Soc Capability",
+      "type": "string"
+    },
+    "capacity_capability": {
+      "default": "ev.capacity",
+      "minLength": 1,
+      "title": "Capacity Capability",
+      "type": "string"
+    }
+  },
+  "required": [
+    "provider_id",
+    "device_id",
+    "actuator"
+  ],
+  "title": "EVChargingBinding",
+  "type": "object"
+}

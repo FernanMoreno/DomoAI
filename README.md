@@ -48,6 +48,37 @@ Example host configuration:
 The same command can be registered in Claude Code, Codex or another compatible
 MCP client.
 
+## Shared network gateway
+
+For multiple agents to operate the same home, run one long-lived gateway
+process and point every MCP-compatible client at its single Streamable HTTP
+URL. This is the recommended boundary for Codex, Claude, Gemini, OpenCode and
+other clients; it gives them one registry, scheduler, approval store and
+physical authority instead of one runtime per client:
+
+```bash
+uv run domoai-mcp-gateway
+```
+
+The bind and URL are configured with `DOMOAI_MCP_HOST`,
+`DOMOAI_MCP_PORT`, `DOMOAI_MCP_PATH` and `DOMOAI_MCP_PUBLIC_URL`. A
+non-loopback bind requires `DOMOAI_MCP_CLIENT_TOKEN_FILE` and an HTTPS public
+URL. See [`deploy/README.md`](deploy/README.md) for native, WSL, Windows and
+Docker deployment, including the Home Assistant/MQTT stack and the external
+Windows KNX Virtual topology.
+
+The shared gateway fails closed when no concrete provider is configured; it
+does not silently fall back to the deterministic simulator. The explicit local
+stdio fixture remains available for development and tests. Authenticated MCP
+clients can inspect `domotics://runtime` for active providers, writable routes
+and sanitized authority status; this resource is descriptive and never grants
+physical execution permission.
+
+Each client uses the same URL with its own bearer token. Tokens authenticate an
+agent but do not grant human consent; sensitive mutations still require the
+existing operator approval and safety gates. Kubernetes is not required for a
+single home and active-active gateway replicas are intentionally unsupported.
+
 ## Unified MCP surface
 
 The single `domoai-mcp` server exposes discovery, state, energy context,
@@ -382,8 +413,8 @@ uv run mypy src
 uv lock --check
 ```
 
-The latest full-suite result without live credentials is `972 passed, 10
-skipped`, with no warnings. The skips
+The latest full-suite result is recorded in the SHA-tagged CI evidence
+artifact (`ci-evidence-${GITHUB_SHA}`), rather than hardcoded here. The skips
 are opt-in Matter Server, KNX/IP and other live cases without their external
 node, gateway or service configuration; deterministic fixture coverage remains
 enabled. No live gateway or hardware result is claimed by this run; the Home

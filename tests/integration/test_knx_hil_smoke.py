@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -27,6 +28,9 @@ async def test_knx_hil_command_round_trip(tmp_path: Path) -> None:
             knx_config_path=Path(mapping_path),
             knx_timeout_seconds=timeout,
         )
+    )
+    event_task = asyncio.create_task(
+        runtime.event_consumer.run(reconnect_delay=0.2, max_reconnect_delay=1.0)
     )
     try:
         device = next(
@@ -86,4 +90,6 @@ async def test_knx_hil_command_round_trip(tmp_path: Path) -> None:
             restored = runtime.facade.validate_plan(turn_off_plan)
             await runtime.facade.execute_plan(restored)
     finally:
+        event_task.cancel()
+        await asyncio.gather(event_task, return_exceptions=True)
         await runtime.close()

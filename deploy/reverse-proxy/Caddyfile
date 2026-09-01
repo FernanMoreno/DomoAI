@@ -1,0 +1,10 @@
+# Replace the hostname and certificate policy for the deployment.
+mcp.example.test {
+    tls internal
+
+    @mcp path /mcp /mcp/*
+    reverse_proxy @mcp gateway:8124
+
+    @health path /healthz /readyz
+    reverse_proxy @health gateway:8124
+}

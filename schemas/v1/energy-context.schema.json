@@ -540,6 +540,113 @@
       "title": "EVState",
       "type": "object"
     },
+    "ExteriorTemperaturePoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "temperature_c": {
+          "title": "Temperature C",
+          "type": "number"
+        },
+        "unit": {
+          "const": "degC",
+          "default": "degC",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "temperature_c"
+      ],
+      "title": "ExteriorTemperaturePoint",
+      "type": "object"
+    },
+    "HVACActuator": {
+      "additionalProperties": false,
+      "description": "Explicit canonical binding for physical HVAC dispatch.\n\nMirrors ``BatteryActuator``'s shape (power-feedback postcondition\nverification), not ``EVActuator``'s -- HVAC commands are verified\nagainst reported power the same way battery dispatch already is.",
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "heat_command": {
+          "minLength": 1,
+          "title": "Heat Command",
+          "type": "string"
+        },
+        "cool_command": {
+          "minLength": 1,
+          "title": "Cool Command",
+          "type": "string"
+        },
+        "stop_command": {
+          "minLength": 1,
+          "title": "Stop Command",
+          "type": "string"
+        },
+        "power_feedback_capability": {
+          "minLength": 1,
+          "title": "Power Feedback Capability",
+          "type": "string"
+        },
+        "power_feedback_convention": {
+          "default": "heat_positive",
+          "enum": [
+            "heat_positive",
+            "cool_positive"
+          ],
+          "title": "Power Feedback Convention",
+          "type": "string"
+        },
+        "power_feedback_tolerance_kw": {
+          "exclusiveMinimum": 0,
+          "title": "Power Feedback Tolerance Kw",
+          "type": "number"
+        },
+        "power_feedback_settle_timeout_seconds": {
+          "default": 0,
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Power Feedback Settle Timeout Seconds",
+          "type": "number"
+        },
+        "power_feedback_poll_interval_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Power Feedback Poll Interval Seconds",
+          "type": "number"
+        },
+        "power_unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Power Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "heat_command",
+        "cool_command",
+        "stop_command",
+        "power_feedback_capability",
+        "power_feedback_tolerance_kw"
+      ],
+      "title": "HVACActuator",
+      "type": "object"
+    },
     "Horizon": {
       "additionalProperties": false,
       "properties": {
@@ -686,6 +793,19 @@
           "title": "External Id",
           "type": "string"
         },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
         "external_type": {
           "anyOf": [
             {
@@ -742,6 +862,78 @@
         "currency"
       ],
       "title": "TariffPoint",
+      "type": "object"
+    },
+    "ThermalProfile": {
+      "additionalProperties": false,
+      "description": "Whole-house thermal model consumed by the CP-SAT optimizer.\n\nNo ``DispatchableBatteryBinding``-style attestation wrapper: thermal\ncapacitance is an ordinary scenario-supplied value, not a regulated\nclaim (unlike battery capacity).",
+      "properties": {
+        "capacitance_kwh_per_c": {
+          "exclusiveMinimum": 0,
+          "title": "Capacitance Kwh Per C",
+          "type": "number"
+        },
+        "ua_kw_per_c": {
+          "exclusiveMinimum": 0,
+          "title": "Ua Kw Per C",
+          "type": "number"
+        },
+        "initial_temperature_c": {
+          "title": "Initial Temperature C",
+          "type": "number"
+        },
+        "comfort_min_c": {
+          "title": "Comfort Min C",
+          "type": "number"
+        },
+        "comfort_max_c": {
+          "title": "Comfort Max C",
+          "type": "number"
+        },
+        "max_heat_kw": {
+          "minimum": 0,
+          "title": "Max Heat Kw",
+          "type": "number"
+        },
+        "max_cool_kw": {
+          "minimum": 0,
+          "title": "Max Cool Kw",
+          "type": "number"
+        },
+        "heating_cop": {
+          "exclusiveMinimum": 0,
+          "title": "Heating Cop",
+          "type": "number"
+        },
+        "cooling_cop": {
+          "exclusiveMinimum": 0,
+          "title": "Cooling Cop",
+          "type": "number"
+        },
+        "actuator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HVACActuator"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "capacitance_kwh_per_c",
+        "ua_kw_per_c",
+        "initial_temperature_c",
+        "comfort_min_c",
+        "comfort_max_c",
+        "max_heat_kw",
+        "max_cool_kw",
+        "heating_cop",
+        "cooling_cop"
+      ],
+      "title": "ThermalProfile",
       "type": "object"
     }
   },
@@ -818,6 +1010,32 @@
       },
       "title": "Ev States",
       "type": "array"
+    },
+    "thermal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ThermalProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "exterior_temperature_forecast": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ExteriorTemperaturePoint"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exterior Temperature Forecast"
     },
     "source_revision": {
       "minLength": 1,

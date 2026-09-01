@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
+from domoai.application.dynamic_safety import DynamicSafetyGuard
+from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.plan_service import PlanService
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
@@ -24,10 +26,10 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
-from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.clock import Clock
 from domoai.runtime.control_takeover import ControlTakeoverPort
 from domoai.runtime.events import AuditLog
-from domoai.runtime.execution_context import ExecutionContext
+from domoai.runtime.execution_context import ExecutionContext, current_execution_principal
 from domoai.runtime.freshness import FreshnessDecision, FreshnessEvaluator
 from domoai.runtime.ports import (
     AdapterPort,
@@ -61,6 +63,10 @@ class _ReadbackPersistenceError(Exception):
     """Internal marker for a readback that could not become durable."""
 
 
+class _ControlLeaseExpired(Exception):
+    """Internal marker for a lost latched-actuator lease."""
+
+
 class PlanExecutor:
     def __init__(
         self,
@@ -75,6 +81,8 @@ class PlanExecutor:
         safety_kernel: SafetyKernel | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         control_takeover: ControlTakeoverPort | None = None,
+        execution_admission: ExecutionAdmission | None = None,
+        dynamic_safety_guard: DynamicSafetyGuard | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
@@ -82,11 +90,15 @@ class PlanExecutor:
         self.plan_repository = plan_repository
         self.outcome_repository = outcome_repository
         self.state_snapshot_repository = state_snapshot_repository
-        self.clock = clock or SystemClock()
-        self.freshness_evaluator = FreshnessEvaluator(self.clock)
+        self.clock = clock or plan_service.state_store.clock
+        self.freshness_evaluator = FreshnessEvaluator(
+            self.clock, max_age=plan_service.state_store.stale_after
+        )
         self.safety_kernel = safety_kernel
         self._sleep = sleep or asyncio.sleep
         self.control_takeover = control_takeover
+        self.execution_admission = execution_admission
+        self.dynamic_safety_guard = dynamic_safety_guard
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -100,8 +112,14 @@ class PlanExecutor:
     _CLAIMABLE_STATUSES = frozenset({PlanStatus.READY, PlanStatus.APPROVED})
 
     async def execute(
-        self, plan: Plan, *, state_version_overrides: dict[str, int] | None = None
+        self,
+        plan: Plan,
+        *,
+        state_version_overrides: dict[str, int] | None = None,
+        aggregate_owner: bool = False,
     ) -> ExecutionSummary:
+        if self.execution_admission is not None:
+            await self.execution_admission.admit(plan, aggregate_owner=aggregate_owner)
         if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
                 ErrorCode.NOT_YET_DUE,
@@ -135,6 +153,7 @@ class PlanExecutor:
             payload={
                 "plan_id": plan.id,
                 "agent_request_id": plan.agent_request_id,
+                "client_principal_id": current_execution_principal(),
                 "execution_attempt_id": execution_attempt_id,
             },
         )
@@ -151,6 +170,7 @@ class PlanExecutor:
                     payload={
                         "plan_id": plan.id,
                         "status": outcome.status.value,
+                        "client_principal_id": current_execution_principal(),
                         "execution_attempt_id": execution_attempt_id,
                         "adapter_request_id": outcome.adapter_request_id,
                     },
@@ -234,6 +254,7 @@ class PlanExecutor:
                             payload={
                                 "plan_id": plan.id,
                                 "status": outcome.status.value,
+                                "client_principal_id": current_execution_principal(),
                                 "control_takeover_failed": True,
                             },
                         )
@@ -281,6 +302,7 @@ class PlanExecutor:
                     payload={
                         "plan_id": plan.id,
                         "status": outcome.status.value,
+                        "client_principal_id": current_execution_principal(),
                         "execution_attempt_id": execution_attempt_id,
                     },
                 )
@@ -333,6 +355,20 @@ class PlanExecutor:
                     completed_at=self.clock.now(),
                     error=safety_error,
                 )
+            elif (
+                self.dynamic_safety_guard is not None
+                and (dynamic_safety_error := await self.dynamic_safety_guard.check(command))
+                is not None
+            ):
+                outcome = ExecutionOutcome(
+                    plan_id=plan.id,
+                    command_id=command.id,
+                    execution_attempt_id=execution_attempt_id,
+                    status=ExecutionStatus.REJECTED,
+                    before_state=before_state,
+                    completed_at=self.clock.now(),
+                    error=dynamic_safety_error,
+                )
             else:
                 adapter_request_id = str(uuid4())
                 execution_context = ExecutionContext(
@@ -340,8 +376,16 @@ class PlanExecutor:
                     plan_id=plan.id,
                     execution_attempt_id=execution_attempt_id,
                     adapter_request_id=adapter_request_id,
+                    client_principal_id=current_execution_principal(),
                 )
                 try:
+                    assert_ownership = getattr(self.control_takeover, "assert_still_owned", None)
+                    if (
+                        takeover_first_command_id is not None
+                        and callable(assert_ownership)
+                        and not await assert_ownership(plan_id=plan.id)
+                    ):
+                        raise _ControlLeaseExpired
                     acknowledgement = await self.adapter.execute(command, execution_context)
                     after_state = None
                     status = ExecutionStatus.REJECTED
@@ -428,6 +472,35 @@ class PlanExecutor:
                         completed_at=self.clock.now(),
                         error=error,
                     )
+                except _ControlLeaseExpired:
+                    emergency_stop = getattr(self.control_takeover, "emergency_stop", None)
+                    stop_confirmed = False
+                    if callable(emergency_stop):
+                        stop_confirmed = await emergency_stop(
+                            plan_id=plan.id,
+                            execution_attempt_id=execution_attempt_id,
+                        )
+                        self.audit.append(
+                            event_type="control_supervisor_emergency_stop",
+                            actor="runtime",
+                            subject_id=plan.id,
+                            payload={"confirmed": stop_confirmed, "reason": "lease_expired"},
+                        )
+                    outcome = ExecutionOutcome(
+                        plan_id=plan.id,
+                        command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
+                        status=ExecutionStatus.REJECTED,
+                        before_state=before_state,
+                        completed_at=self.clock.now(),
+                        error=ErrorDetail(
+                            code=ErrorCode.CONTROL_TAKEOVER_FAILED,
+                            message="Physical control lease expired before dispatch",
+                            retryable=True,
+                            details={"emergency_stop_confirmed": stop_confirmed},
+                        ),
+                    )
                 except (ConnectionError, OSError, TimeoutError) as error:
                     outcome = ExecutionOutcome(
                         plan_id=plan.id,
@@ -453,6 +526,7 @@ class PlanExecutor:
                 payload={
                     "plan_id": plan.id,
                     "status": outcome.status.value,
+                    "client_principal_id": current_execution_principal(),
                     "execution_attempt_id": execution_attempt_id,
                     "adapter_request_id": outcome.adapter_request_id,
                 },
@@ -491,6 +565,28 @@ class PlanExecutor:
                         if self.outcome_repository is not None:
                             await self.outcome_repository.save(blocked)
                     break
+        if takeover_first_command_id is not None:
+            release_for_plan = getattr(self.control_takeover, "release_for_plan", None)
+            if callable(release_for_plan):
+                try:
+                    release_confirmed = await release_for_plan(
+                        plan_id=plan.id,
+                        execution_attempt_id=f"{execution_attempt_id}:release",
+                    )
+                except Exception as error:
+                    release_confirmed = False
+                    self.audit.append(
+                        event_type="control_lease_release_failed",
+                        actor="runtime",
+                        subject_id=plan.id,
+                        payload={"error": str(error)[:200]},
+                    )
+                self.audit.append(
+                    event_type="control_lease_released",
+                    actor="runtime",
+                    subject_id=plan.id,
+                    payload={"confirmed": release_confirmed},
+                )
         summary = ExecutionSummary(outcomes=outcomes)
         if self.plan_repository is not None:
             terminal_status = self._terminal_plan_status(outcomes)
@@ -504,6 +600,7 @@ class PlanExecutor:
             payload={
                 "plan_id": plan.id,
                 "status": self._terminal_plan_status(outcomes).value,
+                "client_principal_id": current_execution_principal(),
                 "outcome_count": len(outcomes),
                 "execution_attempt_id": execution_attempt_id,
             },
@@ -708,7 +805,7 @@ class PlanExecutor:
                 for route in self.plan_service.registry.routes_for(
                     command.device_id, feedback_capability
                 )
-                if route.available
+                if route.available and route.readable
             ]
             route = routes[0] if len(routes) == 1 else None
         else:
@@ -737,7 +834,14 @@ class PlanExecutor:
     async def _persist_snapshot(self, snapshot: StateSnapshot) -> None:
         try:
             await self.plan_service.state_store.save(snapshot)
-            if self.state_snapshot_repository is not None:
+            # RuntimeComposition binds StateStore to the single durable
+            # RuntimeStatePersistencePort. Keep the legacy sink only for
+            # standalone executor fixtures that intentionally do not bind a
+            # StateStore; production therefore never performs two writes.
+            if (
+                not self.plan_service.state_store.persistence_bound
+                and self.state_snapshot_repository is not None
+            ):
                 await self.state_snapshot_repository.save(snapshot)
         except Exception as error:
             raise _ReadbackPersistenceError(
@@ -754,7 +858,7 @@ class PlanExecutor:
                 for route in self.plan_service.registry.routes_for(
                     command.device_id, capability_name
                 )
-                if route.available
+                if route.available and route.readable
             ]
             if len(routes) != 1:
                 error = ErrorDetail(

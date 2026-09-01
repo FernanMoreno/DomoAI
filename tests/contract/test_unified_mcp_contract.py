@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -43,6 +44,7 @@ async def build_context() -> tuple[SimulatedHomeAdapter, UnifiedMcpContext]:
         facade=DomoticsFacade(plan_service, PlanExecutor(adapter, plan_service, audit)),
         registry=registry,
         policies=[],
+        active_provider_ids=(adapter.adapter_id,),
     )
     optimizer = OrtoolsMcpContext(
         registry=registry,
@@ -119,7 +121,15 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
         "domotics://energy",
         "domotics://policies",
         "domotics://metrics",
+        "domotics://runtime",
     ]
+
+    contents = list(await server.read_resource("domotics://runtime"))
+    runtime = json.loads(contents[0].content)
+    assert runtime["schema_version"] == "v1"
+    assert runtime["providers"]
+    assert runtime["writable_capabilities"]
+    assert runtime["authority"]["physical_execution"] == "plan_executor"
 
 
 @pytest.mark.asyncio

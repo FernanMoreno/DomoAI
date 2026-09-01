@@ -139,6 +139,19 @@
           "title": "External Id",
           "type": "string"
         },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
         "external_type": {
           "anyOf": [
             {
@@ -251,6 +264,20 @@
       },
       "minItems": 1,
       "title": "Source Refs",
+      "type": "array"
+    },
+    "identity_keys": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Identity Keys",
+      "type": "array"
+    },
+    "connections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Connections",
       "type": "array"
     },
     "last_seen_at": {

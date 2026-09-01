@@ -15,11 +15,75 @@ silenciosamente: produce un error de validación seguro.
 
 ## Superficie MCP v1
 
+### Gateway compartido para agentes
+
+El entrypoint de red `domoai-mcp-gateway` publica la misma superficie semántica
+por Streamable HTTP en `DOMOAI_MCP_PUBLIC_URL + DOMOAI_MCP_PATH`. Todos los
+clientes compatibles comparten el proceso, el estado, el scheduler y la
+autoridad física. `domoai-mcp` conserva stdio para desarrollo y compatibilidad.
+
+Los tokens de cliente son credenciales de transporte server-owned. El scope
+`mutate` es necesario para pedir approvals, ejecutar, programar o cancelar;
+la autenticación del agente no sustituye una aserción de consentimiento
+humano. `/healthz` solo indica liveness y `/readyz` exige lifecycle y adapter
+conectados. Los binds no locales requieren HTTPS y token file.
+
+El gateway compartido aplica bootstrap estricto: si no existe al menos un
+adapter/provider configurado, `domoai-mcp-gateway` falla con un error explícito
+y no selecciona `SimulatedHomeAdapter`. La ruta `domoai-mcp` puede usar el
+simulador únicamente como fixture local explícito. Antes de construir el
+runtime, el builder valida el token file; una credencial ausente o inválida no
+debe abrir SQLite, reclamar ownership ni conectar providers.
+
+Con `DOMOAI_BOOTSTRAP_PROFILE=lab`, el bootstrap puede seleccionar los assets
+canónicos `dispatchable-battery-lab.json` y `ev-charging-lab.json` cuando HA
+local está autenticado y reachable y no hay paths explícitos. Esto solo carga
+bindings server-owned: no infiere rutas, no crea evidencia HIL ni habilita
+production dispatch. El manifest registra esos paths no secretos en
+`operational_paths`, y `/readyz` continúa bloqueando la autoridad física hasta
+qualification válida.
+
+`domotics://runtime` es una resource autenticada de solo lectura con esta forma
+estable v1:
+
+```json
+{
+  "schema_version": "v1",
+  "runtime_revision": "...",
+  "providers": [{"provider_id": "...", "active": true}],
+  "writable_capabilities": [
+    {
+      "device_id": "...",
+      "capability": "...",
+      "commands": ["..."],
+      "available": true,
+      "providers": ["..."]
+    }
+  ],
+  "authority": {
+    "physical_execution": "plan_executor",
+    "risky_mutations": "policy_and_operator_approval",
+    "battery_dispatch": "unsupported"
+  }
+}
+```
+
+La resource describe composición y disponibilidad; no transforma una ruta
+writable en autorización. Toda mutación continúa atravesando plan, policy,
+approval, freshness, safety y executor.
+
+La evidencia EV también es agregada: `StateStoreEVProvider` conserva la edad
+del componente más antiguo entre conexión, SOC, capacidad y departure. La
+conexión reciente no puede rejuvenecer una lectura antigua de SOC/capacidad,
+y cualquier cambio en esos snapshots —incluida la hora de salida— cambia la
+`source_revision` que ata el contexto de energía a la validación.
+
 El único servidor stdio local registra estas tools semánticas:
 
 | Tool | Efecto |
 | --- | --- |
 | `discover_devices` | Lee o refresca el inventario canónico; admite `area_id`, tipos y `refresh`. |
+| `inspect_commissioning` | Lee el informe v1 compartido de candidatos de batería/EV; solo `refresh=true` ejecuta discovery y nunca crea autoridad. |
 | `get_state` | Lee estados acotados por dispositivos/capacidades. |
 | `get_energy_context` | Lee un horizonte completo de tarifas, solar y batería opcional mediante un provider tipado. |
 | `validate_command` | Valida un comando sin invocar el adapter. |
@@ -38,7 +102,13 @@ domotics://capabilities
 domotics://devices
 domotics://energy
 domotics://policies
+domotics://commissioning
 ```
+
+`domotics://commissioning` y `inspect_commissioning` exponen evidencia de
+comisionamiento, no bindings. Un candidato `ready_for_binding` todavía
+requiere profile, identidad, takeover, readback, HIL y las gates de producción
+server-owned; discovery nunca convierte una ruta en autoridad física.
 
 ## Bundle commit boundary v3 (2026-08-21)
 
@@ -102,6 +172,132 @@ deshabilitada por defecto; ni tokens ni secretos se serializan en la respuesta
 MCP.
 
 Contrato detallado: [`specs/128-explicit-approval-assertion/contracts/approval-assertion-v1.md`](../specs/128-explicit-approval-assertion/contracts/approval-assertion-v1.md).
+
+## Verificación JIT de autoridad persistida (2026-08-30)
+
+Un `Plan` persistido en estado `APPROVED` no es por sí mismo una fuente de
+autoridad. Antes de cualquier claim o write físico, `ExecutionAdmission` exige
+que `ApprovalStore` pueda cargar el `approval_id`, comprobar que el grant fue
+consumido de forma single-use, validar su TTL y demostrar que coincide con la
+proyección persistida completa: digest de validación, scope de plan/bundle/
+recurrence, identidad, sesión, ventana, revisión y expiraciones.
+
+La aprobación de un bundle solo puede verificarse con el `bundle_digest` del
+agregado comprometido. Una aprobación de recurrencia no autoriza una ejecución
+puntual. Un `dry_run` únicamente valida la autoridad y no consume el grant ni
+persiste cambios de plan, aprobación, bundle o scheduling.
+
+El grant se conserva en el repository durable de autoridad y puede
+revalidarse después de un restart; la proyección `Plan.approval` no sustituye
+ese ledger. La aprobación local atendida usada por HIL pasa por la misma
+emisión/consumo interna, permanece fuera de MCP y no equivale a qualification
+de producción.
+
+## Freshness, disponibilidad y verdad de estado (2026-08-30)
+
+`StateStore` conserva las observaciones por fuente y deriva una vista canónica
+por `(device_id, capability)`. La vista no es last-writer-wins: dos valores
+`CURRENT` distintos producen `INVALID` y valor nulo; la caída de una fuente
+solo degrada sus snapshots, dejando intacta la evidencia independiente de
+otras fuentes.
+
+`observed_at` y `received_at` se conservan cuando el proveedor los entrega. La
+lectura de una caché de Home Assistant no puede rejuvenecer una observación
+antigua. La edad se comprueba en JIT por `FreshnessEvaluator`, aunque ningún
+sweeper haya ejecutado antes `mark_stale()`. Las decisiones distinguen
+evidencia ausente, expirada, stale no autorizada, unavailable, invalid y futura;
+una policy que acepta stale nunca convierte `UNAVAILABLE` o `INVALID` en
+autorizable.
+
+Las señales estructuradas `source_unavailable` del `CompositeAdapter` llegan a
+`RuntimeEventConsumer`, que marca solo el adapter afectado. La fuente vuelve a
+ser utilizable únicamente después de reconexión y discovery, evitando que un
+refresh de otra fuente reinstale silenciosamente una caché sana aparente.
+
+## Supervisión de actuadores latched (2026-08-30)
+
+Una ruta de mapping no concede por sí sola autoridad de actuador. Un binding
+dispatchable debe resolver su `provider_id` a un adapter concreto; un
+`CompositeAdapter` solo sirve para enrutar y nunca es el dueño físico. Si la
+ruta de takeover no existe, es ambigua o no expone la operación requerida, el
+runtime falla cerrado.
+
+Antes de adquirir un lease de batería, `BatteryControlCoordinator` exige una
+reconciliación startup. Consulta la ruta de feedback en vivo (también cuando
+no hay snapshot persistido), envía un stop idempotente si el estado no es
+seguro y solo abre la admisión tras confirmar un readback `CURRENT`, fresco y
+dentro de la tolerancia. Un ACK de transporte no equivale a parada física.
+
+Los leases tienen ownership por dispositivo, expiración y renovación
+opcional. Si la renovación falla, el supervisor intenta stop y conserva la
+autoridad revocada cuando no puede confirmar potencia cero. La liberación
+normal de un plan físico usa el mismo stop/readback; el executor no repite el
+write del plan tras un restart y el coordinador reconcilia el actuador antes
+de volver a admitir órdenes.
+
+## Solver y guards físicos JIT (2026-08-30)
+
+El límite de horizon se valida en el proceso que recibe la propuesta y antes
+de enviar trabajo al worker CP-SAT. Las restricciones `battery_min_soc` y
+`battery_max_soc` se aplican a todos los estados `soc[0..N]`, incluido el
+terminal; un caso de un solo slot no puede terminar por debajo de la reserva.
+
+### Frontera del worker CP-SAT
+
+El solve CP-SAT de la ruta configurada cruza una frontera de proceso explícita:
+`ProcessOptimizationWorker` valida el escenario y sus límites en el proceso
+padre, y solo envía al worker persistente el `OptimizationScenario` ya validado.
+El worker usa contexto `spawn`, aplica el `WorkerBudget` y mata el proceso
+concreto cuando vence el deadline; el pool crea un reemplazo para la siguiente
+solicitud. El worker no recibe `DeviceRegistry` ni puede acceder a adapters,
+planes, aprobaciones o estado físico. El contexto energético I/O sigue usando
+el worker de hilos correspondiente.
+
+Las constraints del escenario son evidencia de planificación del forecast. La
+admisión física no las interpreta como una garantía actual del mundo: para
+batería y EV `DynamicSafetyGuard` vuelve a comprobar en JIT el SOC,
+telemetría fresca y el envelope de potencia; para EV exige además conexión y
+que `departure_at` observado siga abierto. Timestamps futuros, snapshots no
+current y valores fuera del profile se rechazan antes del adapter. La parada
+queda disponible como operación de seguridad incluso cuando la telemetría de
+carga no es utilizable.
+
+## Qualification HIL y evidencia de identidad (2026-08-30)
+
+La CLI HIL carga un único `DispatchableBatteryBinding` y lo pasa explícitamente
+al composition root; no puede ejecutar el profile B sobre un runtime construido
+con A. Los valores de prueba se limitan al envelope del profile y al ceiling
+server-owned del deployment. `takeover_baseline` exige un `TakeoverResult`
+adquirido, con owner/device/provider/capability correctos, baseline observado,
+lease aún vivo y primer comando confirmado.
+
+Un adapter que quiera participar en qualification puede exponer el hook
+opcional `read_hil_identity()`, que devuelve un `AdapterIdentityObservation`
+con hardware, firmware, `SourceRef` y timestamp observados por el provider.
+Las cadenas `--hardware-id` y `--firmware-version` del operador solo se marcan
+como observadas si coinciden con ese retorno; la evidencia incluye un digest
+ligado a identidad, provider, profile y timestamp. Una nota manual se clasifica
+como `verified`, `not_verified`, `not_exercised` o `not_applicable`; solo la
+primera puede contribuir a `hil-qualified`. El artefacto sigue necesitando una
+autoridad de confianza para convertirse en credencial de producción.
+
+## Identidad de fuentes y readbacks durables (2026-08-30)
+
+`SourceRef.source_device_id` conserva la identidad estable que un provider usa
+para agrupar entidades físicas, separada del `external_id` mutable (por
+ejemplo, un `entity_id` de Home Assistant). `DeviceRepository` lo serializa
+como parte del dispositivo y `DeviceRegistry.load_persisted()` reconstruye el
+índice de identidad con ese valor. La rehidratación solo reserva el canonical
+ID: no restaura `CapabilityRoute` ni permite commands hasta que un discovery
+actual confirme la fuente y reconstruya la ruta.
+
+Los readbacks tienen una única autoridad durable en runtime compuesto:
+`PlanExecutor → StateStore → RuntimeStatePersistencePort`. El sink de snapshots
+de repository se conserva únicamente como compatibilidad para fixtures que no
+han enlazado el puerto de persistencia del `StateStore`, evitando doble I/O y
+que un segundo write redundante convierta un readback confirmado en `UNKNOWN`.
+Cuando discovery elimina una entidad o dispositivo, también elimina sus
+snapshots activas a través del mismo owner de persistencia.
 
 ## Runtime safety hardening (2026-08-18)
 
@@ -1322,6 +1518,24 @@ el servidor unificado, no modifica modelos de dominio, no crea una ruta MCP
 alternativa y no instala filtros globales de warnings. Si el SDK ya
 está completo, la función no hace nada.
 
+Cuando KNX Virtual/ETS vive en Windows y el runtime en WSL, el laboratorio usa
+un único gateway KNX/IP: KNX Virtual conserva su endpoint upstream y WSL
+publica el endpoint que consumen ETS, DomoAI y el bridge. El bridge de batería
+es un proceso de laboratorio, no un proveedor de autoridad física.
+
+`domoai-lab up --services mqtt battery knx-bridge` inicia MQTT y la batería
+antes del bridge y espera su estado supervisado. `status` distingue un proceso
+vivo de un bridge `ready`: ready exige conexión MQTT/KNX, un estado completo
+retenido proyectado a los grupos KNX y un sondeo independiente que lea todos
+los grupos de estado de energía. El proceso hijo publica la proyección como
+`degraded`; solo el supervisor puede promoverla a `ready`. `degraded`,
+`failed`, un PID muerto o un status corrupto nunca habilitan una prueba live.
+
+El estado y el log del bridge viven en `.lab-state/`, están fuera de Git y no
+contienen credenciales. `domoai-lab down` detiene primero el PID supervisado y
+después Compose. No debe arrancarse simultáneamente el perfil experimental
+Compose `knx-gateway` y el gateway WSL de la topología Windows/WSL.
+
 ## Optimización
 
 `OptimizationScenario` es una DSL intermedia, no código Python ejecutable. Sus
@@ -1358,6 +1572,45 @@ un resultado v1 con `Horizon`, `source_id`, `source_revision` y
 timestamps antes de construir el `EnergyContext`. El revision combinado es
 determinista y los fallos se serializan como `EnergyProviderDiagnostic`, sin
 excepción original, URL, cabecera ni credencial.
+
+El host inyecta una composición ya construida (built-in u opcionalmente
+propia) mediante el parámetro `energy_context_provider` de
+`build_runtime`/`build_configured_server`
+(`src/domoai/application/runtime_factory.py`,
+`src/domoai/mcp/configured.py`), con el mismo patrón que `adapter` ya usa
+para dispositivos: si se entrega, el runtime lo usa tal cual y nunca
+construye los proveedores OMIE/Open-Meteo integrados; si se omite, el
+comportamiento por defecto no cambia. Requiere `energy_live=True` y que el
+objeto entregado exponga `get_context(horizon)`; el host es responsable de su
+propio ciclo de vida. Contrato completo en
+[`specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md`](../specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md).
+
+`ComposedEnergyContextProvider` también acepta `ev_providers`, una tupla de
+`EVProvider` (uno por cargador EV vinculado, a diferencia de `battery` que es
+singular). `StateStoreEVProvider` es la implementación de referencia: lee
+conectado/SOC/capacidad/hora de salida desde `StateStore` vía un
+`EVChargingBinding` (ligero, sin la ceremonia de atestación de capacidad de
+`DispatchableBatteryBinding`, porque `EVState.capacity_kwh` es un valor
+observado ordinario, no una declaración regulatoria) y aplica las mismas
+comprobaciones de frescura/identidad/calidad que `StateStoreBatteryProvider`.
+`build_runtime`/`build_configured_server` aceptan `ev_charging_bindings` para
+auto-construirlos, mismo patrón que `dispatchable_battery_binding`. En la raíz
+de composición, cada binding deriva también la allowlist de comandos y el
+`DynamicSafetyGuard` de su actuador: la ruta de estado y la autoridad de
+escritura no pueden divergir. Contrato completo en
+[`specs/162-ev-charging-provider-simulator/contracts/ev-charging-provider-and-simulator.md`](../specs/162-ev-charging-provider-simulator/contracts/ev-charging-provider-and-simulator.md).
+
+El binding incluye además `control_policy`. Para un EV latched, el runtime
+resuelve el `provider_id` a un adapter concreto, reconcilia el readback al
+arrancar y mantiene un lease supervisado. Los planes con varios actuadores
+latched pasan por un `ControlTakeoverGroup`, que exige todos los leases antes
+del primer write y ejecuta parada/readback en la liberación. Un ACK de
+transporte nunca sustituye el readback físico.
+Cuando un adapter publica SOC en porcentaje, debe conservar esa unidad en el
+`StateSnapshot`; `StateStoreEVProvider` lo convierte a kWh únicamente cuando
+la unidad es explícitamente `%` y existe una capacidad kWh válida del mismo
+binding. Un valor numérico sin unidad mantiene compatibilidad histórica y se
+trata como kWh, pero no se acepta ninguna conversión implícita por magnitud.
 
 Un proveedor live futuro debe traducir sus unidades y semántica antes de
 devolver el modelo canónico. Por ejemplo, [OMIE documenta periodos de 15
@@ -1669,10 +1922,13 @@ Contrato detallado: [`specs/101-battery-soc-percent-conversion/contracts/battery
 ## Binding explícito de capacidad Home Assistant (2026-08-22)
 
 La Spec 102 añade a la configuración v1 un mapa opcional de bindings de
-capacidad nominal. Cada entrada usa el `entity_id` exacto de Home Assistant y
-el `device_id` esperado del registro; no se acepta emparejamiento por nombre,
-área, `friendly_name` ni fuzzy matching. Una entidad configurada cuyo
-`device_id` real no coincide hace fallar cerrado la lectura de capacidad.
+capacidad nominal. Cada entrada usa el `entity_id` exacto de Home Assistant y,
+preferentemente, claims estables del registro (`identity_keys` y/o
+`connections`). El `device_id` esperado sigue admitido solo como fallback
+legacy: no se acepta emparejamiento por nombre, área, `friendly_name` ni fuzzy
+matching. En modo estable, el provider consulta el registro vivo, resuelve
+exactamente un `device_id` actual y falla cerrado ante cero o múltiples
+coincidencias; así una recreación del `device_id` no rompe el binding.
 
 Cuando la entidad coincide, el provider la proyecta como medición read-only
 `battery.capacity` en `kWh`, conservando provider/device, `SourceRef`, calidad
@@ -2775,8 +3031,9 @@ con `execute_at` futuro, el TTL cubre la ventana hasta esa ejecución; al llegar
 la hora, el executor vuelve a comprobar expiry, dependencias, policy, rutas,
 capability fingerprint y preflight de seguridad antes de cualquier write.
 
-La aprobación no se reconstruye tras restart: los grants siguen siendo
-single-use y process-local. La ruta MCP legacy usa un bearer token únicamente
+La aprobación no se reconstruye desde la proyección del plan tras restart: los
+grants siguen siendo single-use y se consultan en el repository durable de
+autoridad. La ruta MCP legacy usa un bearer token únicamente
 si `DOMOAI_ALLOW_LEGACY_OPERATOR_TOKEN=1` está configurado, y queda destinada a
 instalaciones locales/dev. El runtime también expone `OperatorPrincipal` para
 que una UI/host autenticado emita grants sin introducir credenciales en el
@@ -2790,6 +3047,30 @@ reescribe una intención aprobada: devuelve
 `reschedule_requires_revalidation`, audita la decisión y conserva la fila
 pendiente. La reconciliación entre schedule y execution permanece autoritativa
 en los repositories y no reconstruye efectos físicos después de un crash.
+
+## Gobernanza durable de audit y release (B09, 2026-08-30)
+
+La autoridad y la auditoría usan lanes de cola/worker independientes y, por
+defecto, ficheros SQLite distintos (`domoai.sqlite3` y
+`domoai-audit.sqlite3`). `Settings` rechaza una configuración explícita que
+resuelva ambos paths al mismo fichero; así la promesa de aislamiento no
+depende solo de que el operador conozca el valor por defecto.
+
+Los overrides normales de riesgo son monotónicos: solo pueden mantener o
+endurecer la clasificación server-owned. El loader TOML ordinario no puede
+activar una reducción privilegiada. La reducción, si una futura instalación la
+necesita, debe introducir un contrato de excepción explícito, auditable y
+revisable; no debe reutilizar el fichero de hardening normal.
+
+`AuditEventRepository.list_events()` exige `limit >= 1` antes de construir la
+consulta y aplica el máximo server-owned de 500. La tool MCP propaga el mismo
+rechazo y nunca convierte un límite negativo en `LIMIT -1` de SQLite.
+
+La workflow CI ejecuta el conjunto completo de gates y `Required release gates`
+los agrega con semántica fail-closed. La protección estricta de `main` exige
+los 15 contexts documentados en [`docs/release-governance.md`](release-governance.md).
+El artifact `ci-evidence-${sha}` conserva resultados ligados al SHA; el README
+no afirma un número fijo de tests.
 
 ## Versionado
 

@@ -1,0 +1,13 @@
+{
+  "provider_id": "lab-thermostat",
+  "device_id": "lab-thermostat-1",
+  "capacitance_kwh_per_c": 0.5,
+  "ua_kw_per_c": 0.05,
+  "initial_temperature_c": 20.0,
+  "initial_exterior_temperature_c": 10.0,
+  "max_heat_kw": 2.0,
+  "max_cool_kw": 2.0,
+  "heating_cop": 3.0,
+  "cooling_cop": 2.5,
+  "tick_seconds": 60.0
+}

@@ -365,6 +365,7 @@ class CompositeAdapter:
                     self._record_failure(adapter_id, "adapter_event_stream_failed", error)
                     yield AdapterDiagnosticEvent(
                         source_adapter_id=adapter_id,
+                        code="source_unavailable",
                         payload={
                             "source_adapter_id": adapter_id,
                             "reason": str(error)[:200],
@@ -406,8 +407,14 @@ class CompositeAdapter:
                 )
                 continue
             connected = item.connected and adapter.adapter_id in self._connected
-            if not connected:
-                self._connected.discard(adapter.adapter_id)
+            # ``_connected`` tracks the transport lifecycle slot, not the
+            # child's physical availability.  A KNX tunnel (or another
+            # source) may remain connected while discovery/readback is
+            # temporarily unavailable.  Retaining the slot lets the event
+            # consumer and state refresher retry discovery; a failed health
+            # call above still removes a genuinely broken adapter, and every
+            # write remains guarded by the child adapter's own availability
+            # contract.
             components.append(item.model_copy(update={"connected": connected}))
         connected = any(item.connected for item in components)
         messages = [item.message for item in components if item.message]

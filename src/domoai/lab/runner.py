@@ -10,24 +10,59 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 class LabRunnerError(RuntimeError):
     """Raised for invalid local-lab configuration or command execution."""
 
 
-SERVICE_NAMES = frozenset({"mqtt", "zigbee2mqtt", "modbus", "homeassistant", "matter-server"})
+class BridgeSupervisorPort(Protocol):
+    def start(self) -> int: ...
+
+    def status(self) -> int: ...
+
+    def stop(self) -> int: ...
+
+
+SERVICE_NAMES = frozenset(
+    {
+        "mqtt",
+        "zigbee2mqtt",
+        "modbus",
+        "battery",
+        "ev-charger",
+        "water-meter",
+        "thermal",
+        "knx-gateway",
+        "homeassistant",
+        "matter-server",
+        "knx-bridge",
+    }
+)
 DEFAULT_UP_SERVICES = ("mqtt", "zigbee2mqtt", "modbus")
-SERVICE_PROFILES = {"homeassistant": "homeassistant", "matter-server": "matter"}
+SERVICE_PROFILES = {
+    "battery": "battery",
+    "ev-charger": "ev-charger",
+    "water-meter": "water-meter",
+    "thermal": "thermal",
+    "homeassistant": "homeassistant",
+    "matter-server": "matter",
+}
 FIXTURE_SMOKE_TESTS = (
     "tests/integration/test_virtual_lab_assets.py",
     "tests/integration/test_virtual_lab_smoke_configuration.py",
     "tests/integration/test_zigbee2mqtt_fixture.py",
     "tests/integration/test_modbus_fixture.py",
+    "tests/unit/lab/test_battery_simulator.py",
+    "tests/unit/lab/test_ev_charging_simulator.py",
+    "tests/unit/lab/test_water_consumption_simulator.py",
+    "tests/unit/lab/test_thermal_simulator.py",
     "tests/integration/test_matter_server_fixture.py",
     "tests/integration/test_knx_fixture.py",
     "tests/integration/test_home_assistant_provider_runtime.py",
     "tests/integration/test_multi_adapter_runtime.py",
+    "tests/integration/test_solar_self_consumption_mcp.py",
 )
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -89,25 +124,48 @@ class LabConfig:
 class LabRunner:
     """Build and execute allowlisted local lab commands."""
 
-    def __init__(self, config: LabConfig, execute: CommandExecutor | None = None) -> None:
+    def __init__(
+        self,
+        config: LabConfig,
+        execute: CommandExecutor | None = None,
+        bridge_supervisor: BridgeSupervisorPort | None = None,
+    ) -> None:
         self.config = config
         self._execute = execute or self._execute_process
+        self._bridge_supervisor = bridge_supervisor
 
     def up(self, services: Sequence[str] = DEFAULT_UP_SERVICES) -> int:
         selected = self._validate_services(services)
-        return self._run_compose(
-            ("up", "-d", "--build", *selected),
-            include_local_env=True,
-            services=selected,
-        )
+        compose_services = tuple(service for service in selected if service != "knx-bridge")
+        if compose_services:
+            compose_result = self._run_compose(
+                ("up", "-d", "--build", *compose_services),
+                include_local_env=True,
+                services=compose_services,
+            )
+            if compose_result != 0:
+                return compose_result
+        if "knx-bridge" in selected:
+            return self._bridge().start()
+        return 0
 
     def status(self, services: Sequence[str] = ()) -> int:
         selected = self._validate_services(services)
-        return self._run_compose(("ps", *selected), include_local_env=True, services=selected)
+        compose_services = tuple(service for service in selected if service != "knx-bridge")
+        result = 0
+        if compose_services or not selected:
+            result = self._run_compose(
+                ("ps", *compose_services), include_local_env=True, services=compose_services
+            )
+        if "knx-bridge" in selected:
+            result = max(result, self._bridge().status())
+        return result
 
     def down(self, *, remove_volumes: bool = False) -> int:
         command: tuple[str, ...] = ("down", "--volumes") if remove_volumes else ("down",)
-        return self._run_compose(command, include_local_env=True, services=())
+        bridge_result = self._bridge().stop()
+        compose_result = self._run_compose(command, include_local_env=True, services=())
+        return max(bridge_result, compose_result)
 
     def smoke(self) -> int:
         env = self._deterministic_environment()
@@ -141,6 +199,22 @@ class LabRunner:
         argv.extend(command)
         env = self._environment(include_local_env=include_local_env)
         return self._execute(argv, env)
+
+    def _bridge(self) -> BridgeSupervisorPort:
+        if self._bridge_supervisor is None:
+            from domoai.lab.bridge_supervisor import BridgeSupervisor, BridgeSupervisorConfig
+
+            environment = self._environment(include_local_env=True)
+            try:
+                bridge_config = BridgeSupervisorConfig.from_environment(
+                    self.config.repo_root,
+                    environment,
+                    python_executable=self.config.python_executable,
+                )
+            except ValueError as error:
+                raise LabRunnerError(str(error)) from error
+            self._bridge_supervisor = BridgeSupervisor(bridge_config)
+        return self._bridge_supervisor
 
     def _compose_argument(self, compose_file: Path) -> str:
         if not self.config.docker_executable.lower().endswith(".exe"):

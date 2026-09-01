@@ -107,6 +107,8 @@ class CapabilityRoute:
     local_canonical_id: str
     commands: tuple[str, ...]
     available: bool
+    readable: bool = True
+    writable: bool = False
 
 
 @dataclass(frozen=True)

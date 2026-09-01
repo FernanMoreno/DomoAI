@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 
 from domoai.application.discovery_service import DiscoveryService
-from domoai.domain.models import SourceEvent, SourceRef, StateChangedEvent
+from domoai.domain.models import AdapterDiagnosticEvent, SourceEvent, SourceRef, StateChangedEvent
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
@@ -43,7 +43,7 @@ class RuntimeEventConsumer:
         except StopAsyncIteration:
             return None
         except (ConnectionError, OSError) as error:
-            stale = await self.state_store.mark_all_stale()
+            stale = await self.state_store.mark_source_unavailable(self.adapter.adapter_id)
             self.audit.append(
                 event_type="source_event_stream_unavailable",
                 actor="runtime",
@@ -55,7 +55,7 @@ class RuntimeEventConsumer:
         try:
             await self._apply_event(event)
         except (ConnectionError, OSError) as error:
-            stale = await self.state_store.mark_all_stale()
+            stale = await self.state_store.mark_source_unavailable(self.adapter.adapter_id)
             self.audit.append(
                 event_type="source_event_stream_unavailable",
                 actor="runtime",
@@ -134,6 +134,9 @@ class RuntimeEventConsumer:
 
         if isinstance(event, StateChangedEvent):
             await self._apply_state_only(event)
+        elif isinstance(event, AdapterDiagnosticEvent) and event.code == "source_unavailable":
+            source_adapter_id = event.source_adapter_id or self.adapter.adapter_id
+            await self.state_store.mark_source_unavailable(source_adapter_id)
         else:
             await self.discovery.refresh()
 
@@ -155,15 +158,7 @@ class RuntimeEventConsumer:
             snapshots = [
                 snapshot for snapshot in snapshots if snapshot.capability == event.capability
             ]
-        registry = self.discovery.registry
-        for snapshot in snapshots:
-            canonical_id = registry.canonical_id_for_source(
-                snapshot.source_ref.adapter_id, snapshot.source_ref.external_id
-            )
-            if canonical_id is None:
-                continue
-            normalized = snapshot.model_copy(update={"device_id": canonical_id})
-            await self.state_store.save(normalized)
+        await self.discovery.save_state_snapshots(snapshots)
 
     def _known_source_refs(self, adapter_id: str) -> list[SourceRef]:
         return [
@@ -186,7 +181,15 @@ class RuntimeEventConsumer:
 
     async def _mark_source_unavailable(self, *, event_type: str, error: Exception) -> None:
         try:
-            stale = await self.state_store.mark_all_stale()
+            source_ids = [self.adapter.adapter_id]
+            source_ids.extend(
+                str(child.adapter_id)
+                for child in getattr(self.adapter, "adapters", ())
+                if str(child.adapter_id) not in source_ids
+            )
+            stale = []
+            for source_id in source_ids:
+                stale.extend(await self.state_store.mark_source_unavailable(source_id))
         except Exception as stale_error:
             stale = []
             error = RuntimeError(f"{error}; stale-state marking failed: {stale_error}")

@@ -7,8 +7,26 @@ services:
       - "1883:1883"
     volumes:
       - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/version' -C 1 -W 2 >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  knx-gateway:
+    profiles: ["knxdocker"]
+    build:
+      context: ./knx-gateway
+    # The supported Windows/WSL topology uses the native WSL gateway.  This
+    # profile is experimental and must never come back after a Docker restart
+    # to compete for the KNXnet/IP tunnel.
+    restart: "no"
+    ports:
+      - "172.26.80.1:3672:3672/udp"
+      - "3673:3673/udp"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/knx-gateway-healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -58,6 +76,98 @@ services:
       timeout: 3s
       retries: 12
 
+  battery:
+    profiles: ["battery"]
+    build:
+      context: ../..
+      dockerfile: dev/lab/battery/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      BATTERY_MQTT_TOPIC: domoai/battery
+      BATTERY_HTTP_PORT: "8090"
+      BATTERY_MODBUS_PORT: "1502"
+    ports:
+      - "8090:8090"
+      - "1503:1502"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ev-charger:
+    profiles: ["ev-charger"]
+    build:
+      context: ../..
+      dockerfile: dev/lab/ev-charger/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      EV_CHARGER_MQTT_TOPIC: domoai/ev-charger
+      EV_CHARGER_HTTP_PORT: "8091"
+      EV_CHARGER_MODBUS_PORT: "1502"
+    ports:
+      - "8091:8091"
+      - "1504:1502"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  water-meter:
+    profiles: ["water-meter"]
+    build:
+      context: ../..
+      dockerfile: dev/lab/water-meter/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      WATER_METER_MQTT_TOPIC: domoai/water-meter
+      WATER_METER_HTTP_PORT: "8092"
+      WATER_METER_MODBUS_PORT: "1502"
+    ports:
+      - "8092:8092"
+      - "1505:1502"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  thermal:
+    profiles: ["thermal"]
+    build:
+      context: ../..
+      dockerfile: dev/lab/thermal/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      THERMAL_MQTT_TOPIC: domoai/thermal
+      THERMAL_HTTP_PORT: "8093"
+      THERMAL_MODBUS_PORT: "1502"
+    ports:
+      - "8093:8093"
+      - "1506:1502"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8093/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   homeassistant:
     profiles: ["homeassistant"]
     image: ghcr.io/home-assistant/home-assistant:stable
@@ -67,7 +177,10 @@ services:
     environment:
       TZ: Europe/Madrid
     volumes:
-      - ./homeassistant:/config
+      - homeassistant-data:/config
+    depends_on:
+      mqtt:
+        condition: service_healthy
 
   matter-server:
     profiles: ["matter"]
@@ -91,5 +204,11 @@ services:
       - matter-device-data:/data
 
 volumes:
+  mqtt-data:
+    name: domoai-lab-mqtt-data
+    external: true
+  homeassistant-data:
+    name: domoai-lab-homeassistant-data
+    external: true
   matter-data:
   matter-device-data:

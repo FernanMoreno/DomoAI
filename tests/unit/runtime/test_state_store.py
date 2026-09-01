@@ -168,7 +168,7 @@ async def test_mark_stale_uses_injected_clock_when_no_explicit_now_given() -> No
     stale = await store.mark_stale()
     assert stale == []
 
-    clock.set(initial + timedelta(minutes=6))
+    clock.set(initial + timedelta(minutes=10))
     stale = await store.mark_stale()
 
     assert len(stale) == 1
@@ -192,7 +192,7 @@ async def test_mark_stale_advances_version_for_transitioned_snapshot() -> None:
     await store.save(snapshot)
     version_before = store.state_version("light.kitchen", "brightness")
 
-    clock.set(initial + timedelta(minutes=6))
+    clock.set(initial + timedelta(minutes=10))
     stale = await store.mark_stale()
 
     assert len(stale) == 1
@@ -228,7 +228,7 @@ async def test_mark_stale_does_not_advance_version_for_already_stale_snapshot() 
     await store.save(snapshot)
     version_before = store.state_version("light.kitchen", "brightness")
 
-    clock.set(initial + timedelta(minutes=6))
+    clock.set(initial + timedelta(minutes=10))
     stale = await store.mark_stale()
 
     assert stale == []
@@ -269,3 +269,31 @@ async def test_mark_stale_does_not_advance_version_for_snapshot_not_yet_stale() 
 
     assert stale == []
     assert store.state_version("light.kitchen", "brightness") == version_before
+
+
+@pytest.mark.asyncio
+async def test_effective_freshness_uses_receipt_age_and_does_not_mutate_store() -> None:
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial + timedelta(minutes=4))
+    store = StateStore(timedelta(minutes=5), clock=clock)
+    snapshot = StateSnapshot(
+        device_id="light.kitchen",
+        capability="brightness",
+        value=50,
+        observed_at=initial,
+        received_at=clock.now(),
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.kitchen"),
+    )
+    await store.save(snapshot)
+
+    effective = store.effective_snapshot(snapshot)
+
+    assert effective.status is StateStatus.CURRENT
+    assert (await store.get("light.kitchen", "brightness")).status is StateStatus.CURRENT
+
+    clock.set(initial + timedelta(minutes=10))
+    effective = store.effective_snapshot(snapshot)
+
+    assert effective.status is StateStatus.STALE
+    assert (await store.get("light.kitchen", "brightness")).status is StateStatus.CURRENT

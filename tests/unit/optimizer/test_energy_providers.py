@@ -14,6 +14,9 @@ from domoai.optimizer.energy import (
     BatteryCapacityEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
+    EVActuator,
+    EVChargingBinding,
+    ExteriorTemperaturePoint,
     NominalCapacityTrustPolicy,
     TariffPoint,
 )
@@ -21,9 +24,12 @@ from domoai.optimizer.providers import (
     BatteryState,
     ComposedEnergyContextProvider,
     EnergyProviderError,
+    ExteriorTemperatureSeries,
     SolarForecastSeries,
     StateStoreBatteryProvider,
+    StateStoreEVProvider,
     StaticBatteryProvider,
+    StaticExteriorTemperatureProvider,
     StaticSolarForecastProvider,
     StaticTariffProvider,
     TariffSeries,
@@ -33,7 +39,7 @@ from domoai.optimizer.providers import (
     validate_nominal_capacity_trust,
 )
 from domoai.runtime.state_store import StateStore
-from tests.fixtures.energy import energy_context_for
+from tests.fixtures.energy import energy_context_for, energy_horizon
 
 NOW = datetime(2026, 8, 15, 12, 5, tzinfo=UTC)
 
@@ -584,6 +590,305 @@ async def test_state_store_battery_provider_revision_changes_with_snapshot_value
     )
 
     assert first.source_revision != second.source_revision
+
+
+def _ev_binding(
+    *, provider_id: str = "ev_fixture", device_id: str = "ev.home"
+) -> EVChargingBinding:
+    actuator = EVActuator(
+        device_id=device_id,
+        capability="ev_charging",
+        charge_command="charge_ev",
+        stop_command="stop_ev",
+        connected_capability="ev.connected",
+        departure_capability="ev.departure_at",
+        max_charge_kw=7.4,
+    )
+    return EVChargingBinding.model_validate(
+        {
+            "provider_id": provider_id,
+            "device_id": device_id,
+            "actuator": actuator,
+            "soc_capability": "ev.soc",
+            "capacity_capability": "ev.capacity",
+        }
+    )
+
+
+def _ev_snapshot(
+    capability: str,
+    value: object,
+    *,
+    unit: str | None = None,
+    status: StateStatus = StateStatus.CURRENT,
+    provider_id: str = "ev_fixture",
+    device_id: str = "ev.home",
+    observed_at: datetime = datetime(2026, 8, 15, 12, tzinfo=UTC),
+) -> StateSnapshot:
+    return StateSnapshot(
+        device_id=device_id,
+        capability=capability,
+        value=value,
+        unit=unit,
+        observed_at=observed_at,
+        received_at=observed_at,
+        status=status,
+        source_ref=SourceRef(adapter_id=provider_id, external_id=f"{device_id}:{capability}"),
+    )
+
+
+async def _ev_store(*snapshots: StateSnapshot) -> StateStore:
+    store = StateStore()
+    for snapshot in snapshots:
+        await store.save(snapshot)
+    return store
+
+
+def _complete_ev_snapshots(
+    *,
+    connected: bool = True,
+    soc: float = 20.0,
+    capacity: float = 60.0,
+    departure: str | None = "2026-08-16T06:00:00+00:00",
+    status: StateStatus = StateStatus.CURRENT,
+) -> list[StateSnapshot]:
+    snapshots = [
+        _ev_snapshot("ev.connected", connected, status=status),
+        _ev_snapshot("ev.soc", soc, status=status),
+        _ev_snapshot("ev.capacity", capacity, status=status),
+    ]
+    if departure is not None:
+        snapshots.append(_ev_snapshot("ev.departure_at", departure, status=status))
+    return snapshots
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_composes_current_state() -> None:
+    store = await _ev_store(*_complete_ev_snapshots())
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.device_id == "ev.home"
+    assert state.connected is True
+    assert state.soc_kwh == pytest.approx(20.0)
+    assert state.capacity_kwh == pytest.approx(60.0)
+    assert state.max_charge_kw == pytest.approx(7.4)
+    assert state.departure_at is not None
+    assert state.source_ref.adapter_id == "ev_fixture"
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_converts_percentage_soc_using_capacity() -> None:
+    store = await _ev_store(
+        *_complete_ev_snapshots(soc=33.333, capacity=60.0),
+    )
+    await store.save(_ev_snapshot("ev.soc", 33.333, unit="%"))
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.soc_kwh == pytest.approx(19.9998)
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_uses_oldest_component_timestamp() -> None:
+    # A recent connection flag must not rejuvenate older SOC/capacity evidence.
+    stale = NOW - timedelta(seconds=901)
+    store = await _ev_store(
+        _ev_snapshot("ev.connected", True, observed_at=NOW),
+        _ev_snapshot("ev.soc", 20.0, observed_at=stale),
+        _ev_snapshot("ev.capacity", 60.0, observed_at=NOW),
+    )
+    ev_provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        ev_providers=(ev_provider,),
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        composed.get_context(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "stale_provider_data"
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_revision_includes_departure_snapshot() -> None:
+    store = await _ev_store(*_complete_ev_snapshots(departure="2026-08-16T06:00:00+00:00"))
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    first = provider.get_state(energy_context_for().horizon)
+    await store.save(_ev_snapshot("ev.departure_at", "2026-08-16T07:00:00+00:00"))
+    second = provider.get_state(energy_context_for().horizon)
+
+    assert first.departure_at != second.departure_at
+    assert first.source_revision != second.source_revision
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_allows_unknown_departure() -> None:
+    store = await _ev_store(*_complete_ev_snapshots(departure=None))
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.departure_at is None
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_rejects_soc_above_capacity() -> None:
+    # Spec 162 User Story 3 / FR-004: no clamping, hard rejection.
+    store = await _ev_store(*_complete_ev_snapshots(soc=70.0, capacity=60.0))
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "invalid_ev_state"
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_rejects_cross_identity_snapshot() -> None:
+    # Spec 162 User Story 3 / FR-005.
+    store = await _ev_store(
+        *[
+            _ev_snapshot("ev.connected", True, provider_id="other_provider"),
+            _ev_snapshot("ev.soc", 20.0, provider_id="other_provider"),
+            _ev_snapshot("ev.capacity", 60.0, provider_id="other_provider"),
+        ]
+    )
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "ev_state_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_fails_closed_when_a_required_snapshot_is_missing() -> None:
+    store = StateStore()
+    await store.save(_ev_snapshot("ev.connected", True))
+    await store.save(_ev_snapshot("ev.soc", 20.0))
+    # capacity snapshot deliberately never saved
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    with pytest.raises(EnergyProviderError) as raised:
+        provider.get_state(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "ev_state_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_composer_ev_providers_default_empty_is_non_regression() -> None:
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs), StaticSolarForecastProvider(solar), now=lambda: NOW
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    assert context.ev_states == []
+
+
+@pytest.mark.asyncio
+async def test_composer_populates_ev_states_from_ev_providers() -> None:
+    store = await _ev_store(*_complete_ev_snapshots())
+    ev_provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        ev_providers=(ev_provider,),
+        now=lambda: NOW,
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    assert len(context.ev_states) == 1
+    assert context.ev_states[0].device_id == "ev.home"
+    assert "ev:ev_fixture@" in context.source_revision
+
+
+@pytest.mark.asyncio
+async def test_composer_attributes_two_ev_chargers_independently() -> None:
+    store_a = await _ev_store(*_complete_ev_snapshots(soc=10.0))
+    store_b = await _ev_store(
+        *[
+            _ev_snapshot("ev.connected", True, provider_id="ev_fixture_2", device_id="ev.second"),
+            _ev_snapshot("ev.soc", 30.0, provider_id="ev_fixture_2", device_id="ev.second"),
+            _ev_snapshot("ev.capacity", 40.0, provider_id="ev_fixture_2", device_id="ev.second"),
+        ]
+    )
+    provider_a = StateStoreEVProvider(state_store=store_a, binding=_ev_binding())
+    provider_b = StateStoreEVProvider(
+        state_store=store_b,
+        binding=_ev_binding(provider_id="ev_fixture_2", device_id="ev.second"),
+    )
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        ev_providers=(provider_a, provider_b),
+        now=lambda: NOW,
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    by_device = {state.device_id: state for state in context.ev_states}
+    assert set(by_device) == {"ev.home", "ev.second"}
+    assert by_device["ev.home"].soc_kwh == pytest.approx(10.0)
+    assert by_device["ev.second"].soc_kwh == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_composer_refuses_stale_ev_state_before_use() -> None:
+    # Spec 162 User Story 1 Scenario 2 / FR-002. Staleness is a timestamp
+    # check against max_age_seconds at the composer level (the same generic
+    # _validate_observed_at every other provider result already goes
+    # through) -- StateSnapshot.status is a separate, StateStore-internal
+    # concept and is deliberately not what this test exercises.
+    # Tariff/solar fixtures (provider_inputs()) are observed 300s before NOW;
+    # the default max_age_seconds is 900, so they stay fresh while the EV
+    # snapshot below (901s before NOW) alone crosses the staleness line.
+    stale_observed_at = NOW - timedelta(seconds=901)
+    store = await _ev_store(
+        *[
+            _ev_snapshot("ev.connected", True, observed_at=stale_observed_at),
+            _ev_snapshot("ev.soc", 20.0, observed_at=stale_observed_at),
+            _ev_snapshot("ev.capacity", 60.0, observed_at=stale_observed_at),
+        ]
+    )
+    ev_provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        ev_providers=(ev_provider,),
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(EnergyProviderError) as raised:
+        composed.get_context(energy_context_for().horizon)
+
+    assert raised.value.diagnostic.code == "stale_provider_data"
+    assert raised.value.diagnostic.provider_id == "ev_fixture"
+
+
+@pytest.mark.asyncio
+async def test_state_store_ev_provider_reports_disconnected_without_rejecting() -> None:
+    # A disconnected charger is valid, truthful data -- refusing to charge on
+    # it is DynamicSafetyGuard/validate_executable_scenario's existing,
+    # unmodified job (contracts.md Non-goals), not this provider's.
+    store = await _ev_store(*_complete_ev_snapshots(connected=False))
+    provider = StateStoreEVProvider(state_store=store, binding=_ev_binding())
+
+    state = provider.get_state(energy_context_for().horizon)
+
+    assert state.connected is False
 
 
 def test_composer_returns_complete_context_with_deterministic_revision() -> None:
@@ -1218,3 +1523,67 @@ def test_static_component_providers_are_read_only() -> None:
     assert not hasattr(StaticTariffProvider(tariffs), "execute")
     assert not hasattr(StaticSolarForecastProvider(solar), "execute")
     assert not hasattr(StaticBatteryProvider(battery), "execute")
+
+
+def _exterior_temperature_series() -> ExteriorTemperatureSeries:
+    context = energy_context_for()
+    return ExteriorTemperatureSeries(
+        horizon=context.horizon,
+        source_id="exterior_temperature_fixture",
+        source_revision="forecast-1",
+        observed_at=NOW,
+        points=[
+            ExteriorTemperaturePoint(slot=slot, temperature_c=5.0)
+            for slot in range(context.horizon.slots)
+        ],
+    )
+
+
+def test_static_exterior_temperature_provider_is_read_only() -> None:
+    series = _exterior_temperature_series()
+    provider = StaticExteriorTemperatureProvider(series)
+
+    assert provider.provider_id == "exterior_temperature_fixture"
+    assert provider.get_forecast(series.horizon) is series
+    assert not hasattr(provider, "execute")
+
+
+def test_static_exterior_temperature_provider_rejects_a_different_horizon() -> None:
+    series = _exterior_temperature_series()
+    provider = StaticExteriorTemperatureProvider(series)
+    different = energy_horizon(slots=series.horizon.slots + 1)
+
+    with pytest.raises(EnergyProviderError, match="horizon"):
+        provider.get_forecast(different)
+
+
+@pytest.mark.asyncio
+async def test_composer_exterior_temperature_default_absent_is_non_regression() -> None:
+    tariffs, solar, _ = provider_inputs()
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs), StaticSolarForecastProvider(solar), now=lambda: NOW
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    assert context.exterior_temperature_forecast is None
+    assert context.thermal is None
+
+
+@pytest.mark.asyncio
+async def test_composer_populates_exterior_temperature_forecast_from_provider() -> None:
+    tariffs, solar, _ = provider_inputs()
+    exterior_provider = StaticExteriorTemperatureProvider(_exterior_temperature_series())
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        exterior_temperature=exterior_provider,
+        now=lambda: NOW,
+    )
+
+    context = composed.get_context(energy_context_for().horizon)
+
+    assert context.exterior_temperature_forecast is not None
+    assert len(context.exterior_temperature_forecast) == context.horizon.slots
+    assert context.exterior_temperature_forecast[0].temperature_c == 5.0
+    assert "exterior_temperature:exterior_temperature_fixture@" in context.source_revision

@@ -13,6 +13,35 @@ funciones de escritura al optimizador. `ComposedEnergyContextProvider` es el
 al MCP Domotics y al skill. La guía de composición está en
 [`docs/contracts.md`](contracts.md).
 
+El host inyecta esa composición mediante el parámetro `energy_context_provider`
+de `build_runtime`/`build_configured_server`
+([`src/domoai/application/runtime_factory.py`](../src/domoai/application/runtime_factory.py),
+[`src/domoai/mcp/configured.py`](../src/domoai/mcp/configured.py)), con el
+mismo patrón que el parámetro `adapter` ya usa para dispositivos: si se
+entrega, el runtime lo usa tal cual y nunca construye los proveedores OMIE/
+Open-Meteo integrados; si se omite, el comportamiento por defecto no cambia.
+Requiere `energy_live=True` y que el objeto entregado exponga
+`get_context(horizon)`; el host es responsable de su propio ciclo de vida
+(por ejemplo, cerrar clientes HTTP internos), igual que ya lo es para un
+`AdapterPort` propio. Contrato completo en
+[`specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md`](../specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md).
+
+Para carga EV, `build_runtime`/`build_configured_server` aceptan además
+`ev_charging_bindings` (una tupla de `EVChargingBinding`, uno por cargador —
+a diferencia de `dispatchable_battery_binding`, que es singular), mismo
+patrón de auto-construcción. Cada binding alimenta tanto el proveedor de
+estado del optimizador como la allowlist y el guard JIT de ejecución; no se
+puede planificar un EV desde configuración y perder accidentalmente esa
+frontera de escritura. Los bindings configurados por
+`DOMOAI_EV_CHARGING_BINDING_PATHS` siguen la misma regla. Contrato completo en
+[`specs/162-ev-charging-provider-simulator/contracts/ev-charging-provider-and-simulator.md`](../specs/162-ev-charging-provider-simulator/contracts/ev-charging-provider-and-simulator.md).
+
+En el mapping específico de Home Assistant, `soc_unit` declara la unidad real
+publicada por la entidad (`kWh` o `%`). Si es `%`, `StateStoreEVProvider`
+convierte el valor a kWh usando la capacidad observada del mismo EV; nunca
+interpreta un número sin unidad por heurística. El laboratorio usa `%` porque
+esa es la entidad MQTT publicada por Home Assistant.
+
 ## Contrato mínimo
 
 La interfaz está definida en
@@ -136,13 +165,21 @@ escenario.
 ### Rutas HA explícitas para batería despachable (Spec 109)
 
 La configuración v1 puede declarar `battery_dispatch_bindings` como un mapa
-credential-free de rutas estáticas. Cada binding fija el `device_id` de
-Home Assistant, las entidades exactas de `battery.soc` (`%`),
+credential-free de rutas estáticas. Cada binding fija las entidades exactas de
+`battery.soc` (`%`),
 `battery.power` (`kW`) y `battery.capacity`, y tres rutas de comando
 `charge`/`discharge`/`stop` con su `entity_id` y `provider_command`.
 
+Para despliegues persistentes se recomienda `identity_claims` con los valores
+normalizados del registro de dispositivos de HA, por ejemplo
+`{"identity_keys": ["mqtt:lab-battery-1"]}`. El `device_id` queda como
+fallback de compatibilidad para instalaciones legacy; no es una identidad
+estable y puede cambiar cuando HA recrea el dispositivo. El provider consulta
+el registro vivo, resuelve exactamente un `device_id` actual y falla cerrado
+si no encuentra ninguna coincidencia o encuentra más de una.
+
 La carga exige que la entidad de capacidad ya tenga un
-`battery_capacity_bindings` compatible y que su `device_id` coincida. Se
+`battery_capacity_bindings` compatible y que su identidad estable coincida. Se
 rechazan campos desconocidos, IDs que no cumplen el formato de entidad HA,
 comandos vacíos/duplicados y referencias cruzadas. No se aceptan tokens,
 payloads de servicio ni aliases por nombre, área o modelo.
@@ -162,7 +199,8 @@ Contrato detallado: [`specs/109-home-assistant-battery-route-binding/contracts/h
 Después de obtener un snapshot mediante `await provider.snapshot()`, el host
 puede ejecutar `provider.validate_battery_dispatch_routes(snapshot)`. La
 validación comprueba, sin refrescar ni escribir, que las entidades declaradas
-por Spec 109 pertenecen al `device_id` exacto, que SOC/potencia/capacidad son
+por Spec 109 pertenecen al mismo dispositivo resuelto (o al `device_id`
+legacy exacto), que SOC/potencia/capacidad son
 actuales, numéricas y tienen las unidades/semánticas esperadas, que la
 capacidad conserva `device_class=energy_storage` y que charge/discharge/stop
 apuntan a capabilities escribibles que exponen los comandos declarados.
@@ -334,6 +372,13 @@ arbitraria, pairing, eliminación, OTA, grupos ni administración del bridge.
 La configuración live y los límites están cubiertos por los tests de contrato
 y el quickstart del laboratorio virtual.
 
+Si `aiomqtt` pierde la conexión mientras espera el siguiente mensaje, su
+`MqttError` se traduce en el `ConnectionError` del contrato de transporte. Así,
+`CompositeAdapter` puede marcar únicamente Zigbee2MQTT como no disponible y su
+bucle de reconexión puede volver a conectar y suscribirse sin tumbar las demás
+fuentes. Un timeout de espera sigue significando `None`; no se confunde con una
+caída del broker.
+
 ## Adapter nativo Matter Server
 
 La implementación [`MatterServerAdapter`](../src/domoai/adapters/matter/adapter.py)
@@ -420,6 +465,23 @@ Zigbee2MQTT, Matter Server y KNX. RTU/ASCII, TLS, scanning,
 funciones vendor-specific y registros arbitrarios quedan fuera de v1. La
 guía ejecutable y el contrato están cubiertos por el quickstart del laboratorio
 y los tests de contrato.
+
+`ModbusCapabilityName` (`adapters/modbus/config.py`) es una lista cerrada;
+además del perfil base, incluye hoy `battery.soc`/`battery.power`/
+`battery.capacity` (Spec 012), `ev.soc`/`ev_charging`/`ev.capacity`/
+`ev.connected` (Spec 162), `water.flow_rate`/`water.total_volume` (Spec
+163, ambas de solo lectura — ningún medidor de agua real tiene comando
+canónico) y `thermal.indoor_temperature`/`thermal.hvac_power` (Spec 165,
+`thermal.hvac_power` dual-purpose lectura+escritura como `battery.power`/
+`ev_charging` — el `HVACActuator` comparte una única capability para
+comando y lectura de potencia, igual que el battery/EV actuator). Añadir
+un dominio nuevo requiere extender ese `Literal` más las tablas
+correspondientes en `mapper.py` (`_UNITS`, tipo de capability, validación
+de decode) — mecánico, no riesgo de diseño nuevo. Si el dominio nuevo tiene
+comando (como EV y ahora thermal, a diferencia de agua que es solo
+lectura), también requiere una rama de encoding en `adapter.py`'s
+`_encode_command` — mismo patrón mecánico, aplicado ahí por primera vez
+para un segundo dominio con comando además de battery/EV.
 
 ## Third-party Adapter SDK v1
 

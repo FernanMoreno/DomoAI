@@ -20,6 +20,15 @@ from domoai.optimizer.energy import (
 from domoai.optimizer.providers import ComposedEnergyContextProvider, StateStoreBatteryProvider
 
 
+class _MatchingControlAdapter(SimulatedHomeAdapter):
+    """Fixture with the provider identity required by the binding under test."""
+
+    adapter_id = "home_assistant"
+
+    async def acquire_control(self, request):
+        raise AssertionError("profile-loading test must not acquire control")
+
+
 def _binding() -> DispatchableBatteryBinding:
     observed_at = datetime(2026, 8, 23, 12, tzinfo=UTC)
     return DispatchableBatteryBinding(
@@ -89,7 +98,7 @@ async def test_standard_runtime_loads_server_owned_battery_profile(tmp_path) -> 
         battery_dispatch_profile_path=profile_path,
     )
 
-    runtime = await build_runtime(settings, adapter=SimulatedHomeAdapter())
+    runtime = await build_runtime(settings, adapter=_MatchingControlAdapter())
     try:
         assert isinstance(runtime.battery_provider, StateStoreBatteryProvider)
         assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)

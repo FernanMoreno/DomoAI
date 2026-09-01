@@ -78,6 +78,108 @@
       },
       "title": "Manual Attestations",
       "type": "object"
+    },
+    "provider_id": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Id"
+    },
+    "runtime_binding_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Runtime Binding Digest"
+    },
+    "takeover_evidence_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Takeover Evidence Digest"
+    },
+    "qualification_expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Qualification Expires At"
+    },
+    "hardware_identity_observed": {
+      "default": false,
+      "title": "Hardware Identity Observed",
+      "type": "boolean"
+    },
+    "firmware_identity_observed": {
+      "default": false,
+      "title": "Firmware Identity Observed",
+      "type": "boolean"
+    },
+    "identity_observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identity Observed At"
+    },
+    "identity_evidence_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identity Evidence Digest"
+    },
+    "manual_check_status": {
+      "additionalProperties": {
+        "enum": [
+          "verified",
+          "not_verified",
+          "not_exercised",
+          "not_applicable"
+        ],
+        "type": "string"
+      },
+      "title": "Manual Check Status",
+      "type": "object"
     }
   },
   "required": [

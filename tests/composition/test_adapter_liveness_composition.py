@@ -51,6 +51,7 @@ async def test_dead_child_reconnects_without_hiding_partial_health() -> None:
     stream = composite.subscribe_events()
     first = await anext(stream)
     assert first.kind == "adapter_diagnostic"
+    assert first.code == "source_unavailable"
     health_during_reconnect = await composite.health()
     assert health_during_reconnect.components is not None
     statuses = {

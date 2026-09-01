@@ -1,0 +1,11 @@
+{
+  "schema_version": "v1",
+  "metric_mappings": {
+    "sensor.domoai_virtual_water_meter_flow_rate": {
+      "value": "water.flow_rate"
+    },
+    "sensor.domoai_virtual_water_meter_total_volume": {
+      "value": "water.total_volume"
+    }
+  }
+}

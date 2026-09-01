@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,11 +28,180 @@ from domoai.domain.models import (
 )
 from domoai.domain.transitions import assert_plan_transition
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import redact_payload
 from domoai.runtime.state_store import StateStoreMetadata
 
 _TABLES = {"devices", "policies", "plans"}
+
+
+class RuntimeOwnershipConflict(RuntimeError):
+    """Another gateway owns, or uncertainly owned, this deployment."""
+
+
+class RuntimeOwnershipRepository:
+    """Durable singleton ownership for one physical gateway deployment."""
+
+    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+        self.database = database
+        self.clock = clock or SystemClock()
+
+    async def acquire(
+        self,
+        *,
+        deployment_id: str,
+        owner_id: str,
+        config_digest: str,
+        uncertain: bool = False,
+    ) -> None:
+        connection = self.database.connection
+        acquired_at = self.clock.now().isoformat()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """SELECT owner_id, status, uncertain
+                   FROM runtime_ownership WHERE deployment_id = ?""",
+                (deployment_id,),
+            ).fetchone()
+            if existing is not None and (
+                existing[1] != "released" or bool(existing[2])
+            ):
+                reason = "uncertain" if bool(existing[2]) else "active"
+                raise RuntimeOwnershipConflict(
+                    f"runtime ownership for {deployment_id} is {reason}"
+                )
+            connection.execute(
+                """INSERT INTO runtime_ownership
+                   (deployment_id, owner_id, config_digest, acquired_at, released_at,
+                    status, uncertain)
+                   VALUES (?, ?, ?, ?, NULL, 'active', ?)
+                   ON CONFLICT(deployment_id) DO UPDATE SET
+                   owner_id=excluded.owner_id,
+                   config_digest=excluded.config_digest,
+                   acquired_at=excluded.acquired_at,
+                   released_at=NULL,
+                   status='active',
+                   uncertain=excluded.uncertain""",
+                (deployment_id, owner_id, config_digest, acquired_at, int(uncertain)),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    async def release(self, *, deployment_id: str, owner_id: str, uncertain: bool = False) -> bool:
+        connection = self.database.connection
+        cursor = connection.execute(
+            """UPDATE runtime_ownership
+               SET released_at = ?, status = ?, uncertain = ?
+               WHERE deployment_id = ? AND owner_id = ? AND status = 'active'""",
+            (
+                self.clock.now().isoformat(),
+                "blocked" if uncertain else "released",
+                int(uncertain),
+                deployment_id,
+                owner_id,
+            ),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+class ApprovalGrantRepository:
+    """Durable grant storage with atomic one-shot consumption."""
+
+    _DATETIME_FIELDS = {
+        "issued_at",
+        "approved_at",
+        "expires_at",
+        "validation_valid_until",
+    }
+
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
+
+    async def save(self, grant: ApprovalGrant) -> None:
+        self.save_sync(grant)
+
+    def save_sync(self, grant: ApprovalGrant) -> None:
+        payload = asdict(grant)
+        serialized = json.dumps(
+            payload,
+            sort_keys=True,
+            default=lambda value: value.isoformat()
+            if isinstance(value, datetime)
+            else value,
+        )
+        self.database.connection.execute(
+            """INSERT INTO approval_grants
+               (approval_id, payload, issued_at, valid_until, status)
+               VALUES (?, ?, ?, ?, 'pending')""",
+            (
+                grant.approval_id,
+                serialized,
+                grant.issued_at.isoformat(),
+                grant.expires_at.isoformat() if grant.expires_at is not None else None,
+            ),
+        )
+        self.database.connection.commit()
+
+    async def get(self, approval_id: str) -> ApprovalGrant | None:
+        return self.get_sync(approval_id)
+
+    def get_sync(self, approval_id: str) -> ApprovalGrant | None:
+        cursor = self.database.connection.execute(
+            "SELECT payload FROM approval_grants WHERE approval_id = ?",
+            (approval_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        for field_name in self._DATETIME_FIELDS:
+            if payload.get(field_name) is not None:
+                payload[field_name] = datetime.fromisoformat(payload[field_name])
+        return ApprovalGrant(**payload)
+
+    async def consume_if_pending(self, approval_id: str, *, now: datetime) -> bool:
+        return self.consume_if_pending_sync(approval_id, now=now)
+
+    def consume_if_pending_sync(self, approval_id: str, *, now: datetime) -> bool:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("approval consumption time must be timezone-aware")
+        cursor = self.database.connection.execute(
+            """UPDATE approval_grants
+               SET status = 'consumed', consumed_at = ?
+               WHERE approval_id = ?
+                 AND status = 'pending'
+                 AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))""",
+            (now.isoformat(), approval_id, now.isoformat()),
+        )
+        self.database.connection.commit()
+        return cursor.rowcount > 0
+
+    def is_pending_sync(self, approval_id: str) -> bool:
+        row = self.database.connection.execute(
+            "SELECT status FROM approval_grants WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        return row is not None and row[0] == "pending"
+
+    def is_consumed_sync(self, approval_id: str) -> bool:
+        row = self.database.connection.execute(
+            "SELECT status FROM approval_grants WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        return row is not None and row[0] == "consumed"
+
+    def nonce_exists_sync(self, nonce: str) -> bool:
+        row = self.database.connection.execute(
+            """SELECT 1 FROM approval_grants
+               WHERE json_extract(payload, '$.assertion_nonce') = ? LIMIT 1""",
+            (nonce,),
+        ).fetchone()
+        return row is not None
 
 
 class SQLiteJsonRepository:
@@ -138,6 +308,9 @@ class AuditEventRepository:
         since: datetime | None = None,
         limit: int = 100,
     ) -> list[AuditEvent]:
+        if limit < 1:
+            raise ValueError("audit event limit must be at least 1")
+        bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
         clauses: list[str] = []
         params: list[Any] = []
         if event_type is not None:
@@ -152,7 +325,6 @@ class AuditEventRepository:
             clauses.append("julianday(created_at) > julianday(?)")
             params.append(since.astimezone(UTC).isoformat())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
         params.append(bounded_limit)
 
         cursor = self.database.connection.execute(
@@ -783,6 +955,22 @@ class RuntimeStatePersistenceRepository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM state_snapshots WHERE device_id = ?", (device_id,))
+            self._save_metadata_without_commit(connection, metadata)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    async def delete_capability(
+        self, device_id: str, capability: str, metadata: StateStoreMetadata
+    ) -> None:
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM state_snapshots WHERE device_id = ? AND capability = ?",
+                (device_id, capability),
+            )
             self._save_metadata_without_commit(connection, metadata)
             connection.commit()
         except Exception:

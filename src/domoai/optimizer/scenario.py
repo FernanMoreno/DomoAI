@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import Field, model_validator
 
 from domoai.domain.models import CapabilityKind, ErrorDetail, ScalarValue, StrictModel
-from domoai.optimizer.energy import BatteryActuator, EnergyContext
+from domoai.optimizer.energy import BatteryActuator, EnergyContext, HVACActuator
 from domoai.optimizer.horizon import Horizon
 from domoai.runtime.registry import DeviceRegistry
 
@@ -23,6 +24,8 @@ __all__ = [
     "validate_scenario",
     "validate_executable_scenario",
 ]
+
+MAX_HORIZON_SLOTS = 7 * 24 * 60
 
 
 class Load(StrictModel):
@@ -163,12 +166,24 @@ class OptimizationScenario(StrictModel):
 
 
 def validate_scenario(
-    scenario: OptimizationScenario, registry: DeviceRegistry
+    scenario: OptimizationScenario,
+    registry: DeviceRegistry,
+    *,
+    max_horizon_slots: int = MAX_HORIZON_SLOTS,
 ) -> list[ErrorDetail]:
     errors: list[ErrorDetail] = []
     horizon_slots = scenario.horizon.slots
     if horizon_slots < 1:
         return [_diagnostic("invalid_horizon", "Horizon does not contain a complete slot")]
+    if max_horizon_slots <= 0:
+        raise ValueError("max_horizon_slots must be positive")
+    if horizon_slots > max_horizon_slots:
+        errors.append(
+            _diagnostic(
+                "horizon_too_large",
+                f"Horizon contains {horizon_slots} slots; maximum is {max_horizon_slots}",
+            )
+        )
     if scenario.energy_context is not None and scenario.energy_context.horizon != scenario.horizon:
         errors.append(
             _diagnostic(
@@ -279,6 +294,9 @@ def validate_scenario(
         battery = scenario.energy_context.battery
         if battery is not None and battery.actuator is not None:
             errors.extend(_validate_battery_actuator(registry, battery.actuator))
+        thermal = scenario.energy_context.thermal
+        if thermal is not None and thermal.actuator is not None:
+            errors.extend(_validate_hvac_actuator(registry, thermal.actuator))
     if scenario.terminal_soc_policy is not None:
         battery = scenario.energy_context.battery if scenario.energy_context else None
         if battery is None:
@@ -379,11 +397,18 @@ def validate_scenario(
             "max_grid_export",
             "battery_min_soc",
             "battery_max_soc",
+            "comfort_temp_min",
+            "comfort_temp_max",
         }:
             errors.append(
                 _diagnostic("unsupported_constraint", f"Unsupported constraint {constraint.type!r}")
             )
-        allowed_units = {"kWh"} if constraint.type.startswith("battery_") else {"W", "kW"}
+        if constraint.type.startswith("battery_"):
+            allowed_units = {"kWh"}
+        elif constraint.type.startswith("comfort_temp_"):
+            allowed_units = {"degC"}
+        else:
+            allowed_units = {"W", "kW"}
         if constraint.unit not in allowed_units:
             errors.append(
                 _diagnostic("invalid_unit", f"Unsupported constraint unit {constraint.unit!r}")
@@ -404,6 +429,15 @@ def validate_scenario(
                     f"Constraint {constraint.type!r} requires a battery profile",
                 )
             )
+        if constraint.type.startswith("comfort_temp_") and (
+            scenario.energy_context is None or scenario.energy_context.thermal is None
+        ):
+            errors.append(
+                _diagnostic(
+                    "missing_thermal_profile",
+                    f"Constraint {constraint.type!r} requires a thermal profile",
+                )
+            )
     for objective in scenario.objectives:
         if objective.name not in {
             "minimize_start",
@@ -418,11 +452,16 @@ def validate_scenario(
 
 
 def validate_executable_scenario(
-    scenario: OptimizationScenario, registry: DeviceRegistry
+    scenario: OptimizationScenario,
+    registry: DeviceRegistry,
+    *,
+    max_horizon_slots: int = MAX_HORIZON_SLOTS,
 ) -> list[ErrorDetail]:
     """Add provider-evidence gates required before physical proposal validation."""
 
-    errors = validate_scenario(scenario, registry)
+    errors = validate_scenario(
+        scenario, registry, max_horizon_slots=max_horizon_slots
+    )
     if not scenario.ev_loads:
         return errors
     context = scenario.energy_context
@@ -479,6 +518,25 @@ def validate_executable_scenario(
                     f"EV {ev_load.device_id!r} requested charge limit exceeds observed limit",
                 )
             )
+        if state.departure_at is not None:
+            departure_at = state.departure_at.astimezone(UTC)
+            if departure_at <= datetime.now(UTC):
+                errors.append(
+                    _diagnostic(
+                        "ev_departure_elapsed",
+                        f"EV {ev_load.device_id!r} departure has already elapsed",
+                    )
+                )
+            deadline_at = scenario.horizon.start.astimezone(UTC) + timedelta(
+                minutes=ev_load.deadline_slot * scenario.horizon.resolution_minutes
+            )
+            if deadline_at > departure_at:
+                errors.append(
+                    _diagnostic(
+                        "ev_departure_after_deadline",
+                        f"EV {ev_load.device_id!r} deadline is later than observed departure",
+                    )
+                )
     return errors
 
 
@@ -634,6 +692,93 @@ def _validate_battery_actuator(
                     _diagnostic(
                         "route_unavailable",
                         f"No executable route is available for battery command {command!r}",
+                    )
+                )
+    return errors
+
+
+def _validate_hvac_actuator(
+    registry: DeviceRegistry, actuator: HVACActuator
+) -> list[ErrorDetail]:
+    device = registry.get(actuator.device_id)
+    if device is None:
+        return [_diagnostic("missing_device", f"Unknown device {actuator.device_id}")]
+    capability = next(
+        (item for item in device.capabilities if item.name == actuator.capability),
+        None,
+    )
+    if capability is None or not capability.writable:
+        return [
+            _diagnostic(
+                "missing_capability",
+                f"Writable capability {actuator.capability!r} is not available on "
+                f"{actuator.device_id}",
+            )
+        ]
+
+    errors: list[ErrorDetail] = []
+    feedback_capability = next(
+        (item for item in device.capabilities if item.name == actuator.power_feedback_capability),
+        None,
+    )
+    if feedback_capability is None or not feedback_capability.readable:
+        errors.append(
+            _diagnostic(
+                "missing_feedback_capability",
+                f"Readable HVAC feedback capability {actuator.power_feedback_capability!r} "
+                f"is not available on {actuator.device_id}",
+            )
+        )
+    else:
+        if feedback_capability.kind is not CapabilityKind.NUMBER:
+            errors.append(
+                _diagnostic(
+                    "invalid_feedback_capability",
+                    "HVAC power feedback capability must be numeric",
+                )
+            )
+        if feedback_capability.unit != actuator.power_unit:
+            errors.append(
+                _diagnostic(
+                    "feedback_unit_mismatch",
+                    f"HVAC power feedback must use {actuator.power_unit}",
+                )
+            )
+        feedback_routes = registry.routes_for(
+            actuator.device_id, actuator.power_feedback_capability
+        )
+        available_feedback_routes = [route for route in feedback_routes if route.available]
+        if len(available_feedback_routes) > 1:
+            errors.append(
+                _diagnostic(
+                    "feedback_route_ambiguous",
+                    "HVAC power feedback must have exactly one available route",
+                )
+            )
+        elif not available_feedback_routes:
+            errors.append(
+                _diagnostic(
+                    "feedback_route_unavailable",
+                    "No available route exists for HVAC power feedback",
+                )
+            )
+    for command, unit in (
+        (actuator.heat_command, actuator.power_unit),
+        (actuator.cool_command, actuator.power_unit),
+        (actuator.stop_command, None),
+    ):
+        errors.extend(
+            _validate_device_capability_command(
+                registry, actuator.device_id, actuator.capability, command, unit
+            )
+        )
+        if command in capability.commands:
+            route = registry.resolve_command_route(actuator.device_id, command)
+            if route.route is None:
+                errors.append(
+                    _diagnostic(
+                        "route_unavailable",
+                        f"No executable route is available for HVAC command {command!r}",
                     )
                 )
     return errors

@@ -1,0 +1,24 @@
+{
+  "schema_version": "v1",
+  "provider_id": "home_assistant",
+  "device_id": "lab.ev_charger",
+  "control_policy": {
+    "owner": "domoai-lab",
+    "native_scheduler_status": "disabled",
+    "allow_native_takeover": false,
+    "lease_seconds": 300
+  },
+  "soc_capability": "ev.soc",
+  "capacity_capability": "ev.capacity",
+  "actuator": {
+    "schema_version": "v1",
+    "device_id": "lab.ev_charger",
+    "capability": "ev_charging",
+    "charge_command": "charge_ev",
+    "stop_command": "stop_ev",
+    "connected_capability": "ev.connected",
+    "departure_capability": null,
+    "max_charge_kw": 7.4,
+    "power_unit": "kW"
+  }
+}

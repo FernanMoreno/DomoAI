@@ -50,6 +50,10 @@ class KnxTransport(Protocol):
 
     async def health(self) -> bool: ...
 
+    def set_group_read_response(
+        self, group_address: str, dpt: str, value: KnxScalar
+    ) -> None: ...
+
 
 class InMemoryKnxTransport:
     """Deterministic KNX transport for contract and integration tests."""
@@ -66,6 +70,16 @@ class InMemoryKnxTransport:
         self._values = {(value.group_address, value.dpt): value for value in self.incoming}
         self.write_state_map: dict[tuple[str, str], tuple[str, str]] = {}
         self._waiter = asyncio.Event()
+
+    def set_group_read_response(
+        self, group_address: str, dpt: str, value: KnxScalar
+    ) -> None:
+        self._values[(group_address, dpt)] = KnxGroupValue(
+            group_address=group_address,
+            dpt=dpt,
+            value=value,
+            observed_at=self._clock.now(),
+        )
 
     async def connect(self) -> None:
         self.connected = True
@@ -147,20 +161,42 @@ class XknxTransport:
         *,
         timeout: float = 5.0,
         gateway_port: int = 3671,
+        route_back: bool = False,
         group_dpts: dict[str, str] | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.gateway_host = gateway_host
         self.timeout = timeout
         self.gateway_port = gateway_port
+        self.route_back = route_back
         self._clock = clock or SystemClock()
         self.group_dpts = dict(group_dpts or {})
         self.writes: list[KnxWrite] = []
         self._xknx: Any = None
         self._callback: Any = None
         self._events: asyncio.Queue[KnxGroupValue] = asyncio.Queue()
+        self._read_responses: dict[str, tuple[str, KnxScalar]] = {}
+
+    def set_group_read_response(
+        self, group_address: str, dpt: str, value: KnxScalar
+    ) -> None:
+        """Register the value returned when the lab facade receives a read.
+
+        This is deliberately a transport-level lab hook.  KNX Virtual has no
+        physical device object for the battery groups, so the host-side
+        facade must answer GroupValueRead telegrams itself.
+        """
+
+        self._read_responses[group_address] = (dpt, value)
 
     async def connect(self) -> None:
+        # Reconnects can be requested after the adapter has lost physical
+        # availability while the KNXnet/IP session object is still present.
+        # Close that session before replacing it; otherwise the old tunnel
+        # keeps its callback/socket and the next discovery can remain
+        # unavailable indefinitely.
+        if self._xknx is not None:
+            await self.disconnect()
         try:
             from xknx import XKNX
             from xknx.io import ConnectionConfig, ConnectionType
@@ -171,6 +207,7 @@ class XknxTransport:
                     connection_type=ConnectionType.TUNNELING,
                     gateway_ip=self.gateway_host,
                     gateway_port=self.gateway_port,
+                    route_back=self.route_back,
                     auto_reconnect=False,
                 )
             )
@@ -253,10 +290,31 @@ class XknxTransport:
 
     def _on_telegram(self, telegram: Any) -> None:
         destination = getattr(telegram, "destination_address", None)
+        payload = getattr(telegram, "payload", None)
         decoded = getattr(telegram, "decoded_data", None)
-        if destination is None or decoded is None:
+        if destination is None:
             return
-        address = getattr(destination, "raw", str(destination))
+        from xknx.telegram.apci import GroupValueRead
+
+        address = str(destination)
+        if isinstance(payload, GroupValueRead):
+            response = self._read_responses.get(address)
+            if response is not None and self._xknx is not None:
+                from xknx.tools import group_value_response
+
+                dpt, value = response
+                group_value_response(
+                    self._xknx,
+                    address,
+                    value,
+                    value_type=dpt,
+                )
+            return
+        if decoded is None:
+            return
+        # xknx exposes GroupAddress.raw as the encoded integer (e.g. 2049),
+        # while the mapper and KNX mapping contract use the textual address
+        # (e.g. ``1/0/1``).  Preserve the protocol representation here.
         dpt = decoded.transcoder.dpt_number_str()
         self._events.put_nowait(
             KnxGroupValue(

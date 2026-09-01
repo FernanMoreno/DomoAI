@@ -24,7 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--docker-bin", default=None)
     subparsers = parser.add_subparsers(dest="operation", required=True)
 
-    up = subparsers.add_parser("up", help="start selected Compose services")
+    up = subparsers.add_parser(
+        "up", help="start selected Compose services and optional WSL bridge"
+    )
     up.add_argument(
         "--services",
         nargs="+",
@@ -32,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_UP_SERVICES,
     )
 
-    status = subparsers.add_parser("status", help="show Compose service status")
+    status = subparsers.add_parser("status", help="show Compose and local service status")
     status.add_argument("--services", nargs="*", choices=sorted(SERVICE_NAMES), default=())
 
     down = subparsers.add_parser("down", help="stop the Compose lab")

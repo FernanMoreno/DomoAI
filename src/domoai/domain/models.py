@@ -140,6 +140,14 @@ class BundleMemberCommitStatus(StrEnum):
 class SourceRef(StrictModel):
     adapter_id: str = Field(min_length=1)
     external_id: str = Field(min_length=1)
+    # Provider-owned device identity is durable across mutable entity IDs
+    # (for example, a Home Assistant entity rename).  It is an identity
+    # anchor only; discovery must still rebuild an executable route.
+    source_device_id: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude_if=lambda value: value is None,
+    )
     external_type: str | None = None
     metadata_digest: str | None = None
 
@@ -198,6 +206,8 @@ class Device(StrictModel):
     capabilities: list[Capability] = Field(default_factory=list)
     availability: AvailabilityStatus = AvailabilityStatus.UNKNOWN
     source_refs: list[SourceRef] = Field(min_length=1)
+    identity_keys: list[str] = Field(default_factory=list)
+    connections: list[str] = Field(default_factory=list)
     last_seen_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -383,6 +393,7 @@ class ValidationResult(StrictModel):
     runtime_revision: str = Field(min_length=1)
     errors: list[ErrorDetail] = Field(default_factory=list)
     digest: str = Field(min_length=1)
+    valid_until: datetime | None = None
     dependencies: PlanDependencies | None = None
 
 
@@ -411,8 +422,36 @@ class Approval(StrictModel):
     scope: str = "plan"
     authentication_context: str | None = None
     session_id: str | None = None
+    bundle_digest: str | None = None
+    recurrence_digest: str | None = None
+    validation_valid_until: datetime | None = None
+    expires_at: datetime | None = None
     window_digest: str | None = None
     schedule_revision: int = Field(default=0, ge=0)
+    approval_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_expiry(self) -> Approval:
+        for field_name, value in (
+            ("validation_valid_until", self.validation_valid_until),
+            ("expires_at", self.expires_at),
+        ):
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"approval {field_name} must be timezone-aware")
+        if (
+            self.validation_valid_until is not None
+            and self.validation_valid_until <= self.approved_at
+        ):
+            raise ValueError("approval validation evidence must outlive approval time")
+        if self.expires_at is not None and self.expires_at <= self.approved_at:
+            raise ValueError("approval expires_at must follow approved_at")
+        if (
+            self.expires_at is not None
+            and self.validation_valid_until is not None
+            and self.expires_at > self.validation_valid_until
+        ):
+            raise ValueError("approval lifetime must not outlive validation evidence")
+        return self
 
 
 class ExecutionOutcome(StrictModel):
@@ -534,15 +573,26 @@ class BundleMemberCommit(StrictModel):
     error_code: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     predecessor_plan_id: str | None = None
+    predecessor_plan_ids: list[str] = Field(default_factory=list, max_length=50)
     predecessor_outcome_digest: str | None = None
 
     @model_validator(mode="after")
     def validate_execute_at(self) -> BundleMemberCommit:
         if self.execute_at is not None and self.execute_at.tzinfo is None:
             raise ValueError("execute_at must be timezone-aware")
-        if self.predecessor_outcome_digest is not None and self.predecessor_plan_id is None:
+        normalized = list(dict.fromkeys(self.predecessor_plan_ids))
+        if self.predecessor_plan_id is not None and self.predecessor_plan_id not in normalized:
+            normalized.insert(0, self.predecessor_plan_id)
+        if any(not item.strip() for item in normalized):
+            raise ValueError("predecessor plan IDs must be non-empty")
+        self.predecessor_plan_ids = normalized
+        if self.predecessor_outcome_digest is not None and not normalized:
             raise ValueError("predecessor outcome digest requires predecessor plan")
         return self
+
+    @property
+    def all_predecessor_plan_ids(self) -> list[str]:
+        return list(self.predecessor_plan_ids)
 
 
 class BundleCommit(StrictModel):
@@ -646,6 +696,21 @@ class AdapterHealth(StrictModel):
     connected: bool
     message: str | None = None
     components: list[AdapterHealth] | None = None
+
+
+class AdapterIdentityObservation(StrictModel):
+    """Provider-observed identity used by attended HIL qualification."""
+
+    hardware_id: str = Field(min_length=1, max_length=200)
+    firmware_version: str = Field(min_length=1, max_length=200)
+    observed_at: datetime
+    source_ref: SourceRef
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> AdapterIdentityObservation:
+        if self.observed_at.tzinfo is None:
+            raise ValueError("adapter identity observed_at must be timezone-aware")
+        return self
 
 
 class AdapterExecutionAck(StrictModel):

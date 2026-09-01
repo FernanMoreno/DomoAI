@@ -1,0 +1,11 @@
+{
+  "schema_version": "v1",
+  "metric_mappings": {
+    "sensor.domoai_virtual_thermostat_indoor_temperature": {
+      "value": "thermal.indoor_temperature"
+    },
+    "sensor.domoai_virtual_thermostat_hvac_power": {
+      "value": "thermal.hvac_power"
+    }
+  }
+}

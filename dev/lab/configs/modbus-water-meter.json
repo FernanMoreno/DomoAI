@@ -1,0 +1,32 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "lab.water_meter",
+      "name": "Virtual Water Meter",
+      "area_id": "lab",
+      "semantic_type": "energy",
+      "manufacturer": "DomoAI Lab",
+      "model": "Deterministic Water Meter",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "water.flow_rate",
+          "state": {
+            "area": "input_register",
+            "address": 0,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "water.total_volume",
+          "state": {
+            "area": "input_register",
+            "address": 2,
+            "data_type": "float32"
+          }
+        }
+      ]
+    }
+  ]
+}

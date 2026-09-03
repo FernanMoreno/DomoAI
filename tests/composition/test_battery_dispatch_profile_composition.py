@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import SecretStr
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.runtime_factory import build_runtime
@@ -133,3 +134,49 @@ async def test_profile_and_programmatic_binding_cannot_be_combined(tmp_path) -> 
             adapter=SimulatedHomeAdapter(),
             dispatchable_battery_binding=_binding(),
         )
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_programmatic_binding_is_not_replaced_by_lab_bootstrap(tmp_path, monkeypatch) -> None:
+    """An explicit HIL binding must win over automatic lab profile discovery."""
+
+    settings = Settings(
+        database_path=tmp_path / "runtime.sqlite3",
+        bootstrap_profile="lab",
+        home_assistant_url="http://127.0.0.1:8123",
+        home_assistant_token=SecretStr("fixture-token"),
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6.0,
+        solar_tilt=30.0,
+        solar_azimuth=0.0,
+        solar_performance_ratio=0.82,
+    )
+    monkeypatch.setattr(
+        "domoai.application.runtime_bootstrap._probe_tcp",
+        lambda host, port: True,
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=_MatchingControlAdapter(),
+        dispatchable_battery_binding=_binding(),
+    )
+    try:
+        assert runtime.dispatchable_battery_binding == _binding()
+        assert runtime.battery_qualification == "software-qualified"
+        ha_candidate = next(
+            candidate
+            for candidate in runtime.bootstrap_manifest.candidates
+            if candidate.provider_id == "home_assistant"
+        )
+        assert not any(
+            path.endswith("dispatchable-battery-lab.json")
+            for path in ha_candidate.operational_paths
+        )
+    finally:
+        await runtime.close()

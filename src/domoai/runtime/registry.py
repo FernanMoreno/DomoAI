@@ -136,11 +136,23 @@ class DeviceRegistry:
     def parent_source_device_for(self, adapter_id: str, source_device_id: str) -> str | None:
         return self._parent_source_devices.get((adapter_id, source_device_id))
 
-    def mark_source_unavailable(self, adapter_id: str) -> None:
+    def mark_source_unavailable(self, adapter_id: str, external_id: str | None = None) -> bool:
+        return self._mark_source_availability(adapter_id, external_id=external_id, available=False)
+
+    def mark_source_available(self, adapter_id: str, external_id: str | None = None) -> bool:
+        return self._mark_source_availability(adapter_id, external_id=external_id, available=True)
+
+    def _mark_source_availability(
+        self, adapter_id: str, *, external_id: str | None, available: bool
+    ) -> bool:
+        changed = False
         for key, routes in self._routes.items():
             updated = [
                 route
-                if route.source_ref.adapter_id != adapter_id
+                if (
+                    route.source_ref.adapter_id != adapter_id
+                    or (external_id is not None and route.source_ref.external_id != external_id)
+                )
                 else CapabilityRoute(
                     canonical_device_id=route.canonical_device_id,
                     capability=route.capability,
@@ -148,14 +160,19 @@ class DeviceRegistry:
                     source_device_id=route.source_device_id,
                     local_canonical_id=route.local_canonical_id,
                     commands=route.commands,
-                    available=False,
+                    available=available,
                     readable=route.readable,
                     writable=route.writable,
                 )
                 for route in routes
             ]
+            changed = changed or any(
+                before.available != after.available
+                for before, after in zip(routes, updated, strict=True)
+            )
             self._routes[key] = updated
             self._refresh_device_availability(key[0])
+        return changed
 
     def _reconcile(
         self,

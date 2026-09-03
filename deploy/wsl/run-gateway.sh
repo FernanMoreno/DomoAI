@@ -18,4 +18,14 @@ if [[ -f "$LAB_ENV_FILE" ]]; then
     done < "$LAB_ENV_FILE"
 fi
 
+# Run the installed entrypoint directly when the project environment exists.
+# Keeping ``uv`` out of the long-lived process tree ensures SIGTERM reaches
+# Python/Uvicorn and the gateway's async finally block can release runtime
+# ownership and close adapters.  The fallback keeps the launcher usable before
+# the virtual environment has been created.
+GATEWAY_BIN="$PROJECT_ROOT/.venv/bin/domoai-mcp-gateway"
+if [[ -x "$GATEWAY_BIN" ]]; then
+    exec "$GATEWAY_BIN"
+fi
+
 exec uv run --project "$PROJECT_ROOT" domoai-mcp-gateway

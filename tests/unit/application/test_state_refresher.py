@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -105,6 +106,47 @@ class _NoopDiscovery:
         return ()
 
 
+class _FilteredDiscovery(_NoopDiscovery):
+    def __init__(self) -> None:
+        super().__init__()
+        self.excluded_adapter_ids: frozenset[str] = frozenset()
+
+    async def refresh_state(
+        self, *, exclude_adapter_ids: frozenset[str] = frozenset()
+    ) -> tuple[object, ...]:
+        self.excluded_adapter_ids = exclude_adapter_ids
+        self.state_refreshes += 1
+        return ()
+
+    async def refresh(
+        self, *, exclude_adapter_ids: frozenset[str] = frozenset()
+    ) -> tuple[object, ...]:
+        self.refreshes += 1
+        return SimpleNamespace(states=())  # type: ignore[return-value]
+
+
+class _EventDrivenCompositeAdapter:
+    adapter_id = "composite"
+    event_driven_state_adapter_ids = frozenset({"knx"})
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(adapter_id=self.adapter_id, connected=True)
+
+
+class _ConfiguredChild:
+    def __init__(self, adapter_id: str) -> None:
+        self.adapter_id = adapter_id
+
+
+class _StaticInventoryCompositeAdapter:
+    adapter_id = "composite"
+    static_inventory_adapter_ids = frozenset({"knx"})
+    adapters = (_ConfiguredChild("knx"), _ConfiguredChild("mqtt"))
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(adapter_id=self.adapter_id, connected=True)
+
+
 @pytest.mark.asyncio
 async def test_runtime_refresher_updates_stable_source_state() -> None:
     clock = FixedClock(datetime(2026, 8, 19, 12, tzinfo=UTC))
@@ -200,3 +242,42 @@ async def test_runtime_refresher_reconciles_inventory_on_configured_cadence() ->
 
     assert discovery.state_refreshes == 2
     assert discovery.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_refresher_excludes_event_driven_sources_from_polling() -> None:
+    discovery = _FilteredDiscovery()
+    refresher = RuntimeStateRefresher(
+        discovery,  # type: ignore[arg-type]
+        StateStore(timedelta(minutes=5)),
+        AuditLog(),
+        interval_seconds=30,
+        adapter=_EventDrivenCompositeAdapter(),  # type: ignore[arg-type]
+    )
+
+    await refresher.refresh_once()
+
+    assert discovery.excluded_adapter_ids == frozenset({"knx"})
+
+
+@pytest.mark.asyncio
+async def test_runtime_refresher_polls_static_sources_on_inventory_refresh() -> None:
+    clock = FixedClock(datetime(2026, 8, 19, 12, tzinfo=UTC))
+    discovery = _FilteredDiscovery()
+    refresher = RuntimeStateRefresher(
+        discovery,  # type: ignore[arg-type]
+        StateStore(timedelta(minutes=5), clock=clock),
+        AuditLog(),
+        interval_seconds=30,
+        inventory_refresh_interval_seconds=60,
+        adapter=_StaticInventoryCompositeAdapter(),  # type: ignore[arg-type]
+        clock=clock,
+    )
+
+    await refresher.refresh_once()
+    clock.set(clock.now() + timedelta(seconds=60))
+    await refresher.refresh_once()
+
+    assert discovery.refreshes == 1
+    assert discovery.state_refreshes == 2
+    assert discovery.excluded_adapter_ids == frozenset({"mqtt"})

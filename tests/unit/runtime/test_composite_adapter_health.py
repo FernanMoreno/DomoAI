@@ -30,6 +30,24 @@ async def test_all_healthy_components_are_listed_as_connected() -> None:
     assert component_ids == {"home_assistant": True, "modbus": True}
 
 
+def test_event_driven_state_polling_is_scoped_to_declared_children() -> None:
+    event_driven = _adapter("knx")
+    event_driven.state_events_are_authoritative = True
+    polled = _adapter("modbus")
+    composite = CompositeAdapter([event_driven, polled])
+
+    assert composite.event_driven_state_adapter_ids == frozenset({"knx"})
+
+
+def test_static_inventory_sources_are_scoped_to_declared_children() -> None:
+    static = _adapter("knx")
+    static.inventory_is_static = True
+    dynamic = _adapter("modbus")
+    composite = CompositeAdapter([static, dynamic])
+
+    assert composite.static_inventory_adapter_ids == frozenset({"knx"})
+
+
 @pytest.mark.asyncio
 async def test_one_down_adapter_is_individually_identifiable() -> None:
     first = _adapter("home_assistant")

@@ -28,6 +28,15 @@ la autenticación del agente no sustituye una aserción de consentimiento
 humano. `/healthz` solo indica liveness y `/readyz` exige lifecycle y adapter
 conectados. Los binds no locales requieren HTTPS y token file.
 
+En la deployment Compose de referencia, Caddy es el único borde publicado.
+El puerto 8124 del gateway queda solo en la red interna, y las rutas públicas
+se limitan a /mcp, /healthz y /readyz. Home Assistant y MQTT se enlazan a
+localhost para operación del host, no como endpoints remotos; sus puertos
+locales por defecto son 8123 y 1883 y pueden cambiarse mediante variables de
+deployment server-owned si el lab virtual ya los ocupa, manteniendo siempre el
+bind loopback. /healthz prueba liveness; /readyz conserva la señal estricta de
+readiness sin que el proxy la transforme.
+
 El gateway compartido aplica bootstrap estricto: si no existe al menos un
 adapter/provider configurado, `domoai-mcp-gateway` falla con un error explícito
 y no selecciona `SimulatedHomeAdapter`. La ruta `domoai-mcp` puede usar el
@@ -35,13 +44,24 @@ simulador únicamente como fixture local explícito. Antes de construir el
 runtime, el builder valida el token file; una credencial ausente o inválida no
 debe abrir SQLite, reclamar ownership ni conectar providers.
 
-Con `DOMOAI_BOOTSTRAP_PROFILE=lab`, el bootstrap puede seleccionar los assets
-canónicos `dispatchable-battery-lab.json` y `ev-charging-lab.json` cuando HA
-local está autenticado y reachable y no hay paths explícitos. Esto solo carga
-bindings server-owned: no infiere rutas, no crea evidencia HIL ni habilita
-production dispatch. El manifest registra esos paths no secretos en
+Con `DOMOAI_BOOTSTRAP_PROFILE=lab`, el bootstrap puede seleccionar el mapping y
+los assets canónicos `dispatchable-battery-lab.json` y
+`ev-charging-lab.json` cuando HA local está autenticado y reachable, tanto si
+el endpoint fue descubierto como si se declaró explícitamente como
+`http://127.0.0.1:8123`, y no hay paths explícitos. Esto solo carga bindings
+server-owned: no infiere rutas, no crea evidencia HIL ni habilita production
+dispatch. El manifest registra esos paths no secretos en
 `operational_paths`, y `/readyz` continúa bloqueando la autoridad física hasta
-qualification válida.
+qualification válida. URLs remotas o endpoints locales inalcanzables no
+seleccionan assets del lab.
+
+En la topología Windows/WSL de KNX Virtual, la IP del upstream de Windows y la
+IP del túnel local no son la misma autoridad. El launcher de `knxd` debe usar
+el endpoint Windows actualmente alcanzable (en WSL2 mirrored suele ser
+`127.0.0.1:3671`) y el gateway DomoAI debe usar `127.0.0.1:3672`. Un túnel
+KNX conectado no implica disponibilidad: discovery/readback debe recibir
+respuestas válidas de las direcciones configuradas. `/readyz` conserva esta
+señal estricta y no se relaja para ocultar una configuración ETS incompleta.
 
 `domotics://runtime` es una resource autenticada de solo lectura con esta forma
 estable v1:
@@ -266,7 +286,10 @@ carga no es utilizable.
 
 La CLI HIL carga un único `DispatchableBatteryBinding` y lo pasa explícitamente
 al composition root; no puede ejecutar el profile B sobre un runtime construido
-con A. Los valores de prueba se limitan al envelope del profile y al ceiling
+con A. Cuando el binding llega como argumento programático, el bootstrap no
+vuelve a auto-seleccionar el profile de batería del lab; si `Settings` contiene
+además un path explícito, la composición lo rechaza como conflicto. Los valores
+de prueba se limitan al envelope del profile y al ceiling
 server-owned del deployment. `takeover_baseline` exige un `TakeoverResult`
 adquirido, con owner/device/provider/capability correctos, baseline observado,
 lease aún vivo y primer comando confirmado.
@@ -369,25 +392,39 @@ pero conserva el diagnóstico y la postura conservadora ante metadata
 incompatible de otra fuente. No se añade migration SQLite: los planes son JSON
 y el campo nuevo tiene default vacío.
 
-## Event pipeline incremental (2026-08-18)
+## Event pipeline incremental (2026-09-03)
 
-Cierra `specs/023-incremental-event-pipeline/`: `RuntimeEventConsumer` ya no
-hace `DiscoveryService.refresh()` completo por cada evento.
+Cierra `specs/174-event-driven-refresh-and-graceful-shutdown/` sobre la base de
+`specs/023-incremental-event-pipeline/`: `RuntimeEventConsumer` ya no hace
+`DiscoveryService.refresh()` completo por cada evento y el refresher no genera
+polling físico redundante para fuentes con eventos autoritativos.
 
-- Eventos `kind="state_changed"` (todos los adapters ya emiten este kind
-  solo para entidades ya conocidas) toman un camino barato: leen valores
-  actuales vía `AdapterPort.read_state()` sobre los `SourceRef` ya conocidos
-  de ese adapter en el registry, sin re-descubrir identidad/capacidades.
-- Cualquier otro kind (`availability_changed`, `device_membership_changed`,
-  `metadata_changed`, `adapter_diagnostic`, o uno no reconocido) sigue
-  disparando `discovery.refresh()` completo exactamente como antes — la
-  ruta rápida es un allowlist, nunca un denylist, para no crear un punto
-  ciego de detección de inventario.
+- Eventos `kind="state_changed"` toman un camino barato. Los adapters que
+  declaran un stream de estado autoritativo (actualmente KNX) transportan la
+  observación recibida dentro del evento y el runtime la persiste directamente,
+  sin ejecutar otra lectura física. Los eventos legacy/no autoritativos pueden
+  leer solo los `SourceRef` conocidos de ese adapter, sin re-descubrir
+  identidad/capacidades. Esto evita el ciclo `GroupValueRead` →
+  `GroupValueResponse` → `StateChangedEvent` en KNX.
+- Los eventos `availability_changed` actualizan la disponibilidad de la fuente
+  y su estado cacheado mediante la frontera compartida, sin reconstruir el
+  inventario. La pérdida de un child de un composite degrada solo esa fuente.
+- Los diagnósticos ordinarios no disparan lecturas físicas globales. Los
+  eventos `device_membership_changed` y `metadata_changed` sí conservan la
+  `discovery.refresh()` completa porque modifican inventario ejecutable o
+  semántica. Un kind desconocido falla cerrado y no hace una lectura amplia.
+- `RuntimeStateRefresher` excluye de `refresh_state()` las fuentes que declaran
+  eventos de estado autoritativos. KNX además declara su inventario estático,
+  por lo que las rediscoveries periódicas no vuelven a enviar
+  `GroupValueRead`; discovery inicial, telegramas del bus y readback explícito
+  siguen siendo válidos.
 - `read_state()` devuelve `device_id` como el external_id crudo del
   adapter, no el canonical id del registry; `_apply_state_only` lo remapea
   vía `registry.canonical_id_for_source(...)` antes de guardar, igual que
   ya hacía `PlanExecutor._readback`.
-- No hay cambios en adapters, `SourceEvent` ni contrato MCP.
+- La extensión interna `payload.states` solo transporta evidencia ya recibida;
+  no cambia el contrato MCP. La fuente sigue siendo responsable de no emitir
+  una observación sin timestamps válidos.
 
 ## Registry reconciliation (2026-08-18)
 

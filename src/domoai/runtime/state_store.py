@@ -344,13 +344,26 @@ class StateStore:
         await self._persist(stale)
         return stale
 
-    async def mark_source_unavailable(self, adapter_id: str) -> list[StateSnapshot]:
-        """Degrade only observations owned by one disconnected source."""
+    async def mark_source_unavailable(
+        self, adapter_id: str, external_id: str | None = None
+    ) -> list[StateSnapshot]:
+        """Degrade observations owned by a source or one source entity.
+
+        Provider availability events can describe either an entire transport
+        (for example, a KNX tunnel) or one entity (for example, a Zigbee
+        device).  Keeping the optional entity boundary here prevents a
+        single device outage from degrading every healthy observation from
+        the same adapter.
+        """
 
         changed: list[StateSnapshot] = []
         affected: set[tuple[str, str]] = set()
         for source_key, snapshot in list(self._source_snapshots.items()):
-            if source_key[2] != adapter_id or snapshot.status is StateStatus.UNAVAILABLE:
+            if (
+                source_key[2] != adapter_id
+                or (external_id is not None and source_key[3] != external_id)
+                or snapshot.status is StateStatus.UNAVAILABLE
+            ):
                 continue
             self._source_snapshots[source_key] = snapshot.model_copy(
                 update={"status": StateStatus.UNAVAILABLE, "value": None}

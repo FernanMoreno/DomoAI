@@ -147,3 +147,60 @@ async def test_refresh_stamps_state_snapshots_from_the_injected_clock() -> None:
     snapshots = await state_store.all()
     assert snapshots
     assert all(snapshot.received_at == fixed.now() for snapshot in snapshots)
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_can_exclude_event_driven_source_adapters() -> None:
+    first = RecordingAdapter(
+        "knx",
+        _shared_device_snapshot(
+            entity_id="knx.power", source_device_id="knx-device", value=True
+        ),
+    )
+    second = RecordingAdapter(
+        "modbus",
+        _shared_device_snapshot(
+            entity_id="modbus.power", source_device_id="modbus-device", value=False
+        ),
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    discovery = DiscoveryService(composite, registry, state_store, AuditLog())
+
+    await composite.connect()
+    await discovery.refresh()
+    states = await discovery.refresh_state(exclude_adapter_ids={"knx"})
+
+    assert states
+    assert {state.source_ref.adapter_id for state in states} == {"modbus"}
+
+
+@pytest.mark.asyncio
+async def test_partial_inventory_refresh_preserves_static_source_inventory() -> None:
+    first = RecordingAdapter(
+        "knx",
+        _shared_device_snapshot(
+            entity_id="knx.power", source_device_id="knx-device", value=True
+        ),
+    )
+    first.inventory_is_static = True
+    second = RecordingAdapter(
+        "modbus",
+        _shared_device_snapshot(
+            entity_id="modbus.power", source_device_id="modbus-device", value=False
+        ),
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([first, second], registry=registry)
+    state_store = StateStore()
+    discovery = DiscoveryService(composite, registry, state_store, AuditLog())
+
+    await composite.connect()
+    await discovery.refresh()
+    await discovery.refresh(exclude_adapter_ids={"knx"})
+
+    assert {ref.adapter_id for device in registry.devices for ref in device.source_refs} == {
+        "knx",
+        "modbus",
+    }

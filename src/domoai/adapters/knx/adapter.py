@@ -45,6 +45,11 @@ class KnxAdapter:
     """Adapt configured KNX group addresses into canonical DomoAI semantics."""
 
     adapter_id = "knx"
+    # KNX state telegrams are consumed continuously by subscribe_events, but a
+    # quiet bus emits no telegram for an unchanged value.  Periodic server-
+    # owned reads are therefore required to maintain freshness evidence.
+    state_events_are_authoritative = False
+    inventory_is_static = True
 
     def __init__(
         self,
@@ -455,6 +460,7 @@ class KnxAdapter:
         received_at = self._clock.now()
         entity_ids: list[str] = []
         capabilities: list[str] = []
+        event_states: list[dict[str, Any]] = []
         for state in decoded:
             key = (state["entity_id"], state["capability"])
             self._states[key] = {
@@ -464,10 +470,35 @@ class KnxAdapter:
             }
             entity_ids.append(state["entity_id"])
             capabilities.append(state["capability"])
+            event_states.append(
+                {
+                    "device_id": self._canonical_by_source[state["entity_id"]],
+                    "capability": state["capability"],
+                    "value": state["value"],
+                    "unit": state["unit"],
+                    "observed_at": state["observed_at"],
+                    # The adapter has received this telegram now. Preserve
+                    # the source observation time while carrying receipt
+                    # evidence through the event without another bus read.
+                    "received_at": max(received_at, state["observed_at"]),
+                    "status": "current" if state.get("available", True) else "unavailable",
+                    "source_ref": {
+                        "adapter_id": self.adapter_id,
+                        "external_id": state["entity_id"],
+                    },
+                }
+            )
         return StateChangedEvent(
+            source_adapter_id=self.adapter_id,
+            occurred_at=value.observed_at,
+            capabilities=sorted(set(capabilities)),
             payload={
                 "entity_ids": sorted(set(entity_ids)),
                 "capabilities": sorted(set(capabilities)),
+                # State-authoritative adapters must carry the observation in
+                # the event. The consumer can persist it without triggering
+                # a GroupValueRead -> GroupValueResponse -> event loop.
+                "states": event_states,
             },
         )
 

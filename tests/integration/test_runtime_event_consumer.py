@@ -39,6 +39,13 @@ class DiscoveryCountingAdapter(SimulatedHomeAdapter):
         return await super().discover()
 
 
+class EventAuthoritativeAdapter(RecordingAdapter):
+    state_events_are_authoritative = True
+
+    async def read_state(self, source_refs):
+        raise AssertionError("authoritative state event must not trigger a physical read")
+
+
 @pytest.mark.asyncio
 async def test_source_event_refreshes_canonical_state_and_revision() -> None:
     adapter = SimulatedHomeAdapter()
@@ -61,6 +68,30 @@ async def test_source_event_refreshes_canonical_state_and_revision() -> None:
     assert state.status is StateStatus.UNAVAILABLE
     assert state_store.runtime_revision == "rev-2"
     assert audit.events[-1].event_type == "source_event_applied"
+
+
+@pytest.mark.asyncio
+async def test_authoritative_state_event_persists_embedded_evidence_without_read() -> None:
+    adapter = EventAuthoritativeAdapter(
+        "knx", source_snapshot(adapter_id="knx", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await adapter.connect()
+    await discovery.refresh()
+    original = (await state_store.all())[0]
+    event = StateChangedEvent(
+        source_adapter_id="knx",
+        payload={"states": [original.model_copy(update={"value": 42.0}).model_dump(mode="python")]},
+    )
+
+    await RuntimeEventConsumer(adapter, discovery, state_store, audit)._apply_event(event)
+
+    updated = await state_store.get(original.device_id, original.capability)
+    assert updated is not None
+    assert updated.value == 42.0
 
 
 @pytest.mark.asyncio
@@ -234,6 +265,56 @@ async def test_burst_of_state_only_events_does_not_repeat_full_discovery() -> No
     state = await state_store.get(light_id, "brightness")
     assert state is not None
     assert state.value == 999 % 100
+
+
+@pytest.mark.asyncio
+async def test_availability_event_does_not_repeat_full_discovery() -> None:
+    adapter = DiscoveryCountingAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    adapter.set_available("cover.bedroom_blind", False)
+    await consumer.consume_once()
+
+    assert adapter.discover_calls == 1
+    cover_id = registry.canonical_id_for_source("fixture", "cover.bedroom_blind")
+    assert cover_id is not None
+    state = await state_store.get(cover_id, "position")
+    assert state is not None
+    assert state.status is StateStatus.UNAVAILABLE
+    light_id = registry.canonical_id_for_source("fixture", "light.living_room_main")
+    assert light_id is not None
+    healthy_state = await state_store.get(light_id, "power")
+    assert healthy_state is not None
+    assert healthy_state.status is StateStatus.CURRENT
+
+    adapter.set_available("cover.bedroom_blind", True)
+    await consumer.consume_once()
+
+    recovered = await state_store.get(cover_id, "position")
+    assert recovered is not None
+    assert recovered.status is StateStatus.CURRENT
+
+
+@pytest.mark.asyncio
+async def test_non_topology_diagnostic_does_not_repeat_full_discovery() -> None:
+    adapter = DiscoveryCountingAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    await consumer._apply_event(
+        AdapterDiagnosticEvent(code="invalid_payload", message="ignored state payload")
+    )
+
+    assert adapter.discover_calls == 1
 
 
 def test_unrecognized_event_kind_is_rejected_at_construction() -> None:

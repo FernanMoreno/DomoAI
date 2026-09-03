@@ -620,7 +620,10 @@ async def build_runtime(
     require_configured_adapter: bool = False,
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
-    bootstrap = RuntimeBootstrap.resolve(resolved_settings)
+    bootstrap = RuntimeBootstrap.resolve(
+        resolved_settings,
+        explicit_battery_binding=dispatchable_battery_binding is not None,
+    )
     resolved_settings = bootstrap.settings
     if energy_context_provider is not None:
         # Spec 161: fail closed before any other startup side effect (no

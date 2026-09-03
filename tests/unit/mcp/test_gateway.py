@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from pathlib import Path
 
 import httpx
@@ -14,7 +15,13 @@ from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
 from domoai.mcp.domotics_server import DomoticsMcpContext
-from domoai.mcp.gateway import GatewayApplication, _close_gateway_safely, create_gateway_server
+from domoai.mcp.gateway import (
+    GatewayApplication,
+    _close_gateway_safely,
+    _handle_sigterm,
+    create_gateway_server,
+    main,
+)
 from domoai.mcp.ortools_server import OrtoolsMcpContext
 from domoai.mcp.unified_server import UnifiedMcpContext
 from domoai.optimizer.cp_sat import CpSatOptimizer
@@ -168,6 +175,31 @@ async def test_gateway_close_finishes_before_cancellation_propagates() -> None:
     await interrupter
 
     assert closed.is_set()
+
+
+def test_gateway_entrypoint_converts_sigterm_into_clean_async_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    observed_handlers: list[object] = []
+
+    def fake_run(coroutine: object) -> None:
+        observed_handlers.append(signal.getsignal(signal.SIGTERM))
+        close = getattr(coroutine, "close", None)
+        assert callable(close)
+        close()
+
+    monkeypatch.setattr("domoai.mcp.gateway.asyncio.run", fake_run)
+
+    main()
+
+    assert observed_handlers == [_handle_sigterm]
+    assert signal.getsignal(signal.SIGTERM) is previous_handler
+
+
+def test_sigterm_handler_raises_interrupt_for_run_gateway_finally() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        _handle_sigterm(signal.SIGTERM, None)
 
 
 async def _build_context() -> UnifiedMcpContext:

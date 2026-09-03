@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
-from domoai.application.discovery_service import DiscoveryService
+from domoai.application.discovery_service import DiscoveryResult, DiscoveryService
+from domoai.domain.models import StateSnapshot
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
@@ -41,6 +42,24 @@ class RuntimeStateRefresher:
             inventory_refresh_interval_seconds or interval_seconds
         )
         self.adapter = adapter or discovery.adapter
+        declared_event_sources = getattr(
+            self.adapter, "event_driven_state_adapter_ids", None
+        )
+        if declared_event_sources is None and getattr(
+            self.adapter, "state_events_are_authoritative", False
+        ):
+            declared_event_sources = {self.adapter.adapter_id}
+        self.event_driven_state_adapter_ids = frozenset(declared_event_sources or ())
+        self.static_inventory_adapter_ids = frozenset(
+            getattr(self.adapter, "static_inventory_adapter_ids", ())
+        )
+        configured_children = getattr(self.adapter, "adapters", None)
+        if configured_children is None:
+            self.configured_adapter_ids = frozenset({self.adapter.adapter_id})
+        else:
+            self.configured_adapter_ids = frozenset(
+                str(child.adapter_id) for child in configured_children
+            )
         self.clock = clock or state_store.clock or SystemClock()
         self.alive = False
         self.refreshes = 0
@@ -57,11 +76,13 @@ class RuntimeStateRefresher:
         states: tuple[object, ...] = ()
         try:
             if self._inventory_refresh_due():
-                result = await self.discovery.refresh()
-                states = tuple(result.states)
+                result = await self._refresh_inventory()
+                if result is not None:
+                    states = tuple(result.states)
+                states = (*states, *await self._refresh_static_state())
                 self.last_inventory_refresh_at = self.clock.now()
             else:
-                states = await self.discovery.refresh_state()
+                states = await self._refresh_polled_state()
             await self._mark_disconnected_sources()
         except Exception as error:  # noqa: BLE001 - refresh must not kill the runtime
             self.last_error = str(error)[:200]
@@ -75,6 +96,39 @@ class RuntimeStateRefresher:
     def _inventory_refresh_due(self) -> bool:
         age = (self.clock.now() - self.last_inventory_refresh_at).total_seconds()
         return age >= self.inventory_refresh_interval_seconds
+
+    async def _refresh_polled_state(self) -> tuple[StateSnapshot, ...]:
+        if self.event_driven_state_adapter_ids:
+            return await self.discovery.refresh_state(
+                exclude_adapter_ids=self.event_driven_state_adapter_ids
+            )
+        return await self.discovery.refresh_state()
+
+    async def _refresh_static_state(self) -> tuple[StateSnapshot, ...]:
+        """Refresh static sources that still need real freshness evidence."""
+
+        pollable_static_ids = (
+            self.static_inventory_adapter_ids - self.event_driven_state_adapter_ids
+        )
+        if not pollable_static_ids:
+            return ()
+        excluded_adapter_ids = self.configured_adapter_ids - pollable_static_ids
+        return await self.discovery.refresh_state(
+            exclude_adapter_ids=excluded_adapter_ids
+        )
+
+    async def _refresh_inventory(self) -> DiscoveryResult | None:
+        if self.static_inventory_adapter_ids:
+            dynamic_ids = self.configured_adapter_ids - self.static_inventory_adapter_ids
+            if not dynamic_ids:
+                # There is no dynamic inventory to reconcile. Static sources
+                # are refreshed separately for state evidence below; do not
+                # issue a periodic physical inventory scan.
+                return None
+            return await self.discovery.refresh(
+                exclude_adapter_ids=self.static_inventory_adapter_ids
+            )
+        return await self.discovery.refresh()
 
     async def _mark_disconnected_sources(self) -> None:
         """Project partial composite health loss into source-owned state."""
@@ -93,7 +147,7 @@ class RuntimeStateRefresher:
             ]
         changed = []
         for source_id in dict.fromkeys(source_ids):
-            changed.extend(await self.state_store.mark_source_unavailable(source_id))
+            changed.extend(await self._mark_source_unavailable(source_id))
         if changed:
             self.audit.append(
                 event_type="runtime_state_source_unavailable",
@@ -131,7 +185,7 @@ class RuntimeStateRefresher:
         changed = []
         try:
             for source_id in source_ids:
-                changed.extend(await self.state_store.mark_source_unavailable(source_id))
+                changed.extend(await self._mark_source_unavailable(source_id))
         except Exception as state_error:  # noqa: BLE001 - preserve diagnostic context
             error = RuntimeError(f"{error}; unavailable marking failed: {state_error}")
         self.audit.append(
@@ -140,6 +194,20 @@ class RuntimeStateRefresher:
             subject_id=self.adapter.adapter_id,
             payload={"error": str(error)[:200], "unavailable_states": len(changed)},
         )
+
+    async def _mark_source_unavailable(self, source_id: str) -> list[StateSnapshot]:
+        """Use the shared availability boundary, with a test-double fallback."""
+
+        apply_availability = getattr(self.discovery, "apply_source_availability", None)
+        if callable(apply_availability):
+            return list(await apply_availability(source_id, available=False))
+        # Small discovery doubles used by focused refresher tests predate the
+        # shared boundary.  Preserve their state-only behavior without making
+        # the production path duplicate registry/revision handling.
+        registry = getattr(self.discovery, "registry", None)
+        if registry is not None:
+            registry.mark_source_unavailable(source_id)
+        return await self.state_store.mark_source_unavailable(source_id)
 
 
 __all__ = ["RuntimeStateRefresher"]

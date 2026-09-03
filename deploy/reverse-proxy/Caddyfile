@@ -1,10 +1,20 @@
-# Replace the hostname and certificate policy for the deployment.
-mcp.example.test {
+# Replace the certificate policy for the deployment. The hostname is supplied
+# by DOMOAI_CADDY_HOSTNAME in Compose.
+{$DOMOAI_CADDY_HOSTNAME} {
     tls internal
 
     @mcp path /mcp /mcp/*
-    reverse_proxy @mcp gateway:8124
+    handle @mcp {
+        reverse_proxy gateway:8124
+    }
 
     @health path /healthz /readyz
-    reverse_proxy @health gateway:8124
+    handle @health {
+        reverse_proxy gateway:8124
+    }
+
+    # Never turn a future gateway route into an accidental public endpoint.
+    handle {
+        respond 404
+    }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -187,5 +188,21 @@ async def run_gateway() -> None:
         await _close_gateway_safely(gateway)
 
 
+def _handle_sigterm(_signum: int, _frame: Any) -> None:
+    """Make Uvicorn's post-capture SIGTERM unwind ``run_gateway`` cleanup."""
+
+    raise KeyboardInterrupt
+
+
 def main() -> None:
-    asyncio.run(run_gateway())
+    # Uvicorn handles SIGTERM while serving, then re-raises it after restoring
+    # the previous handler.  If that previous handler is the OS default, the
+    # process exits before ``run_gateway`` reaches its async ``finally`` and
+    # the durable runtime owner remains falsely active.  Keeping this handler
+    # installed as the previous handler makes the re-raised signal unwind the
+    # gateway cleanup path instead.
+    previous_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        asyncio.run(run_gateway())
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)

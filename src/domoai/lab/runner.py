@@ -233,9 +233,10 @@ class LabRunner:
         return selected
 
     def _environment(self, *, include_local_env: bool) -> dict[str, str]:
-        environment = dict(os.environ)
-        if include_local_env:
-            environment.update(parse_env_file(self.config.resolved_env_file()))
+        environment = (
+            parse_env_file(self.config.resolved_env_file()) if include_local_env else {}
+        )
+        environment.update(os.environ)
         return environment
 
     def _deterministic_environment(self) -> dict[str, str]:

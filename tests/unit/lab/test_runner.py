@@ -95,6 +95,21 @@ def test_up_selects_existing_profiles_and_passes_env_only_to_child(tmp_path: Pat
     assert calls[0][1]["DOMOAI_HOME_ASSISTANT_TOKEN"] == "secret-value"
 
 
+def test_process_environment_overrides_local_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("DOMOAI_KNX_GATEWAY_HOST=old-wsl-address\n", encoding="utf-8")
+    monkeypatch.setenv("DOMOAI_KNX_GATEWAY_HOST", "127.0.0.1")
+    runner = LabRunner(
+        LabConfig(repo_root=tmp_path, compose_file=tmp_path / "compose.yaml", env_file=env_file)
+    )
+
+    environment = runner._environment(include_local_env=True)
+
+    assert environment["DOMOAI_KNX_GATEWAY_HOST"] == "127.0.0.1"
+
+
 def test_unknown_service_is_rejected_before_process_launch(tmp_path: Path) -> None:
     calls: list[Sequence[str]] = []
     runner = LabRunner(

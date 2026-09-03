@@ -55,6 +55,21 @@ there is no automatic takeover after an uncertain owner.
 The network server and stdio compatibility path use the same server builder and
 the same lifecycle owner. No MCP client can call an adapter directly.
 
+If a gateway exits without clearing its durable owner record, recovery is an
+offline operator action, never an MCP operation. After verifying that no live
+gateway holds the port, run `domoai-admin runtime release-stale-owner` with
+the exact recorded deployment and owner IDs. The command acquires the same
+SQLite advisory lock non-blocking and refuses both live ownership and owner-ID
+mismatch; it never deletes data or takes over a live runtime. Startup then
+performs the normal recovery and actuator-control reconciliation.
+
+For the Docker deployment, Caddy is the only host-published MCP edge. The
+gateway listens on 8124 only on the private Compose network; clients use the
+HTTPS proxy URL and /mcp path. Home Assistant and MQTT are localhost-bound
+operator services, not public MCP routes. /healthz is the edge liveness probe;
+/readyz is forwarded unchanged and can remain 503 when the runtime is not
+ready.
+
 The configured builder validates the client-token file before opening runtime
 resources. Local fixture construction is intentionally separate and must be
 requested explicitly by development/test code.

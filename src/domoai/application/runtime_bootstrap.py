@@ -73,6 +73,7 @@ class RuntimeBootstrap:
         probe: Probe | None = None,
         now: datetime | str | None = None,
         project_root: Path | None = None,
+        explicit_battery_binding: bool = False,
     ) -> RuntimeBootstrapResult:
         resolved_at = _coerce_now(now)
         manifest = RuntimeBootstrapManifest(
@@ -88,7 +89,13 @@ class RuntimeBootstrap:
         candidates: list[BootstrapCandidate] = []
 
         candidates.append(
-            cls._home_assistant(settings, updates, probe, root)
+            cls._home_assistant(
+                settings,
+                updates,
+                probe,
+                root,
+                explicit_battery_binding=explicit_battery_binding,
+            )
         )
         candidates.append(
             cls._simple_endpoint(
@@ -138,6 +145,8 @@ class RuntimeBootstrap:
         updates: dict[str, object],
         probe: Probe,
         root: Path,
+        *,
+        explicit_battery_binding: bool = False,
     ) -> BootstrapCandidate:
         endpoint, port = cls._LAB_CANDIDATES["home_assistant"]
         if settings.home_assistant_url is not None:
@@ -150,12 +159,39 @@ class RuntimeBootstrap:
                     operational_paths=[],
                     reason_code="credentials_missing",
                 )
+            mapping = settings.home_assistant_mapping_path
+            operational_paths: list[str] = []
+            # An explicit endpoint still participates in the opt-in lab
+            # bootstrap when it is the exact authenticated local HA endpoint.
+            # This keeps launcher behavior consistent with automatic endpoint
+            # discovery without allowing a remote URL or an unreachable local
+            # service to select actuator assets.
+            parsed = urlparse(settings.home_assistant_url)
+            if (
+                cls._is_allowlisted_lab_home_assistant(settings.home_assistant_url)
+                and parsed.hostname is not None
+                and probe(parsed.hostname, parsed.port or 8123)
+            ):
+                if mapping is None:
+                    mapping = _lab_mapping(root, "home-assistant-lab.json")
+                    if mapping is not None:
+                        updates["home_assistant_mapping_path"] = mapping
+                operational_paths = _auto_configure_lab_operational_paths(
+                    settings,
+                    updates,
+                    root,
+                    skip_battery_profile=explicit_battery_binding,
+                )
             return BootstrapCandidate(
                 provider_id="home_assistant",
                 endpoint=_safe_endpoint(settings.home_assistant_url),
                 status="configured",
-                mapping_path=_safe_path(settings.home_assistant_mapping_path),
-                operational_paths=_configured_operational_paths(settings),
+                mapping_path=_safe_path(mapping),
+                operational_paths=(
+                    operational_paths
+                    if operational_paths
+                    else _configured_operational_paths(settings)
+                ),
                 reason_code="explicit_configuration",
             )
         if settings.home_assistant_token is None:
@@ -176,7 +212,12 @@ class RuntimeBootstrap:
         mapping = _lab_mapping(root, "home-assistant-lab.json")
         if settings.home_assistant_mapping_path is None and mapping is not None:
             updates["home_assistant_mapping_path"] = mapping
-        operational_paths = _auto_configure_lab_operational_paths(settings, updates, root)
+        operational_paths = _auto_configure_lab_operational_paths(
+            settings,
+            updates,
+            root,
+            skip_battery_profile=explicit_battery_binding,
+        )
         return BootstrapCandidate(
             provider_id="home_assistant",
             endpoint=endpoint,
@@ -184,6 +225,26 @@ class RuntimeBootstrap:
             mapping_path=_safe_path(settings.home_assistant_mapping_path or mapping),
             operational_paths=operational_paths,
             reason_code="allowlisted_local_endpoint",
+        )
+
+    @staticmethod
+    def _is_allowlisted_lab_home_assistant(value: str) -> bool:
+        """Recognize only the repository-owned local HA lab endpoint."""
+
+        parsed = urlparse(value)
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "localhost"}
+            and port == 8123
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path in {"", "/"}
+            and parsed.query == ""
+            and parsed.fragment == ""
         )
 
     @classmethod
@@ -370,6 +431,8 @@ def _auto_configure_lab_operational_paths(
     settings: Settings,
     updates: dict[str, object],
     project_root: Path,
+    *,
+    skip_battery_profile: bool = False,
 ) -> list[str]:
     """Select only the repository-owned lab actuator contracts.
 
@@ -381,13 +444,19 @@ def _auto_configure_lab_operational_paths(
     """
 
     paths: list[str] = []
-    if settings.battery_dispatch_profile_path is None:
+    if settings.battery_dispatch_profile_path is not None:
+        # Preserve an explicitly configured path in diagnostics.  The
+        # composition root still rejects combining it with a programmatic
+        # binding, so this is not an authority bypass.
+        paths.append(str(settings.battery_dispatch_profile_path))
+    elif not skip_battery_profile:
+        # A caller-provided binding is already the exact runtime authority.
+        # When it exists, lab convenience discovery must not reintroduce a
+        # second profile or make the manifest diverge from the runtime.
         battery = _lab_mapping(project_root, "dispatchable-battery-lab.json")
         if battery is not None:
             updates["battery_dispatch_profile_path"] = battery
             paths.append(str(battery))
-    else:
-        paths.append(str(settings.battery_dispatch_profile_path))
 
     if settings.ev_charging_binding_paths:
         paths.extend(str(path) for path in settings.ev_charging_binding_paths)

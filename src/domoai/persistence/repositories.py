@@ -40,6 +40,14 @@ class RuntimeOwnershipConflict(RuntimeError):
     """Another gateway owns, or uncertainly owned, this deployment."""
 
 
+class RuntimeOwnershipRecoveryError(RuntimeError):
+    """Sanitized failure while recovering a stale runtime owner."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class RuntimeOwnershipRepository:
     """Durable singleton ownership for one physical gateway deployment."""
 
@@ -106,6 +114,40 @@ class RuntimeOwnershipRepository:
         )
         connection.commit()
         return cursor.rowcount > 0
+
+    async def release_stale(self, *, deployment_id: str, owner_id: str) -> bool:
+        """Release an owner only after an administrator has acquired the DB lock.
+
+        The caller must hold :meth:`SQLiteDatabase.advisory_lock` before
+        invoking this method.  Comparing the recorded owner ID prevents a
+        delayed recovery command from releasing a newer runtime lease.
+        """
+
+        connection = self.database.connection
+        row = connection.execute(
+            """SELECT owner_id, status, uncertain
+               FROM runtime_ownership WHERE deployment_id = ?""",
+            (deployment_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeOwnershipRecoveryError("runtime_owner_not_found")
+        if row[0] != owner_id:
+            raise RuntimeOwnershipRecoveryError("runtime_owner_mismatch")
+        if row[1] == "released" and not bool(row[2]):
+            return False
+        if row[1] not in {"active", "blocked"}:
+            raise RuntimeOwnershipRecoveryError("runtime_owner_invalid")
+        cursor = connection.execute(
+            """UPDATE runtime_ownership
+               SET released_at = ?, status = 'released', uncertain = 0
+               WHERE deployment_id = ? AND owner_id = ?
+                 AND status IN ('active', 'blocked')""",
+            (self.clock.now().isoformat(), deployment_id, owner_id),
+        )
+        connection.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeOwnershipRecoveryError("runtime_owner_changed")
+        return True
 
 
 class ApprovalGrantRepository:

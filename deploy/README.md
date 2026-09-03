@@ -22,6 +22,33 @@ Virtual and ETS stay on Windows; the WSL `knxd` bridge remains the only client
 of KNX Virtual's upstream `172.26.80.1:3671`, while DomoAI uses the separate
 bridge endpoint on UDP `3672`.
 
+## Deployment preflight
+
+Before starting the gateway, run the operator-only static gate from the
+repository root:
+
+```bash
+uv run domoai-admin deployment preflight
+```
+
+It validates `deploy/gateway.env`, `deploy/clients.json`, the Compose service
+boundary and the Caddy allowlist without starting containers, contacting
+Home Assistant/MQTT/KNX, changing databases or touching `dev/lab/**`. It emits
+sanitized JSON and exits `0` only when the checks pass. A fresh checkout is
+expected to fail until the operator creates the ignored `gateway.env`, client
+hash document and host-side configuration files.
+
+After Docker, WSL and the Windows KNX endpoint are deliberately available,
+topology checks are opt-in:
+
+```bash
+uv run domoai-admin deployment preflight --network
+```
+
+This only checks bounded TCP reachability; it does not send KNX group writes,
+battery commands or Home Assistant service calls. Real CA/DNS/firewall setup,
+credentials and hardware qualification remain separate deployment gates.
+
 ## Native or WSL
 
 ```bash
@@ -44,7 +71,8 @@ token file and an HTTPS public URL. `deploy/wsl/run-gateway.sh` and
 ```bash
 cp deploy/gateway.env.example deploy/gateway.env
 # Create deploy/clients.json; set DOMOAI_HOME_ASSISTANT_TOKEN after onboarding HA.
-docker compose -f deploy/compose.yaml up -d --build mqtt homeassistant gateway
+docker compose --env-file deploy/gateway.env -f deploy/compose.yaml up -d --build
+docker compose --env-file deploy/gateway.env -f deploy/compose.yaml ps
 curl -k https://mcp.example.test/readyz
 ```
 
@@ -78,12 +106,24 @@ Human approval remains a separate trusted-host assertion.
 
 ## TLS and network boundary
 
-Use a trusted reverse proxy or equivalent TLS terminator for any non-local
-client. The example Caddyfile forwards only MCP and health routes and uses an
-internal certificate for a private network. Replace it with a certificate
-issued by the deployment's trusted CA when clients do not trust Caddy's
-internal CA. Restrict firewall access to the proxy and never expose KNXnet/IP,
-Home Assistant or MQTT directly to the Internet.
+Compose runs Caddy as the only host-published edge. The gateway port 8124 is
+internal to the Compose network, while Home Assistant and MQTT are bound to
+localhost for operator access only. Their host ports default to 8123 and 1883
+and can be changed with `DOMOAI_HOME_ASSISTANT_HOST_PORT` and
+`DOMOAI_MQTT_HOST_PORT` when the virtual lab already owns those ports; the
+bind remains loopback-only. The example Caddyfile forwards only MCP and health
+routes and uses an internal certificate for a private network.
+Replace it with a certificate issued by the deployment's trusted CA when
+clients do not trust Caddy's internal CA. Restrict firewall access to the
+proxy and never expose KNXnet/IP, Home Assistant or MQTT directly to the
+Internet.
+
+The hostname is controlled by DOMOAI_CADDY_HOSTNAME and must agree with
+DOMOAI_MCP_PUBLIC_URL. The default internal certificate is suitable only for a
+private lab network; external agents need a trusted certificate/CA and a
+firewall policy. Readiness remains an application signal: the proxy healthcheck
+uses /healthz so a temporary adapter/readiness failure does not create a proxy
+restart loop. /readyz is still proxied unchanged and may return 503.
 
 ## Client configuration
 
@@ -120,6 +160,31 @@ Readiness is intentionally stricter than liveness: `/healthz` proves the
 process responds, while `/readyz` requires the runtime lifecycle and adapter
 health to be active. An ownership conflict or adapter degradation keeps the
 gateway out of ready state and does not trigger an automatic takeover.
+
+### Recovering a stale runtime owner
+
+If startup reports an ownership conflict, first verify that no gateway process
+is running and that no process is listening on the configured gateway port.
+Do not delete the SQLite database, `-wal`/`-shm` files or the ownership row.
+Read the recorded owner ID from the deployment database, then run the
+operator-only recovery command with that exact ID while the gateway is
+stopped:
+
+```bash
+uv run domoai-admin runtime release-stale-owner \
+  --database data/domoai.sqlite3 \
+  --deployment-id default \
+  --owner-id <recorded-owner-id>
+```
+
+The command takes the same non-blocking SQLite advisory lock used by the
+gateway. It refuses with `runtime_owner_active` if a live owner exists and
+with `runtime_owner_mismatch` if the recorded ID changed, so it cannot take
+over a newer process accidentally. Releasing this durable record is only an
+administrative recovery operation; it is not evidence that a latched actuator
+is stopped. On the next startup the normal plan recovery and physical control
+reconciliation still run. For Docker, execute the same command in the
+maintenance container with the database path `/app/data/domoai.sqlite3`.
 
 ## Backup and restore
 
@@ -176,3 +241,26 @@ provided by this command and must be supplied by the deployment environment.
 For native Linux/WSL, use the same `domoai-admin` commands with paths on a
 protected filesystem. Do not place `--output-dir` below the live database's
 parent directory and do not run restore while the gateway process is active.
+
+### KNX Virtual on Windows with WSL `knxd`
+
+When KNX Virtual/ETS runs on Windows and `knxd` runs in the same WSL instance,
+keep the two network hops explicit. `knxd` connects upstream to Windows through
+WSL loopback, while DomoAI connects downstream to the local `knxd` tunnel:
+
+```bash
+DOMOAI_KNX_KV_HOST=127.0.0.1 \
+  bash dev/lab/knx-gateway/run-wsl.sh
+
+DOMOAI_KNX_GATEWAY_HOST=127.0.0.1 \
+  bash deploy/wsl/run-gateway.sh
+```
+
+ETS/KNX Virtual still uses its Windows-side KNXnet/IP port `3671`; the WSL
+bridge remains on `3672`. Do not reuse an old WSL address such as
+`172.26.80.1` or `172.26.93.253` after a networking-mode change. If the
+gateway starts before `knxd`, restart the gateway after `knxd` is listening so
+the initial KNX discovery runs against the live tunnel. A connected tunnel is
+not sufficient for readiness: configured group addresses must also provide
+valid readback, and a lab/software-qualified battery must remain below
+production `/readyz` qualification by design.

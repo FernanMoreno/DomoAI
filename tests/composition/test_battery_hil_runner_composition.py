@@ -99,6 +99,14 @@ class BatteryFixtureAdapter(RecordingAdapter):
         )
 
 
+class DeferredFirstCommandBatteryFixtureAdapter(BatteryFixtureAdapter):
+    """Provider that confirms takeover only after executor readback."""
+
+    async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
+        result = await super().acquire_control(request)
+        return result.model_copy(update={"first_command_confirmed": False, "confirmed_at": None})
+
+
 class WrongProviderBaselineAdapter(BatteryFixtureAdapter):
     async def acquire_control(self, request: ControlTakeoverRequest):
         result = await super().acquire_control(request)
@@ -336,6 +344,37 @@ async def test_hil_runner_marks_fixture_evidence_non_qualifying_without_manual_p
     # artifact, not just a Python object shaped like one.
     reloaded = BatteryHILEvidence.model_validate_json(evidence.model_dump_json())
     assert not reloaded.qualifies(binding)
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_hil_runner_uses_executor_confirmation_for_deferred_takeover(tmp_path) -> None:
+    adapter = DeferredFirstCommandBatteryFixtureAdapter("fixture", _battery_snapshot())
+    probe = await build_runtime(_settings(tmp_path / "hil-probe.sqlite3"), adapter=adapter)
+    device_id = _battery_device_id(probe)
+    await probe.close()
+    binding = _binding(device_id)
+    runtime = await build_runtime(
+        _settings(tmp_path / "hil-runtime.sqlite3"),
+        adapter=adapter,
+        dispatchable_battery_binding=binding,
+    )
+    try:
+        evidence = await run_battery_hil(
+            runtime,
+            binding=binding,
+            test_charge_kw=0.5,
+            test_discharge_kw=0.5,
+            hardware_id="fixture-serial-1",
+            firmware_version="0.0.1-fixture",
+            test_software_version="test-sha",
+            manual_attestations=_ATTESTATIONS,
+        )
+    finally:
+        await runtime.close()
+
+    assert evidence.checks["takeover_baseline"] is True
+    assert evidence.observations["takeover_baseline"]["first_command_confirmed"] is False
 
 
 @pytest.mark.composition

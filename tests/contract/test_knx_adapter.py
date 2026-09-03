@@ -16,6 +16,10 @@ from domoai.runtime.control_takeover import ControlTakeoverRequest
 from tests.fixtures.knx import group_values, mapping_payload
 
 
+def test_knx_idle_event_stream_does_not_authorize_freshness() -> None:
+    assert KnxAdapter.state_events_are_authoritative is False
+
+
 def battery_mapping_payload() -> dict[str, object]:
     return {
         "schema_version": "v1",

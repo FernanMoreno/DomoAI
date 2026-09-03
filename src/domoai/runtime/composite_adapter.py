@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from itertools import count
 from typing import Any, cast
 
@@ -90,6 +90,31 @@ class CompositeAdapter:
         return self._coalesced_events_total
 
     @property
+    def event_driven_state_adapter_ids(self) -> frozenset[str]:
+        """Return child sources whose state is carried by their event stream.
+
+        The refresher uses this as a polling exclusion only.  It does not
+        weaken readback or execution-time reads, and a lost event stream still
+        degrades the source so freshness gates fail closed.
+        """
+
+        return frozenset(
+            adapter.adapter_id
+            for adapter in self.adapters
+            if getattr(adapter, "state_events_are_authoritative", False)
+        )
+
+    @property
+    def static_inventory_adapter_ids(self) -> frozenset[str]:
+        """Return child sources whose executable inventory is configuration-owned."""
+
+        return frozenset(
+            adapter.adapter_id
+            for adapter in self.adapters
+            if getattr(adapter, "inventory_is_static", False)
+        )
+
+    @property
     def reconnect_metrics(self) -> dict[str, int]:
         return {
             "attempts_total": self._reconnect_attempts_total,
@@ -132,7 +157,22 @@ class CompositeAdapter:
         self._connected.clear()
 
     async def discover(self) -> AdapterSnapshot:
-        candidates = [adapter for adapter in self.adapters if adapter.adapter_id in self._connected]
+        return await self._discover(frozenset())
+
+    async def discover_excluding(
+        self, exclude_adapter_ids: Collection[str]
+    ) -> AdapterSnapshot:
+        """Discover dynamic children while preserving excluded source inventory."""
+
+        return await self._discover(frozenset(exclude_adapter_ids))
+
+    async def _discover(self, exclude_adapter_ids: frozenset[str]) -> AdapterSnapshot:
+        candidates = [
+            adapter
+            for adapter in self.adapters
+            if adapter.adapter_id in self._connected
+            and adapter.adapter_id not in exclude_adapter_ids
+        ]
         results = await asyncio.gather(
             *(adapter.discover() for adapter in candidates), return_exceptions=True
         )

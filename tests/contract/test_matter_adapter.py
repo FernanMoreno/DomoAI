@@ -172,6 +172,36 @@ async def test_adapter_emits_typed_state_and_sanitized_diagnostics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_state_polls_matter_server_attributes_for_fresh_evidence() -> None:
+    transport = InMemoryMatterTransport(
+        nodes=[node_snapshot(1001, profile="dimmable_light", on=True, level=127)],
+        server_info=server_info(),
+        responses={"read_attribute": {"1/6/0": False, "1/8/0": 64}},
+    )
+    adapter = MatterServerAdapter(transport, discovery_timeout=0.01)
+    await adapter.connect()
+    await adapter.discover()
+
+    states = await adapter.read_state(
+        [SourceRef(adapter_id="matter", external_id="node:1001/endpoint:1")]
+    )
+
+    assert {state.capability: state.value for state in states} == {
+        "power": False,
+        "brightness": 25,
+    }
+    assert [request.command for request in transport.requests] == [
+        "start_listening",
+        "read_attribute",
+        "read_attribute",
+    ]
+    assert {request.args["attribute_path"] for request in transport.requests[1:]} == {
+        "1/6/0",
+        "1/8/0",
+    }
+
+
+@pytest.mark.asyncio
 async def test_adapter_publishes_exact_bounded_matter_commands_and_idempotency() -> None:
     transport = InMemoryMatterTransport(nodes=node_snapshots(1), server_info=server_info())
     adapter = MatterServerAdapter(transport, discovery_timeout=0.01)

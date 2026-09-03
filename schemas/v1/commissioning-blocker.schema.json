@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "description": "A stable reason why a candidate needs an explicit operator decision.",
+  "properties": {
+    "code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "capability": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Capability"
+    },
+    "detail": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Detail",
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "detail"
+  ],
+  "title": "CommissioningBlocker",
+  "type": "object"
+}

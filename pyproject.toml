@@ -23,8 +23,11 @@ dependencies = [
 
 [project.scripts]
 domoai-mcp = "domoai.mcp.stdio:main"
+domoai-mcp-gateway = "domoai.mcp.gateway:main"
+domoai-mcp-probe = "domoai.mcp.probe:main"
 domoai-lab = "domoai.lab.cli:main"
 domoai-hil = "domoai.hil.cli:main"
+domoai-admin = "domoai.admin.cli:main"
 
 [dependency-groups]
 dev = [
@@ -33,6 +36,7 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<1",
     "pytest-cov>=6,<7",
+    "pyyaml>=6.0,<7",
     "ruff>=0.11,<1",
     "testcontainers>=4.15.0",
 ]
@@ -45,6 +49,7 @@ default-groups = ["dev"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "composition: cross-boundary tests against real disposable dependencies (Testcontainers); requires Docker",

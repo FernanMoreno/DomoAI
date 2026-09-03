@@ -1,0 +1,63 @@
+{
+  "schema_version": "v1",
+  "provider_id": "home_assistant",
+  "device_id": "lab.battery",
+  "soc_capability": "battery.soc",
+  "profile": {
+    "capacity_kwh": 10.0,
+    "initial_soc_kwh": 5.0,
+    "min_soc_kwh": 2.0,
+    "max_soc_kwh": 9.0,
+    "max_charge_kw": 4.0,
+    "max_discharge_kw": 3.0,
+    "charge_efficiency": 0.9,
+    "discharge_efficiency": 0.9,
+    "actuator": {
+      "device_id": "lab.battery",
+      "capability": "battery_control",
+      "charge_command": "charge_battery",
+      "discharge_command": "discharge_battery",
+      "stop_command": "stop_battery",
+      "power_feedback_capability": "battery.power",
+      "power_feedback_convention": "charge_positive",
+      "power_feedback_tolerance_kw": 0.1,
+      "power_feedback_settle_timeout_seconds": 5.0,
+      "power_feedback_poll_interval_seconds": 0.25,
+      "soc_reconciliation_capability": "battery.soc",
+      "power_unit": "kW"
+    },
+    "initial_soc_observation": {
+      "schema_version": "v1",
+      "provider_id": "home_assistant",
+      "device_id": "lab.battery",
+      "metric": "battery.soc",
+      "value_kwh": 5.0,
+      "unit": "kWh",
+      "observed_at": "2026-08-24T00:00:00Z",
+      "received_at": "2026-08-24T00:00:00Z",
+      "quality": "good",
+      "source_ref": {
+        "adapter_id": "home_assistant",
+        "external_id": "sensor.domoai_virtual_battery_virtual_battery_soc"
+      }
+    }
+  },
+  "capacity_evidence": {
+    "schema_version": "v1",
+    "provider_id": "home_assistant",
+    "device_id": "lab.battery",
+    "capacity_kwh": 10.0,
+    "capacity_source": "provider_config",
+    "quality": "good",
+    "source_ref": {
+      "adapter_id": "home_assistant",
+      "external_id": "sensor.domoai_virtual_battery_virtual_battery_capacity"
+    }
+  },
+  "control_policy": {
+    "owner": "domoai-lab",
+    "native_scheduler_status": "inactive",
+    "allow_native_takeover": false,
+    "lease_seconds": 300.0
+  }
+}

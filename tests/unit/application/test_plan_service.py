@@ -7,19 +7,27 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
-from domoai.domain.errors import DomainError
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     AdapterSnapshot,
+    Approval,
     Capability,
     CapabilityKind,
     Command,
     Plan,
+    PlanStatus,
     Policy,
     PolicyAction,
     Precondition,
+    RiskClass,
     SourceRef,
     StateSnapshot,
     StateStatus,
+)
+from domoai.runtime.approval_store import (
+    ApprovalAssertion,
+    ApprovalStore,
+    OperatorPrincipal,
 )
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
@@ -76,6 +84,33 @@ def _semantic_command(*, value: object, unit: str | None = None) -> Command:
         unit=unit,
         idempotency_key="semantic-intent-1",
     )
+
+
+def test_battery_capability_requires_binding_even_when_source_is_misclassified() -> None:
+    service = _semantic_service(
+        Capability(
+            name="battery.power",
+            kind=CapabilityKind.NUMBER,
+            unit="kW",
+            readable=True,
+            writable=True,
+            commands=["charge_battery"],
+        )
+    )
+
+    validation = service.validate_command_semantics(
+        Command(
+            id="battery-unbound-command",
+            device_id="fixture.semantic",
+            command="charge_battery",
+            value=1.0,
+            unit="kW",
+            idempotency_key="battery-unbound-intent",
+        )
+    )
+
+    assert validation.errors
+    assert validation.errors[0].code == ErrorCode.ACTUATOR_AUTHORIZATION_REQUIRED.value
 
 
 def test_validate_plan_rejects_unit_kind_bounds_step_and_writable_mismatches() -> None:
@@ -552,6 +587,182 @@ async def test_plan_expiry_uses_injected_clock() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approved_plan_rejects_expired_approval_before_validation_expiry() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    plan = Plan(
+        id="plan-expired-approval-1",
+        commands=[
+            Command(
+                id="command-expired-approval-1",
+                device_id=device_id,
+                command="open",
+                risk_class=RiskClass.CONFIRM,
+                idempotency_key="intent-expired-approval-1",
+            )
+        ],
+    )
+
+    validated = service.validate(plan)
+    principal = OperatorPrincipal("human-1", "oidc:mfa", "session-1")
+    grant = ApprovalStore(clock=clock).issue_authenticated(
+        validated,
+        principal=principal,
+        assertion=ApprovalAssertion(
+            principal=principal,
+            plan_id=validated.id,
+            validation_digest=validated.validation.digest if validated.validation else None,
+            nonce="expired-approval-1",
+            approved_at=initial,
+            expires_at=initial + timedelta(minutes=1),
+        ),
+    )
+    approved = service.approve(validated, grant=grant)
+    clock.set(initial + timedelta(minutes=1, seconds=1))
+
+    with pytest.raises(DomainError, match="approval"):
+        service.assert_executable(approved)
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_with_missing_approval_identifier_is_rejected() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    plan = Plan(
+        id="plan-missing-approval-id-1",
+        commands=[
+            Command(
+                id="command-missing-approval-id-1",
+                device_id=device_id,
+                command="open",
+                risk_class=RiskClass.CONFIRM,
+                idempotency_key="intent-missing-approval-id-1",
+            )
+        ],
+    )
+    validated = service.validate(plan)
+    assert validated.validation is not None
+
+    legacy_approval = Approval(
+        status="approved",
+        approved_by="operator",
+        approved_at=initial,
+        validation_digest=validated.validation.digest,
+        validation_valid_until=validated.validation.valid_until,
+        window_digest=(
+            validated.execution_window.digest if validated.execution_window else None
+        ),
+        schedule_revision=validated.schedule_revision,
+        approval_id=None,
+    )
+    approved = validated.model_copy(
+        update={"status": PlanStatus.APPROVED, "approval": legacy_approval}
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        service.assert_executable(approved)
+
+    assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_rejects_execution_window_altered_after_approval() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    plan = Plan(
+        id="plan-altered-window-1",
+        commands=[
+            Command(
+                id="command-altered-window-1",
+                device_id=device_id,
+                command="open",
+                risk_class=RiskClass.CONFIRM,
+                idempotency_key="intent-altered-window-1",
+            )
+        ],
+    )
+    validated = service.validate(plan)
+    principal = OperatorPrincipal("human-1", "oidc:mfa", "session-1")
+    grant = ApprovalStore(clock=clock).issue_authenticated(
+        validated,
+        principal=principal,
+        assertion=ApprovalAssertion(
+            principal=principal,
+            plan_id=validated.id,
+            validation_digest=validated.validation.digest if validated.validation else None,
+            nonce="altered-window-1",
+            approved_at=initial,
+            expires_at=initial + timedelta(minutes=5),
+        ),
+    )
+    approved = service.approve(validated, grant=grant)
+
+    tampered = approved.model_copy(update={"schedule_revision": approved.schedule_revision + 1})
+
+    with pytest.raises(DomainError) as excinfo:
+        service.assert_executable(tampered)
+
+    assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_bundle_approval_persists_bundle_scope() -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    await DiscoveryService(adapter, registry, state_store, AuditLog()).refresh()
+    initial = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    service = PlanService(registry, state_store, PolicyEngine([]), AuditLog(), clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    validated = service.validate(
+        Plan(
+            id="plan-bundle-scope-1",
+            commands=[
+                Command(
+                    id="command-bundle-scope-1",
+                    device_id=device_id,
+                    command="open",
+                    risk_class=RiskClass.CONFIRM,
+                    idempotency_key="intent-bundle-scope-1",
+                )
+            ],
+        )
+    )
+    store = ApprovalStore(operator_token="operator", allow_legacy_token=True, clock=clock)
+    grant = store.issue(
+        validated,
+        approved_by="operator",
+        operator_token="operator",
+        bundle_digest="sha256:bundle-scope-1",
+    )
+
+    approved = service.approve(validated, grant=grant)
+
+    assert approved.approval is not None
+    assert approved.approval.scope == "bundle"
+    assert approved.approval.bundle_digest == "sha256:bundle-scope-1"
+
+
+@pytest.mark.asyncio
 async def test_validate_assigns_default_expiry_when_mcp_plan_omits_it() -> None:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
@@ -575,8 +786,8 @@ async def test_validate_assigns_default_expiry_when_mcp_plan_omits_it() -> None:
 
     validated = service.validate(plan)
 
-    assert validated.expires_at == initial + PlanService.DEFAULT_PLAN_TTL
-    clock.set(initial + PlanService.DEFAULT_PLAN_TTL + timedelta(seconds=1))
+    assert validated.expires_at == initial + PlanService.VALIDATION_TTL
+    clock.set(initial + PlanService.VALIDATION_TTL + timedelta(seconds=1))
     with pytest.raises(DomainError, match="expired"):
         service.assert_executable(validated)
 
@@ -607,4 +818,5 @@ async def test_validate_keeps_future_plan_valid_through_execution_window() -> No
 
     validated = service.validate(plan)
 
-    assert validated.expires_at == execute_at + PlanService.DEFAULT_PLAN_TTL
+    assert validated.expires_at == initial + PlanService.VALIDATION_TTL
+    assert validated.expires_at != execute_at + PlanService.DEFAULT_PLAN_TTL

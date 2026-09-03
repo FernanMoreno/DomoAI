@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -54,17 +56,39 @@ class DiscoveryService:
         self.device_repository = device_repository
         self.state_snapshot_repository = state_snapshot_repository
         self.runtime_state_metadata_repository = runtime_state_metadata_repository
-        self.clock = clock or SystemClock()
+        # Keep discovery timestamps on the same server-owned clock as the
+        # state store.  This matters for deterministic validation and avoids
+        # making an observation appear newer merely because the two services
+        # were constructed with different clocks.
+        self.clock = clock or state_store.clock or SystemClock()
+        self._refresh_lock = asyncio.Lock()
 
-    async def refresh(self) -> DiscoveryResult:
-        snapshot = await self.adapter.discover()
+    async def refresh(
+        self, *, exclude_adapter_ids: Collection[str] = ()
+    ) -> DiscoveryResult:
+        async with self._refresh_lock:
+            return await self._refresh_unlocked(frozenset(exclude_adapter_ids))
+
+    async def _refresh_unlocked(self, exclude_adapter_ids: frozenset[str]) -> DiscoveryResult:
+        if exclude_adapter_ids:
+            discover_excluding = getattr(self.adapter, "discover_excluding", None)
+            if callable(discover_excluding):
+                snapshot = await discover_excluding(exclude_adapter_ids)
+            else:
+                snapshot = await self.adapter.discover()
+        else:
+            snapshot = await self.adapter.discover()
         fingerprint_before = self.state_store.inventory_fingerprint or self._inventory_fingerprint()
         for diagnostic in snapshot.unsupported_sources:
             if diagnostic.get("failure"):
                 self.registry.mark_source_unavailable(
                     str(diagnostic.get("adapter_id", self.adapter.adapter_id))
                 )
-        devices, areas = self.registry.apply_snapshot(snapshot, self.adapter.adapter_id)
+        devices, areas = self.registry.apply_snapshot(
+            snapshot,
+            self.adapter.adapter_id,
+            configured_adapter_ids=self._configured_adapter_ids(),
+        )
         for diagnostic in self.registry.drain_diagnostics():
             self.audit.append(
                 event_type="registry_identity_conflict",
@@ -75,6 +99,10 @@ class DiscoveryService:
                     or self.adapter.adapter_id
                 ),
                 payload=diagnostic,
+            )
+        for device in devices:
+            await self.state_store.prune_capabilities(
+                device.id, {capability.name for capability in device.capabilities}
             )
         fingerprint_after = self._inventory_fingerprint()
         if fingerprint_after != fingerprint_before:
@@ -124,6 +152,111 @@ class DiscoveryService:
 
         return DiscoveryResult(tuple(devices), tuple(areas), tuple(states), revision)
 
+    async def refresh_state(
+        self, *, exclude_adapter_ids: Collection[str] = ()
+    ) -> tuple[StateSnapshot, ...]:
+        """Refresh polled sources without rebuilding the device inventory.
+
+        Sources with an authoritative event stream do not need periodic
+        physical reads.  Excluding them here keeps the boundary source-aware
+        while preserving polling for adapters that genuinely require it.
+        """
+
+        async with self._refresh_lock:
+            excluded = frozenset(exclude_adapter_ids)
+            source_refs = [
+                source_ref
+                for device in self.registry.devices
+                for source_ref in device.source_refs
+                if source_ref.adapter_id not in excluded
+            ]
+            if not source_refs:
+                return ()
+            snapshots = await self.adapter.read_state(source_refs)
+            return tuple(await self._save_state_snapshots_unlocked(snapshots))
+
+    async def save_state_snapshots(
+        self, snapshots: Sequence[StateSnapshot]
+    ) -> tuple[StateSnapshot, ...]:
+        """Persist event/read state through the same serialized boundary."""
+
+        async with self._refresh_lock:
+            return tuple(await self._save_state_snapshots_unlocked(snapshots))
+
+    async def apply_source_availability(
+        self,
+        adapter_id: str,
+        *,
+        external_id: str | None = None,
+        available: bool,
+    ) -> tuple[StateSnapshot, ...]:
+        """Project source availability without rebuilding the inventory.
+
+        Availability events are frequent and may describe one entity or a
+        whole transport.  They must update both route admission and cached
+        state, but they do not justify a fresh discovery of every adapter.
+        Unknown entity identifiers are handled conservatively as a
+        source-level event so an event cannot leave an unsafe route enabled.
+        """
+
+        async with self._refresh_lock:
+            source_refs = [
+                source_ref
+                for device in self.registry.devices
+                for source_ref in device.source_refs
+                if source_ref.adapter_id == adapter_id
+            ]
+            scoped_refs = source_refs
+            scoped_external_id = external_id
+            if external_id is not None:
+                scoped_refs = [
+                    source_ref
+                    for source_ref in source_refs
+                    if source_ref.external_id == external_id
+                ]
+                if not scoped_refs:
+                    # Providers such as Matter report a node identifier while
+                    # the executable refs are endpoint identifiers.  A
+                    # mismatch is therefore treated as a conservative
+                    # source-level event instead of silently doing nothing.
+                    scoped_external_id = None
+
+            if available:
+                if not scoped_refs:
+                    return ()
+                snapshots = await self.adapter.read_state(scoped_refs)
+                registry_changed = self.registry.mark_source_available(
+                    adapter_id, scoped_external_id
+                )
+                saved = tuple(await self._save_state_snapshots_unlocked(snapshots))
+            else:
+                registry_changed = self.registry.mark_source_unavailable(
+                    adapter_id, scoped_external_id
+                )
+                changed = await self.state_store.mark_source_unavailable(
+                    adapter_id, scoped_external_id
+                )
+                saved = tuple(changed)
+
+            if registry_changed:
+                await self._record_inventory_mutation_unlocked()
+            return saved
+
+    async def _save_state_snapshots_unlocked(
+        self, snapshots: Sequence[StateSnapshot]
+    ) -> list[StateSnapshot]:
+        normalized_states: list[StateSnapshot] = []
+        for snapshot in snapshots:
+            canonical_id = self.registry.canonical_id_for_source(
+                snapshot.source_ref.adapter_id, snapshot.source_ref.external_id
+            )
+            if canonical_id is None:
+                continue
+            normalized = snapshot.model_copy(update={"device_id": canonical_id})
+            await self.state_store.save(normalized)
+            normalized_states.append(normalized)
+        return normalized_states
+
     def _inventory_fingerprint(self) -> str:
         routes = {
             (device.id, capability.name): self.registry.routes_for(device.id, capability.name)
@@ -131,6 +264,31 @@ class DiscoveryService:
             for capability in device.capabilities
         }
         return inventory_fingerprint(self.registry.devices, routes)
+
+    async def _record_inventory_mutation_unlocked(self) -> None:
+        """Persist an inventory revision caused by a non-discovery event."""
+
+        fingerprint = self._inventory_fingerprint()
+        if fingerprint == self.state_store.inventory_fingerprint:
+            return
+        self.state_store.begin_revision()
+        self.state_store.record_inventory_fingerprint(fingerprint)
+        if self.device_repository is not None:
+            for device in self.registry.devices:
+                await self.device_repository.save(device)
+        if self.state_store.persistence_bound:
+            await self.state_store.persist_metadata()
+        elif self.runtime_state_metadata_repository is not None:
+            await self.runtime_state_metadata_repository.save(self.state_store.export_metadata())
+
+    def _configured_adapter_ids(self) -> frozenset[str]:
+        """Return source IDs represented by this runtime's live adapter set."""
+
+        children = getattr(self.adapter, "adapters", None)
+        if children is None:
+            return frozenset({self.adapter.adapter_id})
+        adapter_ids = frozenset(str(child.adapter_id) for child in children)
+        return adapter_ids or frozenset({self.adapter.adapter_id})
 
     async def _record_states(self, snapshot: AdapterSnapshot) -> list[StateSnapshot]:
         received_at = self.clock.now()
@@ -147,7 +305,7 @@ class DiscoveryService:
             )
             observed_at = _source_timestamp(raw_state.get("observed_at"), received_at)
             source_received_at = _source_timestamp(raw_state.get("received_at"), received_at)
-            effective_received_at = max(received_at, source_received_at, observed_at)
+            effective_received_at = max(source_received_at, observed_at)
             state = StateSnapshot(
                 device_id=device_id,
                 capability=str(raw_state["capability"]),

@@ -16,6 +16,7 @@ class FakeHomeAssistantProviderClient(HomeAssistantClient):
         states: Iterable[dict[str, Any]],
         *,
         registry: Iterable[dict[str, Any]] = (),
+        device_registry: Iterable[dict[str, Any]] = (),
         events: Iterable[dict[str, Any]] = (),
         fail_services: bool = False,
         healthy: bool = True,
@@ -23,6 +24,7 @@ class FakeHomeAssistantProviderClient(HomeAssistantClient):
         super().__init__("http://home-assistant.test", "fixture-token")
         self.states = [deepcopy(state) for state in states]
         self.registry = [deepcopy(entry) for entry in registry]
+        self.device_registry = [deepcopy(entry) for entry in device_registry]
         self.events = [deepcopy(event) for event in events]
         self.fail_services = fail_services
         self.healthy = healthy
@@ -36,6 +38,9 @@ class FakeHomeAssistantProviderClient(HomeAssistantClient):
 
     async def fetch_entity_registry(self) -> list[dict[str, Any]]:
         return deepcopy(self.registry)
+
+    async def fetch_device_registry(self) -> list[dict[str, Any]]:
+        return deepcopy(self.device_registry)
 
     async def call_service(
         self,

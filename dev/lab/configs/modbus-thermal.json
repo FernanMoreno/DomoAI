@@ -1,0 +1,37 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "lab.thermostat",
+      "name": "Virtual Thermostat",
+      "area_id": "lab",
+      "semantic_type": "energy",
+      "manufacturer": "DomoAI Lab",
+      "model": "Deterministic Thermostat",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "thermal.indoor_temperature",
+          "state": {
+            "area": "input_register",
+            "address": 0,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "thermal.hvac_power",
+          "state": {
+            "area": "input_register",
+            "address": 2,
+            "data_type": "float32"
+          },
+          "command": {
+            "area": "holding_register",
+            "address": 10,
+            "data_type": "float32"
+          }
+        }
+      ]
+    }
+  ]
+}

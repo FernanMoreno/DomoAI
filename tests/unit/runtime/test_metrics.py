@@ -16,7 +16,6 @@ from domoai.domain.models import (
     Command,
     Plan,
     PlanStatus,
-    SourceRef,
     StateSnapshot,
     StateStatus,
 )
@@ -123,6 +122,8 @@ async def test_event_queue_depth_reports_zero_for_a_non_composite_adapter(tmp_pa
 async def test_stale_state_count_reflects_marked_stale_snapshots(tmp_path: Path) -> None:
     collector, registry, state_store, _plan_repository, _database = await _build_collector(tmp_path)
     device_id = next(device.id for device in registry.devices if device.type.value == "light")
+    existing = state_store.peek(device_id, "power")
+    assert existing is not None
     await state_store.save(
         StateSnapshot(
             device_id=device_id,
@@ -131,7 +132,7 @@ async def test_stale_state_count_reflects_marked_stale_snapshots(tmp_path: Path)
             observed_at=datetime.now(UTC),
             received_at=datetime.now(UTC),
             status=StateStatus.STALE,
-            source_ref=SourceRef(adapter_id="fixture", external_id="light.stale"),
+            source_ref=existing.source_ref,
         )
     )
 

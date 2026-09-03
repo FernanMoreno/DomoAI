@@ -15,6 +15,9 @@ _UNITS: dict[str, str | None] = {
     "temperature": "°C",
     "humidity": "%",
     "occupancy": None,
+    "battery.soc": "kWh",
+    "battery.power": "kW",
+    "battery.capacity": "kWh",
 }
 
 
@@ -57,12 +60,17 @@ class KnxMapper:
             commands = ["turn_on", "turn_off"]
         elif writable and binding.name == "brightness":
             commands = ["set_brightness"]
+        elif writable and binding.name == "battery.power":
+            commands = ["charge_battery", "discharge_battery", "stop_battery"]
         kind = {
             "power": CapabilityKind.BOOLEAN.value,
             "brightness": CapabilityKind.INTEGER.value,
             "temperature": CapabilityKind.NUMBER.value,
             "humidity": CapabilityKind.NUMBER.value,
             "occupancy": CapabilityKind.BOOLEAN.value,
+            "battery.soc": CapabilityKind.NUMBER.value,
+            "battery.power": CapabilityKind.NUMBER.value,
+            "battery.capacity": CapabilityKind.NUMBER.value,
         }[binding.name]
         result: dict[str, Any] = {
             "name": binding.name,
@@ -120,4 +128,6 @@ class KnxMapper:
             raise ValueError(f"{binding.name} must be between 0 and 100")
         if binding.name == "brightness":
             return round(numeric_value)
+        if binding.name in {"battery.soc", "battery.capacity"} and numeric_value < 0:
+            raise ValueError(f"{binding.name} must not be negative")
         return value

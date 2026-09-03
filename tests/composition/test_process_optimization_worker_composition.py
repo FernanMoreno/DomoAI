@@ -130,6 +130,32 @@ async def test_invalid_scenario_never_reaches_the_subprocess() -> None:
 
 @pytest.mark.composition
 @pytest.mark.asyncio
+async def test_horizon_limit_rejects_before_subprocess_admission() -> None:
+    registry = DeviceRegistry()
+    worker = ProcessOptimizationWorker(registry, WorkerBudget(max_solver_time_seconds=10.0))
+    start = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    oversized = Horizon(
+        start=start,
+        end=start + timedelta(minutes=(10080 + 1) * 15),
+        resolution_minutes=15,
+        timezone="Europe/Madrid",
+    )
+    try:
+        before = set(multiprocessing.active_children())
+        result = await worker.optimize(
+            OptimizationScenario(id="oversized-horizon", horizon=oversized)
+        )
+        after = set(multiprocessing.active_children())
+
+        assert result.status == OptimizationStatus.INVALID
+        assert any(d.code == "horizon_too_large" for d in result.diagnostics)
+        assert before == after
+    finally:
+        worker.close()
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
 async def test_queue_full_raises_without_touching_the_pool(tmp_path) -> None:
     registry = DeviceRegistry()
     worker = ProcessOptimizationWorker(

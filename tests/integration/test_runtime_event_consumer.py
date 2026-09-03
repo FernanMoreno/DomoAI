@@ -10,6 +10,7 @@ from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterHealth,
     AdapterSnapshot,
     SourceEvent,
@@ -38,6 +39,13 @@ class DiscoveryCountingAdapter(SimulatedHomeAdapter):
         return await super().discover()
 
 
+class EventAuthoritativeAdapter(RecordingAdapter):
+    state_events_are_authoritative = True
+
+    async def read_state(self, source_refs):
+        raise AssertionError("authoritative state event must not trigger a physical read")
+
+
 @pytest.mark.asyncio
 async def test_source_event_refreshes_canonical_state_and_revision() -> None:
     adapter = SimulatedHomeAdapter()
@@ -60,6 +68,30 @@ async def test_source_event_refreshes_canonical_state_and_revision() -> None:
     assert state.status is StateStatus.UNAVAILABLE
     assert state_store.runtime_revision == "rev-2"
     assert audit.events[-1].event_type == "source_event_applied"
+
+
+@pytest.mark.asyncio
+async def test_authoritative_state_event_persists_embedded_evidence_without_read() -> None:
+    adapter = EventAuthoritativeAdapter(
+        "knx", source_snapshot(adapter_id="knx", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await adapter.connect()
+    await discovery.refresh()
+    original = (await state_store.all())[0]
+    event = StateChangedEvent(
+        source_adapter_id="knx",
+        payload={"states": [original.model_copy(update={"value": 42.0}).model_dump(mode="python")]},
+    )
+
+    await RuntimeEventConsumer(adapter, discovery, state_store, audit)._apply_event(event)
+
+    updated = await state_store.get(original.device_id, original.capability)
+    assert updated is not None
+    assert updated.value == 42.0
 
 
 @pytest.mark.asyncio
@@ -91,6 +123,77 @@ async def test_composite_state_changed_event_from_non_primary_adapter_is_applied
     assert state.value == 42.0
 
 
+@pytest.mark.asyncio
+async def test_incremental_cross_source_conflict_becomes_invalid_canonical_state() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
+    )
+    modbus = RecordingAdapter("modbus", source_snapshot(adapter_id="modbus"))
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    modbus_state = next(
+        state
+        for state in modbus.snapshot.source_states
+        if state["entity_id"] == "light.main_power"
+    )
+    modbus_state["value"] = True
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+
+    await consumer._apply_event(
+        StateChangedEvent(
+            source_adapter_id="modbus",
+            external_id="light.main_power",
+            capability="power",
+        )
+    )
+
+    canonical = await state_store.get("living_room.main_light", "power")
+    assert canonical is not None
+    assert canonical.status is StateStatus.INVALID
+    assert canonical.value is None
+
+
+@pytest.mark.asyncio
+async def test_composite_source_diagnostic_degrades_only_that_source_state() -> None:
+    healthy = RecordingAdapter(
+        "healthy", source_snapshot(adapter_id="healthy", include_shared_device=False)
+    )
+    failing = RecordingAdapter(
+        "failing", source_snapshot(adapter_id="failing", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([healthy, failing], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+
+    await consumer._apply_event(
+        AdapterDiagnosticEvent(
+            source_adapter_id="failing",
+            code="source_unavailable",
+            message="failing source disconnected",
+        )
+    )
+
+    failed_state = await state_store.get("failing.environment", "temperature")
+    healthy_state = await state_store.get("healthy.environment", "temperature")
+    assert failed_state is not None
+    assert failed_state.status is StateStatus.UNAVAILABLE
+    assert failed_state.value is None
+    assert healthy_state is not None
+    assert healthy_state.status is StateStatus.CURRENT
+
+
 class DisconnectedAdapter(SimulatedHomeAdapter):
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         raise ConnectionError("Home Assistant event stream disconnected")
@@ -98,7 +201,7 @@ class DisconnectedAdapter(SimulatedHomeAdapter):
 
 
 @pytest.mark.asyncio
-async def test_disconnected_source_marks_cached_state_stale_and_audits() -> None:
+async def test_disconnected_source_marks_cached_state_unavailable_and_audits() -> None:
     adapter = DisconnectedAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -112,7 +215,7 @@ async def test_disconnected_source_marks_cached_state_stale_and_audits() -> None
     assert event is None
     snapshots = await state_store.all()
     assert snapshots
-    assert all(snapshot.status is StateStatus.STALE for snapshot in snapshots)
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in snapshots)
     assert audit.events[-1].event_type == "source_event_stream_unavailable"
 
 
@@ -162,6 +265,56 @@ async def test_burst_of_state_only_events_does_not_repeat_full_discovery() -> No
     state = await state_store.get(light_id, "brightness")
     assert state is not None
     assert state.value == 999 % 100
+
+
+@pytest.mark.asyncio
+async def test_availability_event_does_not_repeat_full_discovery() -> None:
+    adapter = DiscoveryCountingAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    adapter.set_available("cover.bedroom_blind", False)
+    await consumer.consume_once()
+
+    assert adapter.discover_calls == 1
+    cover_id = registry.canonical_id_for_source("fixture", "cover.bedroom_blind")
+    assert cover_id is not None
+    state = await state_store.get(cover_id, "position")
+    assert state is not None
+    assert state.status is StateStatus.UNAVAILABLE
+    light_id = registry.canonical_id_for_source("fixture", "light.living_room_main")
+    assert light_id is not None
+    healthy_state = await state_store.get(light_id, "power")
+    assert healthy_state is not None
+    assert healthy_state.status is StateStatus.CURRENT
+
+    adapter.set_available("cover.bedroom_blind", True)
+    await consumer.consume_once()
+
+    recovered = await state_store.get(cover_id, "position")
+    assert recovered is not None
+    assert recovered.status is StateStatus.CURRENT
+
+
+@pytest.mark.asyncio
+async def test_non_topology_diagnostic_does_not_repeat_full_discovery() -> None:
+    adapter = DiscoveryCountingAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+
+    await consumer._apply_event(
+        AdapterDiagnosticEvent(code="invalid_payload", message="ignored state payload")
+    )
+
+    assert adapter.discover_calls == 1
 
 
 def test_unrecognized_event_kind_is_rejected_at_construction() -> None:
@@ -300,7 +453,7 @@ async def test_health_exception_is_supervised_and_retried(
 
     assert adapter.health_calls == 2
     assert recorded_delays == [1.0]
-    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in await state_store.all())
     assert audit.events[-1].event_type == "source_event_stream_unavailable"
 
 
@@ -343,7 +496,7 @@ async def test_clean_stream_end_is_audited_and_reconnected(
 
     assert adapter.subscribe_calls == 2
     assert recorded_delays == [1.0]
-    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in await state_store.all())
     assert any(event.event_type == "source_event_stream_ended" for event in audit.events)
 
 

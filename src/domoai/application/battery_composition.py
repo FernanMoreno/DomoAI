@@ -49,6 +49,13 @@ def compose_home_assistant_dispatchable_battery_binding(
         raise HomeAssistantMappingConfigurationError(
             "Home Assistant battery dispatch binding is unknown"
         )
+    if (
+        binding.canonical_device_id is not None
+        and binding.canonical_device_id != canonical_device_id
+    ):
+        raise HomeAssistantMappingConfigurationError(
+            "Home Assistant battery canonical device does not match composition"
+        )
 
     actuator = profile.actuator
     if actuator is None:

@@ -210,10 +210,10 @@ def test_climate_temperature_with_non_numeric_value_defaults_to_confirm() -> Non
     assert classifier.classify(device, "target_temperature", bool_command) is RiskClass.CONFIRM
 
 
-def test_override_forces_safe_on_a_device_whose_default_is_confirm() -> None:
+def test_ordinary_override_cannot_lower_a_device_whose_default_is_confirm() -> None:
     classifier = RiskClassifier(
         overrides=(RiskOverride(device_id="cover.garage_main", risk_class=RiskClass.SAFE),)
     )
     device = _device("cover.garage_main", DeviceType.COVER)
 
-    assert classifier.classify(device, "position", _command("open")) is RiskClass.SAFE
+    assert classifier.classify(device, "position", _command("open")) is RiskClass.CONFIRM

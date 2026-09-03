@@ -1,0 +1,370 @@
+{
+  "$defs": {
+    "CommissioningAssetType": {
+      "enum": [
+        "battery",
+        "ev_charger"
+      ],
+      "title": "CommissioningAssetType",
+      "type": "string"
+    },
+    "CommissioningBlocker": {
+      "additionalProperties": false,
+      "description": "A stable reason why a candidate needs an explicit operator decision.",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "capability": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability"
+        },
+        "detail": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "detail"
+      ],
+      "title": "CommissioningBlocker",
+      "type": "object"
+    },
+    "CommissioningCandidate": {
+      "additionalProperties": false,
+      "description": "A discovered asset assessment, deliberately weaker than a binding.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "asset_type": {
+          "$ref": "#/$defs/CommissioningAssetType"
+        },
+        "canonical_device_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Canonical Device Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "device_type": {
+          "$ref": "#/$defs/DeviceType"
+        },
+        "provider_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Provider Ids",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/SourceRef"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "identity_keys": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Identity Keys",
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Connections",
+          "type": "array"
+        },
+        "required_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Required Capabilities",
+          "type": "array"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/CommissioningRoute"
+          },
+          "maxItems": 128,
+          "title": "Routes",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/CommissioningCandidateStatus"
+        },
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/CommissioningBlocker"
+          },
+          "maxItems": 32,
+          "title": "Blockers",
+          "type": "array"
+        },
+        "next_actions": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Next Actions",
+          "type": "array"
+        },
+        "candidate_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_type",
+        "canonical_device_id",
+        "name",
+        "device_type",
+        "provider_ids",
+        "source_refs",
+        "required_capabilities",
+        "status",
+        "candidate_digest"
+      ],
+      "title": "CommissioningCandidate",
+      "type": "object"
+    },
+    "CommissioningCandidateStatus": {
+      "enum": [
+        "ready_for_binding",
+        "observed_only",
+        "blocked"
+      ],
+      "title": "CommissioningCandidateStatus",
+      "type": "string"
+    },
+    "CommissioningRoute": {
+      "additionalProperties": false,
+      "description": "Sanitized projection of a source route; never an execution grant.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "provider_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "source_device_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Device Id",
+          "type": "string"
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Commands",
+          "type": "array"
+        },
+        "readable": {
+          "title": "Readable",
+          "type": "boolean"
+        },
+        "writable": {
+          "title": "Writable",
+          "type": "boolean"
+        },
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider_id",
+        "capability",
+        "source_ref",
+        "source_device_id",
+        "readable",
+        "writable",
+        "available"
+      ],
+      "title": "CommissioningRoute",
+      "type": "object"
+    },
+    "DeviceType": {
+      "enum": [
+        "light",
+        "switch",
+        "cover",
+        "climate",
+        "sensor",
+        "energy",
+        "ev_charger",
+        "unsupported"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Runtime-wide commissioning evidence shared by every MCP client.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "runtime_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Runtime Revision",
+      "type": "string"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "report_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Digest",
+      "type": "string"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/CommissioningCandidate"
+      },
+      "maxItems": 128,
+      "title": "Candidates",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Warnings",
+      "type": "array"
+    },
+    "authority_created": {
+      "const": false,
+      "default": false,
+      "title": "Authority Created",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "runtime_revision",
+    "generated_at",
+    "report_digest"
+  ],
+  "title": "CommissioningReport",
+  "type": "object"
+}

@@ -43,6 +43,30 @@ def test_current_matching_evidence_is_authorized() -> None:
     assert decision.reason_code == "current_evidence"
 
 
+def test_current_evidence_expires_by_server_owned_age() -> None:
+    evaluator = FreshnessEvaluator(FixedClock(datetime(2026, 8, 23, 12, tzinfo=UTC)))
+
+    decision = evaluator.evaluate(_snapshot(StateStatus.CURRENT), _precondition())
+
+    assert decision.satisfied is False
+    assert decision.reason_code == "current_evidence_expired"
+
+
+def test_current_evidence_uses_latest_runtime_receipt_without_erasing_source_age() -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    evaluator = FreshnessEvaluator(FixedClock(now))
+    snapshot = _snapshot(StateStatus.CURRENT).model_copy(
+        update={"received_at": now - timedelta(seconds=30)}
+    )
+
+    decision = evaluator.evaluate(snapshot, _precondition())
+
+    assert decision.satisfied is True
+    assert decision.age_seconds == 30
+    assert decision.snapshot is not None
+    assert decision.snapshot.observed_at == datetime(2026, 8, 23, 10, tzinfo=UTC)
+
+
 def test_missing_evidence_fails_closed() -> None:
     decision = FreshnessEvaluator().evaluate(None, _precondition())
 
@@ -78,7 +102,35 @@ def test_unavailable_and_invalid_evidence_never_become_authorizable() -> None:
         allows_stale=True,
     )
 
-    for status in (StateStatus.UNAVAILABLE, StateStatus.INVALID):
+    for status, reason_code in (
+        (StateStatus.UNAVAILABLE, "evidence_unavailable"),
+        (StateStatus.INVALID, "evidence_invalid"),
+    ):
         decision = evaluator.evaluate(_snapshot(status), _precondition(allow_stale=True), policy)
         assert decision.satisfied is False
-        assert decision.reason_code == "precondition_state_not_current"
+        assert decision.reason_code == reason_code
+
+
+def test_stale_evidence_without_explicit_policy_has_distinct_reason() -> None:
+    evaluator = FreshnessEvaluator(FixedClock(datetime(2026, 8, 23, 12, tzinfo=UTC)))
+    decision = evaluator.evaluate(_snapshot(StateStatus.STALE), _precondition(allow_stale=True))
+
+    assert decision.satisfied is False
+    assert decision.reason_code == "stale_evidence_not_allowed"
+
+
+def test_future_observation_is_rejected_instead_of_being_treated_as_fresh() -> None:
+    now = datetime(2026, 8, 23, 10, tzinfo=UTC)
+    evaluator = FreshnessEvaluator(FixedClock(now))
+    future = _snapshot(StateStatus.CURRENT).model_copy(
+        update={
+            "observed_at": now + timedelta(minutes=1),
+            "received_at": now + timedelta(minutes=1),
+        }
+    )
+
+    decision = evaluator.evaluate(future, _precondition())
+
+    assert decision.satisfied is False
+    assert decision.reason_code == "future_observation"
+    assert decision.age_seconds == -60

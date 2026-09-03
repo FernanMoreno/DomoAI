@@ -1,0 +1,134 @@
+{
+  "schema_version": "v1",
+  "metric_mappings": {
+    "sensor.domoai_virtual_battery_virtual_battery_soc": {
+      "value": "battery.soc"
+    },
+    "sensor.domoai_virtual_battery_virtual_battery_power": {
+      "value": "battery.power"
+    },
+    "sensor.domoai_virtual_ev_charger_virtual_ev_soc": {
+      "value": "ev.soc"
+    },
+    "sensor.domoai_virtual_ev_charger_virtual_ev_power": {
+      "value": "ev_charging"
+    },
+    "sensor.domoai_virtual_ev_charger_virtual_ev_capacity": {
+      "value": "ev.capacity"
+    },
+    "binary_sensor.domoai_virtual_ev_charger_virtual_ev_connected": {
+      "value": "ev.connected"
+    },
+    "sensor.domoai_virtual_thermostat_indoor_temperature": {
+      "value": "thermal.indoor_temperature"
+    },
+    "sensor.domoai_virtual_thermostat_hvac_power": {
+      "value": "thermal.hvac_power"
+    },
+    "sensor.domoai_virtual_water_meter_flow_rate": {
+      "value": "water.flow_rate"
+    },
+    "sensor.domoai_virtual_water_meter_total_volume": {
+      "value": "water.total_volume"
+    },
+    "sensor.sun_next_dawn": {
+      "value": "sun.next_dawn"
+    },
+    "sensor.sun_next_dusk": {
+      "value": "sun.next_dusk"
+    },
+    "sensor.sun_next_midnight": {
+      "value": "sun.next_midnight"
+    },
+    "sensor.sun_next_noon": {
+      "value": "sun.next_noon"
+    },
+    "sensor.sun_next_rising": {
+      "value": "sun.next_rising"
+    },
+    "sensor.sun_next_setting": {
+      "value": "sun.next_setting"
+    }
+  },
+  "battery_capacity_bindings": {
+    "sensor.domoai_virtual_battery_virtual_battery_capacity": {
+      "identity_claims": {
+        "identity_keys": ["mqtt:lab-battery-1"]
+      },
+      "semantics": "nominal_capacity",
+      "nominal_capacity_attestation": {
+        "evidence_type": "vendor_documentation",
+        "reference": "https://example.invalid/domoai-lab-battery",
+        "subject_model": "Deterministic Battery",
+        "attested_by": "DomoAI lab profile",
+        "attested_at": "2026-08-24T00:00:00Z"
+      }
+    }
+  },
+  "battery_dispatch_bindings": {
+    "lab-battery": {
+      "canonical_device_id": "lab.battery",
+      "identity_claims": {
+        "identity_keys": ["mqtt:lab-battery-1"]
+      },
+      "control_capability": "battery_control",
+      "soc_entity_id": "sensor.domoai_virtual_battery_virtual_battery_soc",
+      "power_feedback_entity_id": "sensor.domoai_virtual_battery_virtual_battery_power",
+      "capacity_entity_id": "sensor.domoai_virtual_battery_virtual_battery_capacity",
+      "soc_capability": "battery.soc",
+      "soc_unit": "%",
+      "power_feedback_capability": "battery.power",
+      "power_unit": "kW",
+      "capacity_metric": "battery.capacity",
+      "charge": {
+        "entity_id": "number.domoai_virtual_battery_virtual_battery_power_command",
+        "provider_command": "charge_battery",
+        "service_domain": "number",
+        "service": "set_value",
+        "value_transform": "as_is"
+      },
+      "discharge": {
+        "entity_id": "number.domoai_virtual_battery_virtual_battery_power_command",
+        "provider_command": "discharge_battery",
+        "service_domain": "number",
+        "service": "set_value",
+        "value_transform": "negate"
+      },
+      "stop": {
+        "entity_id": "number.domoai_virtual_battery_virtual_battery_power_command",
+        "provider_command": "stop_battery",
+        "service_domain": "number",
+        "service": "set_value",
+        "value_transform": "zero"
+      }
+    }
+  },
+  "ev_charging_bindings": {
+    "lab-ev": {
+      "schema_version": "v1",
+      "canonical_device_id": "lab.ev_charger",
+      "identity_claims": {
+        "identity_keys": ["mqtt:lab-ev-1"]
+      },
+      "soc_entity_id": "sensor.domoai_virtual_ev_charger_virtual_ev_soc",
+      "power_feedback_entity_id": "sensor.domoai_virtual_ev_charger_virtual_ev_power",
+      "capacity_entity_id": "sensor.domoai_virtual_ev_charger_virtual_ev_capacity",
+      "connected_entity_id": "binary_sensor.domoai_virtual_ev_charger_virtual_ev_connected",
+      "soc_unit": "%",
+      "charge": {
+        "entity_id": "number.domoai_virtual_ev_charger_virtual_ev_power_command",
+        "provider_command": "charge_ev",
+        "service_domain": "number",
+        "service": "set_value",
+        "value_transform": "as_is"
+      },
+      "stop": {
+        "entity_id": "number.domoai_virtual_ev_charger_virtual_ev_power_command",
+        "provider_command": "stop_ev",
+        "service_domain": "number",
+        "service": "set_value",
+        "value_transform": "zero"
+      }
+    }
+  }
+}

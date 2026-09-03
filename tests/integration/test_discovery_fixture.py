@@ -49,7 +49,7 @@ async def test_discovery_preserves_aware_source_observation_timestamp() -> None:
     snapshot = await state_store.get("timestamped.light", "power")
     assert snapshot is not None
     assert snapshot.observed_at == observed_at
-    assert snapshot.received_at == fixed.now()
+    assert snapshot.received_at == observed_at
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import urlopen
 
 import pytest
 
@@ -40,3 +44,37 @@ def test_modbus_lab_mapping_points_to_the_simulator_contract() -> None:
     assert (1, "holding_register", 10) in points
     assert (1, "input_register", 20) in points
     assert (1, "input_register", 21) in points
+
+
+def test_live_lab_bootstrap_manifest_and_readiness_are_consistent() -> None:
+    """Verify the operator quickstart against the running shared gateway."""
+
+    if os.getenv("DOMOAI_LIVE_BOOTSTRAP_ENABLE") != "1":
+        pytest.skip("set DOMOAI_LIVE_BOOTSTRAP_ENABLE=1 for the running lab gateway")
+
+    manifest_path = Path(
+        os.getenv("DOMOAI_BOOTSTRAP_MANIFEST_PATH", "data/runtime-bootstrap.json")
+    )
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == "v1"
+    assert document["profile"] == "lab"
+    assert document["candidates"]
+    assert "DOMOAI_HOME_ASSISTANT_TOKEN" not in json.dumps(document)
+
+    port = int(os.getenv("DOMOAI_MCP_PORT", "8124"))
+    try:
+        response = urlopen(f"http://127.0.0.1:{port}/readyz", timeout=5)
+    except HTTPError as error:
+        if error.code != 503:
+            raise
+        response = error
+    with response:
+        payload = json.load(response)
+    physical = payload["physical"]
+    assert physical["battery_qualification"] in {
+        "unsupported",
+        "software-qualified",
+        "hil-qualified",
+    }
+    if physical.get("battery_operational_status") == "observed-only":
+        assert physical["battery_qualification"] == "unsupported"

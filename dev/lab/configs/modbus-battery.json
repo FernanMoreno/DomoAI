@@ -1,0 +1,45 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "lab.battery",
+      "name": "Virtual Battery",
+      "area_id": "lab",
+      "semantic_type": "energy",
+      "manufacturer": "DomoAI Lab",
+      "model": "Deterministic Battery",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "battery.soc",
+          "state": {
+            "area": "input_register",
+            "address": 0,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "battery.power",
+          "state": {
+            "area": "input_register",
+            "address": 2,
+            "data_type": "float32"
+          },
+          "command": {
+            "area": "holding_register",
+            "address": 10,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "battery.capacity",
+          "state": {
+            "area": "input_register",
+            "address": 4,
+            "data_type": "float32"
+          }
+        }
+      ]
+    }
+  ]
+}

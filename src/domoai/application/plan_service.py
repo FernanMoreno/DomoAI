@@ -37,6 +37,8 @@ from domoai.runtime.executable_fingerprint import capability_fingerprint
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
+_PHYSICAL_ACTUATOR_CAPABILITY_NAMES = frozenset({"battery_control", "ev_charging"})
+
 
 @dataclass(frozen=True)
 class CommandValidation:
@@ -47,6 +49,9 @@ class CommandValidation:
 
 class PlanService:
     DEFAULT_PLAN_TTL = timedelta(minutes=15)
+    # Validation evidence may cover a future schedule, but its upper bound is
+    # runtime-owned.  A caller-provided plan/window can only shorten it.
+    VALIDATION_TTL = timedelta(hours=24)
 
     def __init__(
         self,
@@ -56,12 +61,14 @@ class PlanService:
         audit: AuditLog,
         *,
         clock: Clock | None = None,
+        authorized_actuator_commands: dict[str, frozenset[str]] | None = None,
     ) -> None:
         self.registry = registry
         self.state_store = state_store
         self.policy_engine = policy_engine
         self.audit = audit
         self.clock = clock or SystemClock()
+        self.authorized_actuator_commands = authorized_actuator_commands or {}
 
     @property
     def current_revision(self) -> str:
@@ -125,6 +132,26 @@ class PlanService:
 
         errors: list[ErrorDetail] = []
         normalized = command
+        requires_actuator_binding = (
+            device.type.value in {"energy", "ev_charger"}
+            or capability.name in _PHYSICAL_ACTUATOR_CAPABILITY_NAMES
+            or capability.name.startswith(("battery.", "ev."))
+        )
+        if (
+            requires_actuator_binding
+            and capability.writable
+            and command.command not in self.authorized_actuator_commands.get(
+                device.id, frozenset()
+            )
+        ):
+            errors.append(
+                self._make_error(
+                    ErrorCode.ACTUATOR_AUTHORIZATION_REQUIRED,
+                    "Energy actuator requires an explicit server-owned dispatch binding",
+                    command,
+                    field="actuator_authorization",
+                )
+            )
         if capability.unit is not None and command.unit is None:
             normalized = normalized.model_copy(update={"unit": capability.unit})
         elif command.unit != capability.unit:
@@ -166,8 +193,16 @@ class PlanService:
 
     def validate(self, plan: Plan) -> Plan:
         validated_at = self.clock.now()
-        validation_expires_at = plan.expires_at or self._default_validation_expiry(
-            plan, validated_at
+        server_deadline = self._default_validation_expiry(plan, validated_at)
+        # Caller-supplied plan/window expiry may shorten evidence lifetime,
+        # never extend the server-owned validation maximum.
+        validation_expires_at = min(
+            value
+            for value in (
+                server_deadline,
+                plan.expires_at,
+            )
+            if value is not None
         )
         temporal_plan = plan
         if plan.execute_at is not None and plan.execution_window is None:
@@ -177,8 +212,7 @@ class PlanService:
                     "execution_window": ExecutionWindow(
                         intended_at=plan.execute_at,
                         not_before=plan.execute_at,
-                        not_after=plan.expires_at
-                        or plan.execute_at + self.DEFAULT_PLAN_TTL,
+                        not_after=validation_expires_at,
                         timezone=timezone or "UTC",
                         revision=plan.schedule_revision,
                     )
@@ -186,9 +220,11 @@ class PlanService:
             )
         elif (
             plan.execution_window is not None
-            and plan.execution_window.not_after > validation_expires_at
+            and plan.execution_window.not_after < validation_expires_at
         ):
-            validation_expires_at = plan.execution_window.not_after
+            validation_expires_at = min(
+                validation_expires_at, plan.execution_window.not_after
+            )
         errors = []
         decisions: list[PolicyDecision] = []
         seen_idempotency_keys: set[str] = set()
@@ -257,7 +293,7 @@ class PlanService:
                     device.id, postcondition.capability
                 )
                 if feedback_capability is not None and len(
-                    [route for route in feedback_routes if route.available]
+                    [route for route in feedback_routes if route.available and route.readable]
                 ) == 1:
                     capability_fingerprints[
                         f"{device.id}::postcondition::{postcondition.capability}"
@@ -275,7 +311,7 @@ class PlanService:
                         device.id, reconcile_capability_name
                     )
                     available_reconcile_routes = [
-                        route for route in reconcile_routes if route.available
+                        route for route in reconcile_routes if route.available and route.readable
                     ]
                     if reconcile_capability is not None and len(available_reconcile_routes) == 1:
                         fingerprint_key = (
@@ -299,7 +335,9 @@ class PlanService:
         )
         validated_plan = temporal_plan.model_copy(update={"commands": normalized_commands})
         definition_digest = self._definition_digest(validated_plan)
-        digest = self._digest(validated_plan, revision, decisions, dependencies)
+        digest = self._digest(
+            validated_plan, revision, decisions, dependencies, valid_until=validation_expires_at
+        )
         requires_confirmation = any(
             decision.action is PolicyAction.CONFIRM for decision in decisions
         )
@@ -323,6 +361,7 @@ class PlanService:
             runtime_revision=revision,
             errors=errors,
             digest=digest,
+            valid_until=validation_expires_at,
             dependencies=dependencies,
         )
         updated = validated_plan.model_copy(
@@ -350,12 +389,13 @@ class PlanService:
     def _default_validation_expiry(cls, plan: Plan, validated_at: datetime) -> datetime:
         """Keep scheduled plans valid through their requested execution window."""
 
-        anchor = (
-            plan.execute_at
-            if plan.execute_at is not None and plan.execute_at > validated_at
-            else validated_at
-        )
-        return anchor + cls.DEFAULT_PLAN_TTL
+        expiry = validated_at + cls.VALIDATION_TTL
+        # Evidence lifetime is server-owned, but rounding the default
+        # boundary to a minute keeps equivalent preview/validation calls
+        # stable across independent MCP clients. Rounding down is safe: it
+        # can shorten a validation window by at most one minute, never extend
+        # it beyond the configured TTL.
+        return expiry.replace(second=0, microsecond=0)
 
     def approve(self, plan: Plan, *, grant: ApprovalGrant) -> Plan:
         if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
@@ -368,6 +408,16 @@ class PlanService:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval grant does not match the validated plan",
             )
+        if grant.validation_valid_until != plan.validation.valid_until:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval grant does not match the validation evidence lifetime",
+            )
+        if grant.expires_at is not None and grant.expires_at <= self.clock.now():
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                "Approval grant has expired",
+            )
         expected_window_digest = plan.execution_window.digest if plan.execution_window else None
         if (
             grant.window_digest != expected_window_digest
@@ -378,15 +428,29 @@ class PlanService:
                 "Approval grant does not match the plan execution window",
             )
         assert_plan_transition(plan.status, PlanStatus.APPROVED)
+        scope_parts = [
+            scope
+            for scope, present in (
+                ("bundle", grant.bundle_digest is not None),
+                ("recurrence", grant.recurrence_digest is not None),
+            )
+            if present
+        ]
         approval = Approval(
             status="approved",
             approved_by=grant.approved_by,
-            approved_at=grant.issued_at,
+            approved_at=grant.approved_at or grant.issued_at,
             validation_digest=plan.validation.digest,
+            scope="+".join(scope_parts) if scope_parts else "plan",
+            bundle_digest=grant.bundle_digest,
+            recurrence_digest=grant.recurrence_digest,
+            validation_valid_until=grant.validation_valid_until,
+            expires_at=grant.expires_at,
             authentication_context=grant.authentication_context,
             session_id=grant.session_id,
             window_digest=expected_window_digest,
             schedule_revision=plan.schedule_revision,
+            approval_id=grant.approval_id,
         )
         approved = plan.model_copy(update={"status": PlanStatus.APPROVED, "approval": approval})
         self.audit.append(
@@ -400,6 +464,10 @@ class PlanService:
                 "session_id": grant.session_id,
                 "window_digest": approval.window_digest,
                 "schedule_revision": approval.schedule_revision,
+                "bundle_digest": approval.bundle_digest,
+                "expires_at": approval.expires_at.isoformat()
+                if approval.expires_at is not None
+                else None,
             },
         )
         return approved
@@ -427,6 +495,14 @@ class PlanService:
             )
         if plan.validation is None:
             raise DomainError(ErrorCode.VALIDATION_ERROR, "Plan has not been validated")
+        if (
+            plan.validation.valid_until is not None
+            and plan.validation.valid_until <= self.clock.now()
+        ):
+            raise DomainError(
+                ErrorCode.STALE_PLAN,
+                "Plan validation evidence has expired; create and validate a new plan",
+            )
         if plan.validation.status is ValidationStatus.INVALID:
             raise DomainError(ErrorCode.VALIDATION_ERROR, "Plan validation failed")
         if plan.status not in {PlanStatus.READY, PlanStatus.APPROVED}:
@@ -447,10 +523,39 @@ class PlanService:
                     ErrorCode.APPROVAL_REQUIRED,
                     "Plan requires explicit operator approval",
                 )
+            if plan.approval.approval_id is None:
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approval evidence is missing its identifier; obtain a new approval",
+                )
             if plan.approval.validation_digest != plan.validation.digest:
                 raise DomainError(
                     ErrorCode.APPROVAL_REQUIRED,
                     "Approval does not match the validated plan",
+                )
+            if (
+                plan.approval.expires_at is not None
+                and plan.approval.expires_at <= self.clock.now()
+            ):
+                raise DomainError(
+                    ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                    "Approval evidence has expired; obtain a new approval",
+                )
+            if plan.approval.validation_valid_until != plan.validation.valid_until:
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approval does not match the validation evidence lifetime",
+                )
+            expected_window_digest = (
+                plan.execution_window.digest if plan.execution_window is not None else None
+            )
+            if (
+                plan.approval.window_digest != expected_window_digest
+                or plan.approval.schedule_revision != plan.schedule_revision
+            ):
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approval does not match the plan execution window",
                 )
 
     def _dependencies_still_current(
@@ -497,7 +602,7 @@ class PlanService:
                     device.id, postcondition.capability
                 )
                 if feedback_capability is None or len(
-                    [route for route in feedback_routes if route.available]
+                    [route for route in feedback_routes if route.available and route.readable]
                 ) != 1:
                     return False
                 current_capability_fingerprints[
@@ -516,7 +621,7 @@ class PlanService:
                         device.id, reconcile_capability_name
                     )
                     available_reconcile_routes = [
-                        route for route in reconcile_routes if route.available
+                        route for route in reconcile_routes if route.available and route.readable
                     ]
                     if reconcile_capability is None or len(available_reconcile_routes) != 1:
                         return False
@@ -576,7 +681,9 @@ class PlanService:
                 )
                 continue
             routes = self.registry.routes_for(device.id, postcondition.capability)
-            available_routes = [route for route in routes if route.available]
+            available_routes = [
+                route for route in routes if route.available and route.readable
+            ]
             if len(available_routes) > 1:
                 errors.append(
                     self._make_error(
@@ -615,7 +722,9 @@ class PlanService:
                     )
                     continue
                 routes = self.registry.routes_for(device.id, reconcile_capability_name)
-                available_routes = [route for route in routes if route.available]
+                available_routes = [
+                    route for route in routes if route.available and route.readable
+                ]
                 if len(available_routes) > 1:
                     errors.append(
                         self._make_error(
@@ -809,6 +918,8 @@ class PlanService:
         revision: str,
         decisions: list[PolicyDecision],
         dependencies: PlanDependencies,
+        *,
+        valid_until: datetime | None = None,
     ) -> str:
         payload: dict[str, Any] = {
             "plan_id": plan.id,

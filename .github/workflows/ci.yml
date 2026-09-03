@@ -217,6 +217,38 @@ jobs:
       - run: uv sync
       - run: uv run --with pip-audit pip-audit --local
 
+  required-release-gates:
+    name: Required release gates
+    if: always()
+    needs:
+      - lock-check
+      - lint
+      - typecheck
+      - test-unit
+      - test-contract
+      - test-integration
+      - test-performance
+      - test-composition
+      - package
+      - schema-check
+      - contract-docs
+      - architecture
+      - import-linter-diagnostic
+      - dependency-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release gate
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          echo "gate results: ${RESULTS}"
+          case ",${RESULTS}," in
+            *,failure,*|*,cancelled,*|*,skipped,*)
+              echo "one or more required release gates did not pass" >&2
+              exit 1
+              ;;
+          esac
+
   # Closes P2.4 (spec 149): a single, SHA-tagged evidence bundle so
   # "the tests pass" is a downloadable artifact tied to this exact commit,
   # not a claim in a README that may predate the commit it's cited for.
@@ -242,6 +274,7 @@ jobs:
       - architecture
       - import-linter-diagnostic
       - dependency-audit
+      - required-release-gates
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

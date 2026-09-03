@@ -101,6 +101,14 @@
       "default": null,
       "title": "Predecessor Plan Id"
     },
+    "predecessor_plan_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 50,
+      "title": "Predecessor Plan Ids",
+      "type": "array"
+    },
     "predecessor_outcome_digest": {
       "anyOf": [
         {

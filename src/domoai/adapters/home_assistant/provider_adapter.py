@@ -9,7 +9,11 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timedelta
 from typing import Literal, cast
 
+from domoai.adapters.home_assistant.config import (
+    HomeAssistantDispatchableBatteryBinding,
+)
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
+from domoai.domain.energy import DispatchableBatteryBinding, EVChargingBinding
 from domoai.domain.models import (
     AdapterExecutionAck,
     AdapterHealth,
@@ -42,12 +46,28 @@ class HomeAssistantProviderAdapter:
 
     adapter_id = "home_assistant"
 
-    def __init__(self, provider: HomeAssistantProvider, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        provider: HomeAssistantProvider,
+        *,
+        clock: Clock | None = None,
+        dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
+        ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
+    ) -> None:
         self.provider = provider
         self._clock = clock or SystemClock()
         self._connected = False
         self._source_by_command: dict[tuple[str, str], list[str]] = {}
         self._canonical_by_source: dict[str, str] = {}
+        self._dispatchable_battery_binding = dispatchable_battery_binding
+        self._ev_charging_bindings = tuple(ev_charging_bindings)
+
+    def bind_dispatchable_battery(self, binding: DispatchableBatteryBinding) -> None:
+        """Attach the exact runtime binding used for physical takeover."""
+
+        if binding.provider_id != self.provider.manifest.provider_id:
+            raise ValueError("battery binding provider does not match Home Assistant")
+        self._dispatchable_battery_binding = binding
 
     async def connect(self) -> None:
         await self.provider.connect()
@@ -59,33 +79,46 @@ class HomeAssistantProviderAdapter:
         self._connected = False
 
     async def discover(self) -> AdapterSnapshot:
-        snapshot = await self.provider.snapshot()
+        provider_snapshot = await self.provider.snapshot()
+        if self._ev_charging_bindings:
+            self.provider.validate_ev_charging_routes(provider_snapshot)
+        snapshot = self._project_semantic_snapshot(provider_snapshot)
         self._remember_sources(snapshot)
         return snapshot
 
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         wanted = {source_ref.external_id for source_ref in source_refs}
-        snapshot = await self.provider.snapshot()
+        snapshot = self._project_semantic_snapshot(await self.provider.snapshot())
         now = self._clock.now()
-        return [
-            StateSnapshot(
-                device_id=str(state["entity_id"]),
-                capability=str(state["capability"]),
-                value=state.get("value"),
-                unit=state.get("unit"),
-                observed_at=now,
-                received_at=now,
-                status=(
-                    StateStatus.CURRENT if state.get("available", True) else StateStatus.UNAVAILABLE
-                ),
-                source_ref=SourceRef(
-                    adapter_id=self.adapter_id,
-                    external_id=str(state["entity_id"]),
-                ),
+        states: list[StateSnapshot] = []
+        for state in snapshot.source_states:
+            if str(state["entity_id"]) not in wanted:
+                continue
+            observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
+            received_at = max(
+                observed_at,
+                _parse_source_timestamp(state.get("received_at"), fallback=now),
             )
-            for state in snapshot.source_states
-            if str(state["entity_id"]) in wanted
-        ]
+            states.append(
+                StateSnapshot(
+                    device_id=str(state["entity_id"]),
+                    capability=str(state["capability"]),
+                    value=state.get("value"),
+                    unit=state.get("unit"),
+                    observed_at=observed_at,
+                    received_at=received_at,
+                    status=(
+                        StateStatus.CURRENT
+                        if state.get("available", True)
+                        else StateStatus.UNAVAILABLE
+                    ),
+                    source_ref=SourceRef(
+                        adapter_id=self.adapter_id,
+                        external_id=str(state["entity_id"]),
+                    ),
+                )
+            )
+        return states
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None
@@ -152,21 +185,15 @@ class HomeAssistantProviderAdapter:
         """
 
         now = self._clock.now()
-        binding = next(
-            (
-                item
-                for item in self.provider.battery_dispatch_bindings.values()
-                if item.device_id == request.device_id
-            ),
-            None,
-        )
+        snapshot = self._project_semantic_snapshot(await self.provider.snapshot())
+        self._remember_sources(snapshot)
+        binding = self._matching_dispatch_binding(request)
         if binding is None:
             return self._takeover_rejected(request, now, "battery_binding_not_found")
         if request.native_scheduler_status == "active":
             return self._takeover_rejected(
                 request, now, "native_scheduler_disable_not_configured"
             )
-        snapshot = await self.provider.snapshot()
         state = next(
             (
                 item
@@ -181,17 +208,22 @@ class HomeAssistantProviderAdapter:
             return self._takeover_rejected(request, now, "baseline_unavailable")
         if state is None or not state.get("available", True):
             return self._takeover_rejected(request, now, "baseline_unavailable")
+        observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
+        received_at = max(
+            now,
+            _parse_source_timestamp(state.get("received_at"), fallback=now),
+        )
         baseline = PhysicalBaseline(
             device_id=request.device_id,
             capability=binding.power_feedback_capability,
             power_kw=float(value),
-            observed_at=now,
-            received_at=now,
+            observed_at=observed_at,
+            received_at=received_at,
             source_ref=SourceRef(
                 adapter_id=self.adapter_id,
                 external_id=binding.power_feedback_entity_id,
             ),
-            state_revision=f"ha:{now.isoformat()}",
+            state_revision=f"ha:{observed_at.isoformat()}",
             native_scheduler_status=cast(
                 Literal["disabled", "inactive", "active", "unknown"],
                 request.native_scheduler_status,
@@ -210,6 +242,109 @@ class HomeAssistantProviderAdapter:
             first_command_confirmed=False,
             evidence_digest=self._takeover_digest(request, baseline),
         )
+
+    def _matching_dispatch_binding(
+        self, request: ControlTakeoverRequest
+    ) -> HomeAssistantDispatchableBatteryBinding | None:
+        """Resolve one static HA route set for the exact canonical binding."""
+
+        runtime_binding = self._dispatchable_battery_binding
+        candidates = list(self.provider.battery_dispatch_bindings.values())
+        if runtime_binding is None:
+            candidates = [item for item in candidates if item.device_id == request.device_id]
+        else:
+            if request.device_id != runtime_binding.device_id:
+                return None
+            actuator = runtime_binding.profile.actuator
+            if actuator is None:
+                return None
+            soc_observation = runtime_binding.profile.initial_soc_observation
+            capacity_source = runtime_binding.capacity_evidence.source_ref
+            candidates = [
+                item
+                for item in candidates
+                if item.control_capability == actuator.capability
+                and item.charge.provider_command == actuator.charge_command
+                and item.discharge.provider_command == actuator.discharge_command
+                and item.stop.provider_command == actuator.stop_command
+                and item.power_feedback_capability == actuator.power_feedback_capability
+                and (
+                    soc_observation is None
+                    or soc_observation.source_ref.external_id == item.soc_entity_id
+                )
+                and (
+                    capacity_source is None
+                    or capacity_source.external_id == item.capacity_entity_id
+                )
+            ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
+
+    def _project_semantic_snapshot(self, snapshot: AdapterSnapshot) -> AdapterSnapshot:
+        """Project provider metric mappings into the runtime AdapterPort view."""
+
+        mapping_actuator_names = {
+            item.control_capability
+            for item in self.provider.battery_dispatch_bindings.values()
+        }
+        mapping_actuator_names.update(
+            {
+                binding.power_feedback_capability
+                for binding in self.provider.ev_charging_bindings.values()
+            }
+        )
+        active_actuator_names = set()
+        if self._dispatchable_battery_binding is not None:
+            actuator = self._dispatchable_battery_binding.profile.actuator
+            if actuator is not None:
+                active_actuator_names.add(actuator.capability)
+        active_actuator_names.update(
+            binding.actuator.capability
+            for binding in self._ev_charging_bindings
+            if binding.provider_id == self.provider.manifest.provider_id
+        )
+        explicit_sensor_mapping = bool(
+            self.provider.metric_mappings or self.provider.battery_capacity_bindings
+        )
+        entities: list[dict[str, object]] = []
+        for raw_entity in snapshot.source_entities:
+            entity = dict(raw_entity)
+            entity_id = str(entity["entity_id"])
+            capabilities: list[dict[str, object]] = []
+            for raw_capability in entity.get("capabilities", []):
+                capability = dict(raw_capability)
+                raw_name = str(capability["name"])
+                semantic_name = self.provider.semantic_capability(entity_id, raw_name)
+                if (
+                    semantic_name is None
+                    and explicit_sensor_mapping
+                    and str(entity.get("domain")) == "sensor"
+                ):
+                    continue
+                capability["name"] = semantic_name or raw_name
+                if raw_name not in mapping_actuator_names or raw_name in active_actuator_names:
+                    capabilities.append(capability)
+            if (
+                explicit_sensor_mapping
+                and str(entity.get("domain")) == "sensor"
+                and not capabilities
+            ):
+                continue
+            entity["capabilities"] = capabilities
+            entities.append(entity)
+
+        states: list[dict[str, object]] = []
+        for raw_state in snapshot.source_states:
+            state = dict(raw_state)
+            entity_id = str(state["entity_id"])
+            raw_name = str(state["capability"])
+            semantic_name = self.provider.semantic_capability(entity_id, raw_name)
+            if semantic_name is None and explicit_sensor_mapping:
+                continue
+            state["capability"] = semantic_name or raw_name
+            states.append(state)
+        return snapshot.model_copy(update={"source_entities": entities, "source_states": states})
 
     def _takeover_rejected(
         self, request: ControlTakeoverRequest, now: datetime, failure_code: str
@@ -277,6 +412,18 @@ class HomeAssistantProviderAdapter:
                     self._source_by_command.setdefault((canonical_id, str(command)), []).append(
                         entity_id
                     )
+
+
+def _parse_source_timestamp(value: object, *, fallback: datetime) -> datetime:
+    if value is None:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+    if parsed.tzinfo is None:
+        return fallback
+    return parsed.astimezone(fallback.tzinfo)
 
 
 def _slug(value: str) -> str:

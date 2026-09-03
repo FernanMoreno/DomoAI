@@ -8,13 +8,24 @@ from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import Command, Plan
 from domoai.runtime.events import AuditLog
+from domoai.runtime.execution_context import ExecutionContext, execution_principal
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
 
+class _ContextRecordingAdapter(SimulatedHomeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.execution_contexts: list[ExecutionContext | None] = []
+
+    async def execute(self, command, execution_context=None):
+        self.execution_contexts.append(execution_context)
+        return await super().execute(command, execution_context)
+
+
 @pytest.mark.asyncio
 async def test_audit_log_reconstructs_full_lineage_of_one_plan_execution() -> None:
-    adapter = SimulatedHomeAdapter()
+    adapter = _ContextRecordingAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
     audit = AuditLog()
@@ -38,7 +49,8 @@ async def test_audit_log_reconstructs_full_lineage_of_one_plan_execution() -> No
     )
     validated = facade.validate_plan(plan)
 
-    await facade.execute_plan(validated)
+    with execution_principal("agent-codex"):
+        await facade.execute_plan(validated)
 
     events = [event for event in audit.events if event.payload.get("plan_id") == "plan-audit-chain"]
     started = next(event for event in events if event.event_type == "plan_execution_started")
@@ -46,11 +58,18 @@ async def test_audit_log_reconstructs_full_lineage_of_one_plan_execution() -> No
     completed = next(event for event in events if event.event_type == "plan_execution_completed")
 
     assert started.payload["agent_request_id"] == "agent-req-audit-chain"
+    assert started.payload["client_principal_id"] == "agent-codex"
     attempt_id = started.payload["execution_attempt_id"]
     assert attempt_id
     assert outcome_events
     assert all(event.payload["execution_attempt_id"] == attempt_id for event in outcome_events)
     assert all(event.payload["adapter_request_id"] for event in outcome_events)
+    assert all(event.payload["client_principal_id"] == "agent-codex" for event in outcome_events)
+    assert adapter.execution_contexts
+    assert all(
+        context is not None and context.client_principal_id == "agent-codex"
+        for context in adapter.execution_contexts
+    )
     assert completed.payload["execution_attempt_id"] == attempt_id
 
 

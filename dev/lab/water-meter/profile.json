@@ -1,0 +1,7 @@
+{
+  "provider_id": "lab-water-meter",
+  "device_id": "lab-water-1",
+  "initial_total_volume_l": 0.0,
+  "initial_flow_rate_lpm": 0.0,
+  "tick_seconds": 1.0
+}

@@ -16,7 +16,11 @@ from domoai.domain.energy import (
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
+    EVActuator,
+    EVChargingBinding,
+    HVACActuator,
     NominalCapacityTrustPolicy,
+    ThermalProfile,
 )
 from domoai.domain.models import SourceRef, StrictModel
 from domoai.domain.provider import MeasurementQuality
@@ -56,6 +60,12 @@ class SolarForecastPoint(StrictModel):
         ):
             raise ValueError("power must fall within its confidence band")
         return self
+
+
+class ExteriorTemperaturePoint(StrictModel):
+    slot: int = Field(ge=0)
+    temperature_c: float
+    unit: Literal["degC"] = "degC"
 
 
 class BaseLoadPoint(StrictModel):
@@ -113,6 +123,8 @@ class EnergyContext(StrictModel):
     export_tariffs: list[TariffPoint] | None = None
     battery: BatteryProfile | None = None
     ev_states: list[EVState] = Field(default_factory=list)
+    thermal: ThermalProfile | None = None
+    exterior_temperature_forecast: list[ExteriorTemperaturePoint] | None = None
     source_revision: str = Field(min_length=1)
     observed_at: datetime
 
@@ -124,7 +136,13 @@ class EnergyContext(StrictModel):
         if len(ev_devices) != len(set(ev_devices)):
             raise ValueError("ev_states must contain one state per device")
         expected = list(range(self.horizon.slots))
-        SeriesEntry = tuple[str, list[TariffPoint] | list[SolarForecastPoint] | list[BaseLoadPoint]]
+        SeriesEntry = tuple[
+            str,
+            list[TariffPoint]
+            | list[SolarForecastPoint]
+            | list[BaseLoadPoint]
+            | list[ExteriorTemperaturePoint],
+        ]
         series: list[SeriesEntry] = [
             ("tariffs", self.tariffs),
             ("solar_forecast", self.solar_forecast),
@@ -133,6 +151,8 @@ class EnergyContext(StrictModel):
             series.append(("base_load_forecast", self.base_load_forecast))
         if self.export_tariffs is not None:
             series.append(("export_tariffs", self.export_tariffs))
+        if self.exterior_temperature_forecast is not None:
+            series.append(("exterior_temperature_forecast", self.exterior_temperature_forecast))
         for name, points in series:
             slots = [point.slot for point in points]
             if len(points) != self.horizon.slots:
@@ -177,11 +197,16 @@ __all__ = [
     "BatterySocConversionEvidence",
     "BatterySocObservation",
     "DispatchableBatteryBinding",
+    "EVActuator",
+    "EVChargingBinding",
+    "HVACActuator",
     "NominalCapacityTrustPolicy",
+    "ThermalProfile",
     "BaseLoadPoint",
     "ConfidenceBand",
     "EnergyContext",
     "EVState",
+    "ExteriorTemperaturePoint",
     "SolarForecastPoint",
     "StaticEnergyContextProvider",
     "TariffPoint",

@@ -129,6 +129,20 @@ class VirtualBridge:
         state.update(payload)
         return dict(state)
 
+    def apply_get(self, friendly_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the current source state for a bounded Zigbee2MQTT get."""
+
+        if friendly_name not in self.states:
+            raise ValueError(f"unknown virtual Zigbee2MQTT device: {friendly_name}")
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("virtual Zigbee2MQTT get payload must be a non-empty object")
+        unknown = set(payload) - set(self.states[friendly_name])
+        if unknown:
+            raise ValueError(f"unsupported virtual Zigbee2MQTT fields: {sorted(unknown)}")
+        if any(value is not None for value in payload.values()):
+            raise ValueError("virtual Zigbee2MQTT get values must be null")
+        return dict(self.states[friendly_name])
+
 
 def _json(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode()
@@ -178,12 +192,17 @@ def run() -> None:
 
     def on_message(_client: Any, _userdata: Any, message: Any) -> None:
         relative = str(message.topic)[len(bridge.base_topic) + 1 :]
-        if not relative.endswith("/set"):
+        if not (relative.endswith("/set") or relative.endswith("/get")):
             return
-        friendly_name = relative[: -len("/set")]
+        suffix = "/set" if relative.endswith("/set") else "/get"
+        friendly_name = relative[: -len(suffix)]
         try:
             payload = json.loads(bytes(message.payload).decode())
-            state = bridge.apply_set(friendly_name, payload)
+            state = (
+                bridge.apply_set(friendly_name, payload)
+                if suffix == "/set"
+                else bridge.apply_get(friendly_name, payload)
+            )
         except (ValueError, json.JSONDecodeError):
             return
         client.publish(bridge.topic(friendly_name), payload=_json(state), retain=True)

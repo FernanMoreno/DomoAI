@@ -208,6 +208,8 @@ class HomeAssistantMapper:
                 "value": state.get(capability.name),
                 "unit": capability.unit,
                 "available": entity.get("available", True),
+                "observed_at": entity.get("last_updated") or entity.get("last_changed"),
+                "received_at": entity.get("received_at"),
             }
             for capability in capabilities
             if capability.name in state

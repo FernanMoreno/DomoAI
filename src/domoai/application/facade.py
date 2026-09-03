@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ExecutionSummary, Plan
@@ -13,6 +14,10 @@ class DomoticsFacade:
         self.plan_service = plan_service
         self.executor = executor
 
+    @property
+    def execution_admission(self) -> ExecutionAdmission | None:
+        return self.executor.execution_admission
+
     def validate_plan(self, plan: Plan) -> Plan:
         return self.plan_service.validate(plan)
 
@@ -20,8 +25,14 @@ class DomoticsFacade:
         return self.plan_service.approve(plan, grant=grant)
 
     async def execute_plan(
-        self, plan: Plan, *, state_version_overrides: dict[str, int] | None = None
+        self,
+        plan: Plan,
+        *,
+        state_version_overrides: dict[str, int] | None = None,
+        aggregate_owner: bool = False,
     ) -> ExecutionSummary:
         return await self.executor.execute(
-            plan, state_version_overrides=state_version_overrides
+            plan,
+            state_version_overrides=state_version_overrides,
+            aggregate_owner=aggregate_owner,
         )

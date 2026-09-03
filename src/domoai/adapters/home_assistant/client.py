@@ -88,13 +88,29 @@ class HomeAssistantClient:
     async def fetch_entity_registry(self) -> list[dict[str, Any]]:
         """Fetch enabled entity-registry entries through the HA WebSocket API."""
 
+        result = await self._fetch_websocket_result("config/entity_registry/list")
+        entries = result.get("entities", []) if isinstance(result, dict) else result
+        if not isinstance(entries, list):
+            raise ValueError("Home Assistant entity registry returned an invalid payload")
+        return [self._decode_entity_registry_entry(dict(entry)) for entry in entries]
+
+    async def fetch_device_registry(self) -> list[dict[str, Any]]:
+        """Fetch device identity claims through the HA WebSocket API."""
+
+        result = await self._fetch_websocket_result("config/device_registry/list")
+        entries = result if isinstance(result, list) else []
+        return [self._decode_device_registry_entry(dict(entry)) for entry in entries]
+
+    async def _fetch_websocket_result(self, command: str) -> Any:
+        """Authenticate once and return one Home Assistant WebSocket result."""
+
         async with websockets.connect(self.websocket_url, open_timeout=self.timeout) as socket:
             await self._authenticate_socket(socket)
             await socket.send(
                 json.dumps(
                     {
                         "id": 1,
-                        "type": "config/entity_registry/list_for_display",
+                        "type": command,
                     }
                 )
             )
@@ -103,12 +119,8 @@ class HomeAssistantClient:
                 if payload.get("id") != 1:
                     continue
                 if not payload.get("success"):
-                    raise ValueError("Home Assistant entity registry request failed")
-                result = payload.get("result", {})
-                entries = result.get("entities", []) if isinstance(result, dict) else result
-                if not isinstance(entries, list):
-                    raise ValueError("Home Assistant entity registry returned an invalid payload")
-                return [self._decode_entity_registry_entry(dict(entry)) for entry in entries]
+                    raise ValueError(f"Home Assistant WebSocket command failed: {command}")
+                return payload.get("result", {})
 
     async def health(self) -> bool:
         try:
@@ -166,4 +178,18 @@ class HomeAssistantClient:
             "area_id": entry.get("area_id", entry.get("ai")),
             "device_id": entry.get("device_id", entry.get("di")),
             "name": entry.get("name", entry.get("en")),
+            "unique_id": entry.get("unique_id", entry.get("ui")),
+        }
+
+    @staticmethod
+    def _decode_device_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        """Expand a device registry entry into stable identity claims."""
+
+        return {
+            "id": entry.get("id"),
+            "identifiers": entry.get("identifiers", []),
+            "connections": entry.get("connections", []),
+            "manufacturer": entry.get("manufacturer"),
+            "model": entry.get("model"),
+            "name": entry.get("name"),
         }

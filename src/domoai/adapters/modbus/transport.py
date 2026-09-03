@@ -263,9 +263,18 @@ class PyModbusTcpTransport:
         try:
             result = method(*operation_args, slave=unit_id)
         except TypeError as error:
-            if "slave" not in str(error):
-                raise
-            result = method(*operation_args, device_id=unit_id)
+            if method_name.startswith("read_") and len(operation_args) == 2:
+                # PyModbus 3.x made read count keyword-only and renamed the
+                # unit selector to device_id.  Keep the legacy call above so
+                # older clients and the existing contract remain supported,
+                # then adapt only this read shape for current clients.
+                result = method(
+                    operation_args[0], count=operation_args[1], device_id=unit_id
+                )
+            else:
+                if "slave" not in str(error):
+                    raise
+                result = method(*operation_args, device_id=unit_id)
         if inspect.isawaitable(result):
             return await asyncio.wait_for(result, self.timeout)
         return result

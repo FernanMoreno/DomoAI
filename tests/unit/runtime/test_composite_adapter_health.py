@@ -30,6 +30,24 @@ async def test_all_healthy_components_are_listed_as_connected() -> None:
     assert component_ids == {"home_assistant": True, "modbus": True}
 
 
+def test_event_driven_state_polling_is_scoped_to_declared_children() -> None:
+    event_driven = _adapter("knx")
+    event_driven.state_events_are_authoritative = True
+    polled = _adapter("modbus")
+    composite = CompositeAdapter([event_driven, polled])
+
+    assert composite.event_driven_state_adapter_ids == frozenset({"knx"})
+
+
+def test_static_inventory_sources_are_scoped_to_declared_children() -> None:
+    static = _adapter("knx")
+    static.inventory_is_static = True
+    dynamic = _adapter("modbus")
+    composite = CompositeAdapter([static, dynamic])
+
+    assert composite.static_inventory_adapter_ids == frozenset({"knx"})
+
+
 @pytest.mark.asyncio
 async def test_one_down_adapter_is_individually_identifiable() -> None:
     first = _adapter("home_assistant")
@@ -43,6 +61,27 @@ async def test_one_down_adapter_is_individually_identifiable() -> None:
     assert health.components is not None
     down = [component for component in health.components if not component.connected]
     assert [component.adapter_id for component in down] == ["modbus"]
+
+
+@pytest.mark.asyncio
+async def test_transient_child_unavailability_remains_eligible_for_discovery() -> None:
+    child = _adapter("knx")
+    composite = CompositeAdapter([child])
+    await composite.connect()
+    child.available = False
+
+    health = await composite.health()
+
+    assert health.connected is False
+    assert health.components is not None
+    assert health.components[0].connected is False
+
+    # A physical/availability failure is not the same as losing the
+    # transport lifecycle slot.  The supervisor must be able to reconnect or
+    # rediscover this child on the next cycle.
+    child.available = True
+    snapshot = await composite.discover()
+    assert snapshot.source_entities
 
 
 @pytest.mark.asyncio

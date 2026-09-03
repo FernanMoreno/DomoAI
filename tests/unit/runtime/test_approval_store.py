@@ -4,6 +4,7 @@ import pytest
 
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    Approval,
     Command,
     ExecutionWindow,
     Plan,
@@ -77,6 +78,96 @@ def test_consume_succeeds_for_matching_plan_and_digest() -> None:
 
     assert consumed.approved_by == "operator"
     assert consumed.plan_id == "plan-1"
+
+
+def test_verify_consumed_accepts_only_the_authoritative_approval_projection() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(plan, approved_by="operator", operator_token=OPERATOR_TOKEN)
+    store.consume(grant.approval_id, plan)
+    approved = plan.model_copy(
+        update={
+            "status": PlanStatus.APPROVED,
+            "approval": Approval(
+                status="approved",
+                approved_by=grant.approved_by,
+                approved_at=grant.issued_at,
+                validation_digest=grant.validation_digest,
+                authentication_context=grant.authentication_context,
+                session_id=grant.session_id,
+                bundle_digest=grant.bundle_digest,
+                recurrence_digest=grant.recurrence_digest,
+                validation_valid_until=grant.validation_valid_until,
+                expires_at=grant.expires_at,
+                window_digest=grant.window_digest,
+                schedule_revision=grant.schedule_revision,
+                approval_id=grant.approval_id,
+            ),
+        }
+    )
+
+    assert store.verify_consumed(approved) == grant
+
+
+def test_verify_consumed_rejects_a_forged_approval_projection() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    forged = plan.model_copy(
+        update={
+            "status": PlanStatus.APPROVED,
+            "approval": Approval(
+                status="approved",
+                approved_by="forged-operator",
+                approved_at=datetime.now(UTC),
+                validation_digest=plan.validation.digest,
+                approval_id="forged-approval-id",
+            ),
+        }
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        store.verify_consumed(forged)
+
+    assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+def test_verify_consumed_rejects_a_standing_approval_for_one_off_execution() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(
+        plan,
+        approved_by="operator",
+        operator_token=OPERATOR_TOKEN,
+        recurrence_digest="sha256:standing-rule",
+    )
+    store.consume(
+        grant.approval_id,
+        plan,
+        recurrence_digest="sha256:standing-rule",
+    )
+    approved = plan.model_copy(
+        update={
+            "status": PlanStatus.APPROVED,
+            "approval": Approval(
+                status="approved",
+                approved_by=grant.approved_by,
+                approved_at=grant.issued_at,
+                validation_digest=grant.validation_digest,
+                scope="recurrence",
+                recurrence_digest=grant.recurrence_digest,
+                validation_valid_until=grant.validation_valid_until,
+                expires_at=grant.expires_at,
+                window_digest=grant.window_digest,
+                schedule_revision=grant.schedule_revision,
+                approval_id=grant.approval_id,
+            ),
+        }
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        store.verify_consumed(approved)
+
+    assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
 
 
 def test_consume_rejects_unknown_approval_id() -> None:

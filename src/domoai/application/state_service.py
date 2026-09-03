@@ -19,11 +19,13 @@ class StateService:
     ) -> list[StateSnapshot]:
         wanted_capabilities = set(capabilities or [])
         result: list[StateSnapshot] = []
+        now = self.state_store.clock.now()
         for snapshot in await self.state_store.all():
             if snapshot.device_id not in device_ids:
                 continue
             if wanted_capabilities and snapshot.capability not in wanted_capabilities:
                 continue
+            snapshot = self.state_store.effective_snapshot(snapshot, now)
             if not allow_stale and snapshot.status.value in {"stale", "unavailable"}:
                 continue
             result.append(snapshot)

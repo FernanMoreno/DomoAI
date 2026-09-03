@@ -8,6 +8,8 @@ import pytest
 from domoai.adapters.home_assistant.config import (
     HomeAssistantBatteryCapacityBinding,
     HomeAssistantDispatchableBatteryBinding,
+    HomeAssistantEVChargingBinding,
+    HomeAssistantIdentityClaims,
     HomeAssistantMappingConfigurationError,
 )
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
@@ -75,7 +77,7 @@ def _dispatch_states(**overrides: object) -> list[dict[str, Any]]:
         {
             "entity_id": "sensor.battery_power",
             "state": "-1.2",
-            "attributes": {"unit_of_measurement": "kW", "device_class": "power"},
+            "attributes": {"unit_of_measurement": "kW"},
             "device_id": "ha-battery-1",
         },
         {
@@ -98,6 +100,231 @@ def _dispatch_states(**overrides: object) -> list[dict[str, Any]]:
         entity = next(item for item in states if item["entity_id"] == entity_id)
         entity.update(changes if isinstance(changes, dict) else {})
     return states
+
+
+def _ev_binding(**overrides: object) -> HomeAssistantEVChargingBinding:
+    values: dict[str, object] = {
+        "device_id": "ha-ev-1",
+        "canonical_device_id": "lab.ev_charger",
+        "soc_entity_id": "sensor.ev_soc",
+        "power_feedback_entity_id": "sensor.ev_power",
+        "capacity_entity_id": "sensor.ev_capacity",
+        "connected_entity_id": "binary_sensor.ev_connected",
+        "charge": {
+            "entity_id": "number.ev_command",
+            "provider_command": "charge_ev",
+            "service_domain": "number",
+            "service": "set_value",
+            "value_transform": "as_is",
+        },
+        "stop": {
+            "entity_id": "number.ev_command",
+            "provider_command": "stop_ev",
+            "service_domain": "number",
+            "service": "set_value",
+            "value_transform": "zero",
+        },
+    }
+    values.update(overrides)
+    return HomeAssistantEVChargingBinding.model_validate(values)
+
+
+def _ev_states(**overrides: object) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = [
+        {
+            "entity_id": "sensor.ev_soc",
+            "state": "20",
+            "attributes": {"unit_of_measurement": "kWh"},
+            "device_id": "ha-ev-1",
+        },
+        {
+            "entity_id": "sensor.ev_power",
+            "state": "0",
+            "attributes": {"unit_of_measurement": "kW"},
+            "device_id": "ha-ev-1",
+        },
+        {
+            "entity_id": "sensor.ev_capacity",
+            "state": "60",
+            "attributes": {"unit_of_measurement": "kWh", "device_class": "energy_storage"},
+            "device_id": "ha-ev-1",
+        },
+        {
+            "entity_id": "binary_sensor.ev_connected",
+            "state": "on",
+            "attributes": {},
+            "device_id": "ha-ev-1",
+        },
+        {
+            "entity_id": "number.ev_command",
+            "state": "0",
+            "attributes": {"unit_of_measurement": "kW", "min": 0, "max": 11, "step": 0.1},
+            "device_id": "ha-ev-1",
+        },
+    ]
+    for entity_id, changes in overrides.items():
+        entity = next(item for item in states if item["entity_id"] == entity_id)
+        if isinstance(changes, dict):
+            entity.update(changes)
+    return states
+
+
+def _ev_provider(
+    states: list[dict[str, Any]],
+    *,
+    binding: HomeAssistantEVChargingBinding | None = None,
+) -> tuple[HomeAssistantProvider, FakeHomeAssistantProviderClient]:
+    client = FakeHomeAssistantProviderClient(states)
+    provider = HomeAssistantProvider(
+        client,
+        metric_mappings={
+            "sensor.ev_soc": {"value": "ev.soc"},
+            "sensor.ev_power": {"value": "ev_charging"},
+            "sensor.ev_capacity": {"value": "ev.capacity"},
+            "binary_sensor.ev_connected": {"value": "ev.connected"},
+        },
+        ev_charging_bindings={"lab-ev": binding or _ev_binding()},
+    )
+    return provider, client
+
+
+@pytest.mark.asyncio
+async def test_provider_projects_and_validates_ev_routes_without_service_calls() -> None:
+    provider, client = _ev_provider(_ev_states())
+
+    snapshot = await provider.snapshot()
+    provider.validate_ev_charging_routes(snapshot)
+
+    entities = {str(entity["entity_id"]): entity for entity in snapshot.source_entities}
+    assert {str(state["capability"]) for state in snapshot.source_states} >= {
+        "value"
+    }
+    assert any(
+        capability["name"] == "ev_charging"
+        and "charge_ev" in capability["commands"]
+        and "stop_ev" in capability["commands"]
+        for capability in entities["number.ev_command"]["capabilities"]
+    )
+    assert any(
+        state["entity_id"] == "binary_sensor.ev_connected"
+        and state["value"] is True
+        for state in snapshot.source_states
+    )
+    assert client.service_calls == []
+
+
+@pytest.mark.asyncio
+async def test_provider_translates_ev_numeric_routes() -> None:
+    provider, client = _ev_provider(_ev_states())
+    await provider.snapshot()
+
+    charge = await provider.execute(
+        _command("number.ev_command", "charge_ev", "ev-charge", value=7.2)
+    )
+    stop = await provider.execute(
+        _command("number.ev_command", "stop_ev", "ev-stop", value=1.0)
+    )
+
+    assert charge.status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert stop.status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert client.service_calls == [
+        ("number", "set_value", {"entity_id": "number.ev_command", "value": 7.2}),
+        ("number", "set_value", {"entity_id": "number.ev_command", "value": 0}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_projects_ev_commands_when_charge_and_stop_use_distinct_entities() -> None:
+    states = _ev_states()
+    states.append(
+        {
+            "entity_id": "number.ev_stop_command",
+            "state": "0",
+            "attributes": {"unit_of_measurement": "kW", "min": 0, "max": 7.4},
+            "device_id": "ha-ev-1",
+        }
+    )
+    binding = _ev_binding(
+        stop={
+            "entity_id": "number.ev_stop_command",
+            "provider_command": "stop_ev",
+            "service_domain": "number",
+            "service": "set_value",
+            "value_transform": "zero",
+        }
+    )
+    provider, client = _ev_provider(states, binding=binding)
+
+    snapshot = await provider.snapshot()
+    provider.validate_ev_charging_routes(snapshot)
+
+    command_entities = {
+        str(entity["entity_id"]): entity for entity in snapshot.source_entities
+    }
+    for entity_id in ("number.ev_command", "number.ev_stop_command"):
+        assert any(
+            capability["name"] == "ev_charging"
+            and set(capability["commands"]) == {"charge_ev", "stop_ev"}
+            for capability in command_entities[entity_id]["capabilities"]
+        )
+
+    result = await provider.execute(
+        _command("number.ev_stop_command", "stop_ev", "ev-stop-distinct", value=1.0)
+    )
+    assert result.status is ExecutionStatus.CONFIRMED_SUCCESS
+    assert client.service_calls[-1] == (
+        "number",
+        "set_value",
+        {"entity_id": "number.ev_stop_command", "value": 0},
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_subscribe_preserves_ev_boolean_semantics_and_source_time() -> None:
+    client = FakeHomeAssistantProviderClient(
+        _ev_states(),
+        events=[
+            {
+                "event": {
+                    "data": {
+                        "entity_id": "binary_sensor.ev_connected",
+                        "new_state": {
+                            "state": "off",
+                            "last_updated": "2026-08-31T09:00:00+00:00",
+                            "last_changed": "2026-08-31T09:00:00+00:00",
+                        },
+                    }
+                }
+            }
+        ],
+    )
+    provider = HomeAssistantProvider(
+        client,
+        metric_mappings={"binary_sensor.ev_connected": {"value": "ev.connected"}},
+        ev_charging_bindings={"lab-ev": _ev_binding()},
+    )
+
+    measurements = []
+    async for measurement in provider.subscribe():
+        measurements.append(measurement)
+
+    assert len(measurements) == 1
+    assert measurements[0].metric == "ev.connected"
+    assert measurements[0].value is False
+    assert measurements[0].observed_at.isoformat() == "2026-08-31T09:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_ev_route_with_unavailable_connection() -> None:
+    provider, client = _ev_provider(
+        _ev_states(**{"binary_sensor.ev_connected": {"available": False}})
+    )
+
+    snapshot = await provider.snapshot()
+
+    with pytest.raises(HomeAssistantMappingConfigurationError, match="connected"):
+        provider.validate_ev_charging_routes(snapshot)
+    assert client.service_calls == []
 
 
 def _dispatch_provider(
@@ -136,6 +363,118 @@ async def test_provider_validates_dispatch_routes_against_snapshot_without_servi
 
     assert client.service_calls == []
     assert client.fetch_states_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_projects_configured_canonical_device_id() -> None:
+    provider, _client = _dispatch_provider(
+        _dispatch_states(),
+        binding=_dispatch_binding(canonical_device_id="lab.battery"),
+    )
+
+    snapshot = await provider.snapshot()
+
+    route_entity_ids = {
+        "sensor.battery_soc",
+        "sensor.battery_power",
+        "sensor.battery_capacity",
+        "cover.battery_command",
+    }
+    assert {
+        entity["canonical_id"]
+        for entity in snapshot.source_entities
+        if entity["entity_id"] in route_entity_ids
+    } == {"lab.battery"}
+
+
+@pytest.mark.asyncio
+async def test_provider_resolves_recreated_device_id_from_stable_identity_claims() -> None:
+    states = _dispatch_states()
+    for state in states:
+        state["device_id"] = "ha-battery-recreated"
+    client = FakeHomeAssistantProviderClient(
+        states,
+        device_registry=[
+            {
+                "id": "ha-battery-recreated",
+                "identifiers": [["mqtt", "lab-battery-1"]],
+                "connections": [],
+                "name": "Battery after registry rename",
+            }
+        ],
+    )
+    claims = HomeAssistantIdentityClaims(identity_keys=["mqtt:lab-battery-1"])
+    capacity = HomeAssistantBatteryCapacityBinding(
+        device_id="ha-battery-before-recreation",
+        identity_claims=claims,
+        semantics="nominal_capacity",
+        nominal_capacity_attestation=_capacity_attestation(),
+    )
+    binding = _dispatch_binding(
+        device_id="ha-battery-before-recreation", identity_claims=claims
+    )
+    provider = HomeAssistantProvider(
+        client,
+        metric_mappings={
+            "sensor.battery_soc": {"battery": "battery.soc"},
+            "sensor.battery_power": {"power": "battery.power"},
+        },
+        battery_capacity_bindings={"sensor.battery_capacity": capacity},
+        battery_dispatch_bindings={"home-battery": binding},
+    )
+
+    snapshot = await provider.snapshot()
+    provider.validate_battery_dispatch_routes(snapshot)
+    measurements = await provider.get_measurements()
+
+    assert {item.device_id for item in measurements} == {"ha-battery-recreated"}
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_ambiguous_identity_claims_fail_closed() -> None:
+    states = _dispatch_states()
+    for state in states:
+        state["device_id"] = "ha-battery-one"
+    states.append(
+        {
+            "entity_id": "sensor.other_battery_power",
+            "state": "0",
+            "attributes": {"unit_of_measurement": "kW", "device_class": "power"},
+            "device_id": "ha-battery-two",
+        }
+    )
+    client = FakeHomeAssistantProviderClient(
+        states,
+        device_registry=[
+            {
+                "id": "ha-battery-one",
+                "identifiers": [["mqtt", "lab-battery-1"]],
+                "connections": [],
+            },
+            {
+                "id": "ha-battery-two",
+                "identifiers": [["mqtt", "lab-battery-1"]],
+                "connections": [],
+            },
+        ],
+    )
+    claims = HomeAssistantIdentityClaims(identity_keys=["mqtt:lab-battery-1"])
+    provider = HomeAssistantProvider(
+        client,
+        battery_capacity_bindings={
+            "sensor.battery_capacity": HomeAssistantBatteryCapacityBinding(
+                identity_claims=claims,
+                semantics="nominal_capacity",
+                nominal_capacity_attestation=_capacity_attestation(),
+            )
+        },
+        battery_dispatch_bindings={
+            "home-battery": _dispatch_binding(device_id=None, identity_claims=claims)
+        },
+    )
+
+    with pytest.raises(HomeAssistantMappingConfigurationError, match="ambiguous"):
+        await provider.snapshot()
 
 
 @pytest.mark.asyncio
@@ -197,9 +536,7 @@ async def test_provider_translates_numeric_battery_routes_and_projects_control_c
         for entity in snapshot.source_entities
         if entity["entity_id"] == "number.battery_command"
     )
-    assert any(
-        item["name"] == "battery_control" for item in command_entity["capabilities"]
-    )
+    assert any(item["name"] == "battery_control" for item in command_entity["capabilities"])
 
     for command, expected in (
         ("charge_battery", 1.5),

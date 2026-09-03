@@ -40,12 +40,23 @@ class BundleCommitRequestMember(StrictModel):
     execute_at: datetime | None = None
     approval_id: str | None = None
     predecessor_plan_id: str | None = None
+    predecessor_plan_ids: list[str] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> BundleCommitRequestMember:
         if self.execute_at is not None and self.execute_at.tzinfo is None:
             raise ValueError("execute_at must be timezone-aware")
+        normalized = list(dict.fromkeys(self.predecessor_plan_ids))
+        if self.predecessor_plan_id is not None and self.predecessor_plan_id not in normalized:
+            normalized.insert(0, self.predecessor_plan_id)
+        if any(not item.strip() for item in normalized):
+            raise ValueError("predecessor plan IDs must be non-empty")
+        self.predecessor_plan_ids = normalized
         return self
+
+    @property
+    def all_predecessor_plan_ids(self) -> list[str]:
+        return list(self.predecessor_plan_ids)
 
 
 class BundleCommitRequest(StrictModel):
@@ -68,8 +79,8 @@ def bundle_approval_digest(
             if member.execute_at is not None
             else None,
         }
-        if member.predecessor_plan_id is not None:
-            member_payload["predecessor_plan_id"] = member.predecessor_plan_id
+        if member.all_predecessor_plan_ids:
+            member_payload["predecessor_plan_ids"] = member.all_predecessor_plan_ids
         canonical_members.append(member_payload)
     digest_payload: dict[str, Any] = {
         "schema": "bundle-approval-v1",
@@ -122,12 +133,14 @@ class BundleCommitService:
         ]
         member_ids = [member.plan_id for member in request.members]
         for index, member in enumerate(request.members):
-            if member.predecessor_plan_id is not None:
-                if member.predecessor_plan_id not in member_ids[:index]:
-                    raise DomainError(
-                        ErrorCode.VALIDATION_ERROR,
-                        "A predecessor must refer to an earlier bundle member",
-                    )
+            if any(
+                predecessor not in member_ids[:index]
+                for predecessor in member.all_predecessor_plan_ids
+            ):
+                raise DomainError(
+                    ErrorCode.VALIDATION_ERROR,
+                    "A predecessor must refer to an earlier bundle member",
+                )
         bundle = BundleCommit(
             id=f"bundle-commit-{uuid4().hex}",
             bundle_digest=request.bundle_digest,
@@ -138,6 +151,7 @@ class BundleCommitService:
                     validation_digest=member.validation_digest,
                     execute_at=member.execute_at,
                     predecessor_plan_id=member.predecessor_plan_id,
+                    predecessor_plan_ids=member.all_predecessor_plan_ids,
                 )
                 for member in request.members
             ],
@@ -200,10 +214,12 @@ class BundleCommitService:
             try:
                 if state_version_overrides:
                     summary = await self.facade.execute_plan(
-                        plan, state_version_overrides=state_version_overrides
+                        plan,
+                        state_version_overrides=state_version_overrides,
+                        aggregate_owner=True,
                     )
                 else:
-                    summary = await self.facade.execute_plan(plan)
+                    summary = await self.facade.execute_plan(plan, aggregate_owner=True)
             except Exception as error:
                 bundle = await self._mark_member(
                     bundle,
@@ -257,6 +273,9 @@ class BundleCommitService:
     async def is_scheduled_member(self, plan_id: str) -> bool:
         return await self.bundle_repository.is_scheduled_member(plan_id)
 
+    async def is_member(self, plan_id: str) -> bool:
+        return await self.bundle_repository.get_for_plan(plan_id) is not None
+
     def _predecessor_state_version_overrides(
         self,
         member: BundleCommitRequestMember,
@@ -272,20 +291,23 @@ class BundleCommitService:
         explicit preconditions instead of an in-memory handoff.
         """
 
-        if member.predecessor_plan_id is None or members.index(member) not in due_indexes:
+        if not member.all_predecessor_plan_ids or members.index(member) not in due_indexes:
             return {}
-        predecessor_index = next(
-            (
-                index
-                for index, candidate in enumerate(members)
-                if candidate.plan_id == member.predecessor_plan_id
-            ),
-            None,
-        )
-        if predecessor_index is None or predecessor_index >= len(plans):
-            return {}
-        predecessor = plans[predecessor_index]
-        predecessor_devices = {command.device_id for command in predecessor.commands}
+        predecessor_devices: set[str] = set()
+        for predecessor_plan_id in member.all_predecessor_plan_ids:
+            predecessor_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(members)
+                    if candidate.plan_id == predecessor_plan_id
+                ),
+                None,
+            )
+            if predecessor_index is None or predecessor_index >= len(plans):
+                continue
+            predecessor_devices.update(
+                command.device_id for command in plans[predecessor_index].commands
+            )
         dependencies = plan.validation.dependencies if plan.validation else None
         if dependencies is None:
             return {}
@@ -359,6 +381,15 @@ class BundleCommitService:
             PlanStatus.REQUIRES_CONFIRMATION,
         }:
             raise DomainError(ErrorCode.INVALID_TRANSITION, "Member plan is not executable")
+        if plan.status is PlanStatus.APPROVED and plan.approval is not None:
+            if (
+                "bundle" not in plan.approval.scope.split("+")
+                or plan.approval.bundle_digest != bundle_digest
+            ):
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approved member authority does not match the committed bundle",
+                )
         if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
             if member.approval_id is None:
                 raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Member approval is required")

@@ -1,0 +1,24 @@
+{
+  "additionalProperties": false,
+  "description": "Stable Home Assistant registry claims used to resolve a live device ID.",
+  "properties": {
+    "identity_keys": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Identity Keys",
+      "type": "array"
+    },
+    "connections": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Connections",
+      "type": "array"
+    }
+  },
+  "title": "HomeAssistantIdentityClaims",
+  "type": "object"
+}

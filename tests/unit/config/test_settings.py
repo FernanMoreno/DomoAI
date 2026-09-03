@@ -108,6 +108,25 @@ def test_matter_server_settings_are_loaded_with_safe_defaults(
     assert "matter.test" in repr(settings)
 
 
+def test_state_refresh_and_optional_matter_nodes_are_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_STATE_REFRESH_INTERVAL_SECONDS", "17.5")
+    monkeypatch.setenv("DOMOAI_MATTER_OPTIONAL_NODE_IDS", "5, 7")
+
+    settings = Settings.from_environment()
+
+    assert settings.state_refresh_interval_seconds == 17.5
+    assert settings.matter_optional_node_ids == (5, 7)
+
+
+def test_optional_matter_node_ids_must_be_unique_and_non_negative() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        Settings(matter_optional_node_ids=(5, 5))
+    with pytest.raises(ValueError, match="non-negative"):
+        Settings(matter_optional_node_ids=(-1,))
+
+
 def test_settings_allow_matter_with_another_live_source() -> None:
     settings = Settings(
         matter_server_url="ws://matter.test:5580/ws",
@@ -143,6 +162,16 @@ def test_modbus_settings_can_coexist_with_existing_sources() -> None:
 
     assert settings.modbus_host is not None
     assert settings.knx_gateway_host is not None
+
+
+def test_knx_gateway_route_back_is_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_KNX_GATEWAY_ROUTE_BACK", "1")
+
+    settings = Settings.from_environment()
+
+    assert settings.knx_gateway_route_back is True
 
 
 def test_mqtt_tls_settings_default_to_no_ca_and_verification_on() -> None:
@@ -288,13 +317,66 @@ def test_settings_reject_profile_path_mixed_with_legacy_fields() -> None:
         )
 
 
-def test_energy_live_requires_both_providers_and_solar_configuration() -> None:
-    with pytest.raises(ValueError, match="DOMOAI_TARIFF_PROVIDER"):
-        Settings(energy_live=True)
+def test_ev_charging_binding_paths_default_empty_and_load_from_comma_separated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Spec 162 convergence: mirrors DOMOAI_BATTERY_DISPATCH_PROFILE_PATH but
+    # plural (a household can have more than one EV).
+    monkeypatch.delenv("DOMOAI_EV_CHARGING_BINDING_PATHS", raising=False)
+    assert Settings.from_environment().ev_charging_binding_paths == ()
 
-    with pytest.raises(ValueError, match="DOMOAI_SOLAR_LAT"):
-        Settings(
-            energy_live=True,
-            tariff_provider="omie",
-            solar_provider="open_meteo",
-        )
+    monkeypatch.setenv(
+        "DOMOAI_EV_CHARGING_BINDING_PATHS", "config/ev-a.json, config/ev-b.json"
+    )
+    settings = Settings.from_environment()
+
+    assert settings.ev_charging_binding_paths == (
+        Path("config/ev-a.json"),
+        Path("config/ev-b.json"),
+    )
+
+
+def test_commissioning_manifest_path_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DOMOAI_COMMISSIONING_MANIFEST_PATH", "data/commissioning-report.json"
+    )
+
+    settings = Settings.from_environment()
+
+    assert settings.commissioning_manifest_path == Path("data/commissioning-report.json")
+
+
+def test_energy_live_alone_does_not_require_built_in_provider_selection() -> None:
+    # Spec 161: Settings can no longer know whether a caller will later
+    # supply an external EnergyContextProvider to build_runtime(), so it
+    # must not force the built-in omie/open_meteo selection (or the
+    # Open-Meteo-specific solar fields) at construction time. That
+    # requirement now lives in runtime_factory._create_energy_context_provider,
+    # which only runs on the no-override path (see
+    # tests/integration/test_runtime_factory.py).
+    settings = Settings(energy_live=True)
+
+    assert settings.energy_live is True
+    assert settings.tariff_provider is None
+    assert settings.solar_provider is None
+
+
+def test_energy_live_with_built_in_selection_no_longer_requires_solar_fields_at_construction() -> (
+    None
+):
+    # Spec 161 (US2 regression): the required-solar-field presence check
+    # also moved out of Settings (it was redundant with the equivalent
+    # check already performed by config.solar_profile.resolve_solar_profile
+    # on the built-in path -- see runtime_factory._create_energy_context_provider,
+    # tested via test_runtime_factory_still_requires_built_in_provider_selection_when_no_override).
+    # Missing solar_latitude/etc. must no longer raise here even when
+    # tariff_provider/solar_provider are explicitly "omie"/"open_meteo".
+    settings = Settings(
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+    )
+
+    assert settings.solar_latitude is None

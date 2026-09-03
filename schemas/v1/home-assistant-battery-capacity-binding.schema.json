@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "HomeAssistantIdentityClaims": {
+      "additionalProperties": false,
+      "description": "Stable Home Assistant registry claims used to resolve a live device ID.",
+      "properties": {
+        "identity_keys": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Identity Keys",
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Connections",
+          "type": "array"
+        }
+      },
+      "title": "HomeAssistantIdentityClaims",
+      "type": "object"
+    },
+    "NominalCapacityAttestation": {
+      "additionalProperties": false,
+      "description": "Non-secret provenance explaining why a capacity is claimed nominal.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_type": {
+          "enum": [
+            "vendor_documentation",
+            "installer_attestation"
+          ],
+          "title": "Evidence Type",
+          "type": "string"
+        },
+        "reference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        },
+        "subject_model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Subject Model",
+          "type": "string"
+        },
+        "attested_by": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Attested By",
+          "type": "string"
+        },
+        "attested_at": {
+          "format": "date-time",
+          "title": "Attested At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_type",
+        "reference",
+        "subject_model",
+        "attested_by",
+        "attested_at"
+      ],
+      "title": "NominalCapacityAttestation",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Explicit nominal-capacity entity binding for one HA device.",
+  "properties": {
+    "device_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Id"
+    },
+    "identity_claims": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HomeAssistantIdentityClaims"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "semantics": {
+      "const": "nominal_capacity",
+      "default": "nominal_capacity",
+      "title": "Semantics",
+      "type": "string"
+    },
+    "nominal_capacity_attestation": {
+      "$ref": "#/$defs/NominalCapacityAttestation"
+    }
+  },
+  "required": [
+    "nominal_capacity_attestation"
+  ],
+  "title": "HomeAssistantBatteryCapacityBinding",
+  "type": "object"
+}

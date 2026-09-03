@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,8 +13,13 @@ from domoai.adapters.knx.adapter import KnxAdapter
 from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
-from domoai.application.runtime_factory import build_runtime, create_adapter
+from domoai.application.runtime_factory import (
+    _select_control_adapter,
+    build_runtime,
+    create_adapter,
+)
 from domoai.config.settings import Settings
+from domoai.domain.energy import EVActuator, EVChargingBinding
 from domoai.domain.models import Command, Plan, PlanStatus, Precondition, SourceRef, StateStatus
 from domoai.domain.provider import MeasurementQuality
 from domoai.optimizer.energy import (
@@ -37,6 +43,21 @@ from domoai.runtime.provider_sdk import ProviderRegistry
 from tests.fixtures.knx import mapping_payload
 from tests.fixtures.modbus import mapping_payload as modbus_mapping_payload
 from tests.fixtures.multi_adapter import RecordingAdapter, source_snapshot
+
+
+class _HomeAssistantControlFixtureAdapter(SimulatedHomeAdapter):
+    """Fixture with an explicit HA provider identity for routing tests."""
+
+    adapter_id = "home_assistant"
+
+    async def acquire_control(self, request):
+        raise AssertionError("control takeover is not exercised by this factory test")
+
+
+class _EVFixtureAdapter(SimulatedHomeAdapter):
+    """Fixture adapter whose identity matches the synthetic EV binding."""
+
+    adapter_id = "ev_fixture"
 
 
 def _runtime_dispatchable_battery_binding() -> DispatchableBatteryBinding:
@@ -148,6 +169,7 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
             home_assistant_mapping_path=dispatch_mapping_path,
         ),
         provider_registry=route_registry,
+        dispatchable_battery_binding=_runtime_dispatchable_battery_binding(),
     )
     assert isinstance(route_adapter, HomeAssistantProviderAdapter)
     route_provider = route_registry.get("home_assistant")
@@ -156,6 +178,22 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
     assert route_provider.battery_dispatch_bindings["home-battery"].charge.provider_command == (
         "charge"
     )
+
+    unbound_registry = ProviderRegistry()
+    create_adapter(
+        Settings(
+            home_assistant_url="http://home-assistant.test",
+            home_assistant_token=SecretStr("fixture-token"),
+            home_assistant_mapping_path=dispatch_mapping_path,
+        ),
+        provider_registry=unbound_registry,
+    )
+    unbound_provider = unbound_registry.get("home_assistant")
+    assert isinstance(unbound_provider, HomeAssistantProvider)
+    assert unbound_provider.battery_dispatch_bindings == {}
+
+    composite_route = CompositeAdapter([route_adapter, SimulatedHomeAdapter()])
+    assert _select_control_adapter(composite_route, "home_assistant") is route_adapter
 
     plaintext_adapter = create_adapter(Settings(zigbee2mqtt_url="mqtt://broker.test:1884"))
     assert isinstance(plaintext_adapter, Zigbee2MqttAdapter)
@@ -249,6 +287,79 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         )
 
 
+def _home_assistant_ev_mapping(canonical_device_id: str = "lab.ev_charger") -> dict[str, object]:
+    return {
+        "schema_version": "v1",
+        "ev_charging_bindings": {
+            "lab-ev": {
+                "schema_version": "v1",
+                "device_id": "ha-ev-1",
+                "canonical_device_id": canonical_device_id,
+                "soc_entity_id": "sensor.ev_soc",
+                "power_feedback_entity_id": "sensor.ev_power",
+                "capacity_entity_id": "sensor.ev_capacity",
+                "connected_entity_id": "binary_sensor.ev_connected",
+                "charge": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "charge_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "as_is",
+                },
+                "stop": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "stop_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "zero",
+                },
+            }
+        },
+    }
+
+
+def test_runtime_factory_scopes_home_assistant_ev_routes_to_matching_binding(
+    tmp_path: Path,
+) -> None:
+    mapping_path = tmp_path / "home-assistant-ev.json"
+    mapping_path.write_text(
+        json.dumps(_home_assistant_ev_mapping()), encoding="utf-8"
+    )
+    settings = Settings(
+        home_assistant_url="http://home-assistant.test",
+        home_assistant_token=SecretStr("fixture-token"),
+        home_assistant_mapping_path=mapping_path,
+    )
+    active_binding = _ev_charging_binding(
+        provider_id="home_assistant", device_id="lab.ev_charger"
+    )
+    registry = ProviderRegistry()
+
+    adapter = create_adapter(
+        settings,
+        provider_registry=registry,
+        ev_charging_bindings=(active_binding,),
+    )
+
+    assert isinstance(adapter, HomeAssistantProviderAdapter)
+    provider = registry.get("home_assistant")
+    assert isinstance(provider, HomeAssistantProvider)
+    assert set(provider.ev_charging_bindings) == {"lab-ev"}
+
+    unrelated_binding = _ev_charging_binding(
+        provider_id="home_assistant", device_id="other.ev_charger"
+    )
+    unrelated_registry = ProviderRegistry()
+    create_adapter(
+        settings,
+        provider_registry=unrelated_registry,
+        ev_charging_bindings=(unrelated_binding,),
+    )
+    unrelated_provider = unrelated_registry.get("home_assistant")
+    assert isinstance(unrelated_provider, HomeAssistantProvider)
+    assert unrelated_provider.ev_charging_bindings == {}
+
+
 @pytest.mark.asyncio
 async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Path) -> None:
     database_path = tmp_path / "runtime.sqlite3"
@@ -280,13 +391,64 @@ async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Pat
     await database.initialize()
     recovered_plan = await PlanRepository(database).get(plan.id)
     recovered_outcomes = await ExecutionOutcomeRepository(database).list_for_plan(plan.id)
-    audit_events = await AuditEventRepository(database).list_all()
+    audit_database = SQLiteDatabase(database_path.with_name("runtime-audit.sqlite3"))
+    await audit_database.initialize()
+    audit_events = await AuditEventRepository(audit_database).list_all()
+    await audit_database.close()
 
     assert recovered_plan is not None
     assert recovered_plan.execution is not None
     assert recovered_plan.execution.outcomes == summary.outcomes
     assert recovered_outcomes == summary.outcomes
     assert any(event.event_type == "plan_validated" for event in audit_events)
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_runtime_factory_shares_one_execution_admission_across_composition(
+    tmp_path: Path,
+) -> None:
+    runtime = await build_runtime(
+        Settings(database_path=tmp_path / "runtime-admission-identity.sqlite3"),
+        adapter=SimulatedHomeAdapter(),
+    )
+    try:
+        admission = runtime.facade.execution_admission
+        assert admission is not None
+        assert (
+            runtime.scheduler.execution_admission
+            is runtime.facade.execution_admission
+            is runtime.facade.executor.execution_admission
+        )
+        assert runtime.bundle_commit_service.facade.execution_admission is admission
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_wires_explicit_ev_actuator_guard(tmp_path: Path) -> None:
+    runtime = await build_runtime(
+        Settings(database_path=tmp_path / "ev-runtime.sqlite3"),
+        adapter=SimulatedHomeAdapter(),
+        ev_actuators=(
+            EVActuator(
+                device_id="ev.home",
+                capability="ev.charge_power",
+                charge_command="charge_ev",
+                stop_command="stop_ev",
+                max_charge_kw=7,
+            ),
+        ),
+    )
+
+    guard = runtime.facade.executor.dynamic_safety_guard
+    assert guard is not None
+    assert [actuator.device_id for actuator in guard.ev_actuators] == ["ev.home"]
+    assert runtime.plan_service.authorized_actuator_commands["ev.home"] == {
+        "charge_ev",
+        "stop_ev",
+    }
+    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -318,7 +480,10 @@ async def test_build_runtime_recovers_plans_orphaned_by_a_crash(tmp_path: Path) 
     database = SQLiteDatabase(database_path)
     await database.initialize()
     recovered_plan = await PlanRepository(database).get(orphaned_plan.id)
-    audit_events = await AuditEventRepository(database).list_all()
+    audit_database = SQLiteDatabase(database_path.with_name("runtime-audit.sqlite3"))
+    await audit_database.initialize()
+    audit_events = await AuditEventRepository(audit_database).list_all()
+    await audit_database.close()
 
     assert recovered_plan is not None
     assert recovered_plan.status is PlanStatus.UNKNOWN
@@ -709,12 +874,323 @@ async def test_runtime_factory_builds_live_energy_provider_only_when_enabled(
         solar_performance_ratio=0.82,
     )
 
-    runtime = await build_runtime(settings, adapter=SimulatedHomeAdapter())
+    runtime = await build_runtime(settings, adapter=_EVFixtureAdapter())
     try:
         assert runtime.energy_context_provider is not None
         assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
         assert runtime.energy_context_provider.battery is None
         assert runtime.battery_provider is None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_still_requires_built_in_provider_selection_when_no_override(
+    tmp_path: Path,
+) -> None:
+    # Spec 161: the omie/open_meteo requirement moved from Settings to
+    # _create_energy_context_provider (called only when build_runtime
+    # receives no energy_context_provider override) -- it must still fire
+    # with the same message on the no-override, built-in path.
+    database_path = tmp_path / "no-override-missing-provider.sqlite3"
+
+    with pytest.raises(ValueError, match="DOMOAI_TARIFF_PROVIDER"):
+        await build_runtime(
+            Settings(database_path=database_path, energy_live=True),
+            adapter=SimulatedHomeAdapter(),
+        )
+
+    solar_missing_path = tmp_path / "no-override-missing-solar.sqlite3"
+    with pytest.raises(ValueError, match="DOMOAI_SOLAR_LAT"):
+        await build_runtime(
+            Settings(
+                database_path=solar_missing_path,
+                energy_live=True,
+                tariff_provider="omie",
+                solar_provider="open_meteo",
+            ),
+            adapter=SimulatedHomeAdapter(),
+        )
+
+
+class _MinimalFakeEnergyContextProvider:
+    """Smallest possible stand-in satisfying the EnergyContextProvider Protocol."""
+
+    def get_context(self, horizon: object) -> object:
+        raise NotImplementedError("not invoked by this test")
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_accepts_externally_supplied_energy_context_provider(
+    tmp_path: Path,
+) -> None:
+    # Spec 161: build_runtime must accept an already-composed
+    # EnergyContextProvider the same way it already accepts adapter=,
+    # bypassing _create_energy_context_provider (and its omie/open_meteo
+    # requirement) entirely.
+    custom_provider = _MinimalFakeEnergyContextProvider()
+    settings = Settings(
+        database_path=tmp_path / "external-energy-provider.sqlite3",
+        energy_live=True,
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=SimulatedHomeAdapter(),
+        energy_context_provider=custom_provider,
+    )
+    try:
+        assert runtime.energy_context_provider is custom_provider
+        assert runtime.energy_closers == ()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_external_provider_takes_precedence_over_built_in_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Spec 161 Edge Case 1: when energy_context_provider is supplied AND
+    # Settings also carries built-in selection values (tariff_provider=
+    # "omie", solar_provider="open_meteo"), the supplied provider has full
+    # precedence -- _create_energy_context_provider must never be invoked,
+    # not even silently merged with the built-in path.
+    import domoai.application.runtime_factory as runtime_factory_module
+
+    def _fail_if_called(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "_create_energy_context_provider must not run when an external "
+            "energy_context_provider is supplied"
+        )
+
+    monkeypatch.setattr(
+        runtime_factory_module, "_create_energy_context_provider", _fail_if_called
+    )
+
+    custom_provider = _MinimalFakeEnergyContextProvider()
+    settings = Settings(
+        database_path=tmp_path / "precedence-conflicting-settings.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=SimulatedHomeAdapter(),
+        energy_context_provider=custom_provider,
+    )
+    try:
+        assert runtime.energy_context_provider is custom_provider
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_rejects_misconfigured_external_energy_context_provider(
+    tmp_path: Path,
+) -> None:
+    # Spec 161 User Story 3 / FR-005, FR-006, SC-003: both misconfiguration
+    # cases must be rejected fail-closed, before any other startup side
+    # effect (no SQLite file created).
+    disabled_path = tmp_path / "disabled-energy-live.sqlite3"
+    with pytest.raises(ValueError, match="energy_live"):
+        await build_runtime(
+            Settings(database_path=disabled_path, energy_live=False),
+            adapter=SimulatedHomeAdapter(),
+            energy_context_provider=_MinimalFakeEnergyContextProvider(),
+        )
+    assert not disabled_path.exists()
+
+    class _NotAProvider:
+        pass
+
+    missing_contract_path = tmp_path / "missing-get-context.sqlite3"
+    with pytest.raises(ValueError, match="get_context"):
+        await build_runtime(
+            Settings(database_path=missing_contract_path, energy_live=True),
+            adapter=SimulatedHomeAdapter(),
+            energy_context_provider=_NotAProvider(),  # type: ignore[arg-type]
+        )
+    assert not missing_contract_path.exists()
+
+
+def _ev_charging_binding(
+    *, provider_id: str = "ev_fixture", device_id: str = "ev.home"
+) -> EVChargingBinding:
+    return EVChargingBinding.model_validate(
+        {
+            "provider_id": provider_id,
+            "device_id": device_id,
+            "actuator": EVActuator(
+                device_id=device_id,
+                capability="ev_charging",
+                charge_command="charge_ev",
+                stop_command="stop_ev",
+                connected_capability="ev.connected",
+                departure_capability="ev.departure_at",
+                max_charge_kw=7.4,
+            ),
+            "soc_capability": "ev.soc",
+            "capacity_capability": "ev.capacity",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_auto_loads_ev_charging_bindings_from_settings_path(
+    tmp_path: Path,
+) -> None:
+    # Spec 162 convergence (finding F1): mcp/stdio.py calls
+    # build_configured_server() with zero arguments -- Settings-driven
+    # loading is what makes ev_charging_bindings reachable in a real
+    # deployment, mirroring battery_dispatch_profile_path exactly.
+    binding_path = tmp_path / "ev-binding.json"
+    binding_path.write_text(
+        json.dumps(_ev_charging_binding().model_dump(mode="json")), encoding="utf-8"
+    )
+    settings = Settings(
+        database_path=tmp_path / "ev-charging-binding-paths.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6,
+        solar_tilt=30,
+        solar_azimuth=0,
+        solar_performance_ratio=0.82,
+        ev_charging_binding_paths=(binding_path,),
+    )
+
+    runtime = await build_runtime(settings, adapter=_EVFixtureAdapter())
+    try:
+        assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
+        ev_providers = runtime.energy_context_provider.ev_providers
+        assert len(ev_providers) == 1
+        assert ev_providers[0].provider_id == "ev_fixture"
+        guard = runtime.facade.executor.dynamic_safety_guard
+        assert guard is not None
+        assert guard.ev_actuators == (ev_providers[0].binding.actuator,)  # type: ignore[attr-defined]
+        assert runtime.plan_service.authorized_actuator_commands["ev.home"] == {
+            "charge_ev",
+            "stop_ev",
+        }
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_wires_ev_charging_bindings_into_default_composer(
+    tmp_path: Path,
+) -> None:
+    # Spec 162: build_runtime must auto-construct a StateStoreEVProvider per
+    # supplied ev_charging_bindings entry and thread it into the DEFAULT
+    # (no energy_context_provider override) composer path -- otherwise this
+    # feature would repeat Spec 161's own lesson (a seam nothing calls).
+    settings = Settings(
+        database_path=tmp_path / "ev-charging-bindings.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6,
+        solar_tilt=30,
+        solar_azimuth=0,
+        solar_performance_ratio=0.82,
+    )
+    binding = _ev_charging_binding()
+
+    runtime = await build_runtime(
+        settings, adapter=_EVFixtureAdapter(), ev_charging_bindings=(binding,)
+    )
+    try:
+        assert len(runtime.ev_control_coordinators) == 1
+        assert runtime.control_supervisor is runtime.ev_control_coordinators[0]
+        # Deliberately does not call get_context(): the default composer here
+        # wraps the REAL OMIE/Open-Meteo HTTP clients (no network mocking in
+        # this test, matching the existing precedent
+        # test_runtime_factory_builds_live_energy_provider_only_when_enabled,
+        # which only inspects composer attributes for the same reason).
+        # Structural wiring is asserted directly instead.
+        assert runtime.energy_context_provider is not None
+        assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
+        ev_providers = runtime.energy_context_provider.ev_providers
+        assert len(ev_providers) == 1
+        assert ev_providers[0].provider_id == "ev_fixture"
+        assert ev_providers[0].binding.device_id == "ev.home"  # type: ignore[attr-defined]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_derives_ev_actuator_authority_from_binding(
+    tmp_path: Path,
+) -> None:
+    """A configured EV binding must authorize the same physical write surface."""
+
+    settings = Settings(
+        database_path=tmp_path / "ev-actuator-authority.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6,
+        solar_tilt=30,
+        solar_azimuth=0,
+        solar_performance_ratio=0.82,
+    )
+    binding = _ev_charging_binding()
+
+    runtime = await build_runtime(
+        settings, adapter=_EVFixtureAdapter(), ev_charging_bindings=(binding,)
+    )
+    try:
+        guard = runtime.facade.executor.dynamic_safety_guard
+        assert guard is not None
+        assert guard.ev_actuators == (binding.actuator,)
+        assert runtime.plan_service.authorized_actuator_commands[binding.device_id] == {
+            binding.actuator.charge_command,
+            binding.actuator.stop_command,
+        }
+    finally:
+        await runtime.close()
+
+
+class _MinimalFakeEnergyContextProviderForEv:
+    """Smallest possible stand-in satisfying the EnergyContextProvider Protocol."""
+
+    def get_context(self, horizon: object) -> object:
+        raise NotImplementedError("not invoked by this test")
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_override_takes_precedence_over_ev_charging_bindings(
+    tmp_path: Path,
+) -> None:
+    # Spec 162 (analysis finding E3): when BOTH Spec 161's energy_context_provider
+    # override and this spec's ev_charging_bindings are supplied together,
+    # the override's full bypass of _create_energy_context_provider (Spec
+    # 161) takes precedence -- ev_charging_bindings is silently unused in
+    # this combination. Documented and proven here, not a bug.
+    custom_provider = _MinimalFakeEnergyContextProviderForEv()
+    settings = Settings(
+        database_path=tmp_path / "override-precedence-over-ev-bindings.sqlite3",
+        energy_live=True,
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=_EVFixtureAdapter(),
+        energy_context_provider=custom_provider,
+        ev_charging_bindings=(_ev_charging_binding(),),
+    )
+    try:
+        assert runtime.energy_context_provider is custom_provider
+        assert not hasattr(runtime.energy_context_provider, "ev_providers")
     finally:
         await runtime.close()
 
@@ -738,7 +1214,7 @@ async def test_runtime_factory_installs_explicit_dispatchable_battery_binding(
 
     runtime = await build_runtime(
         settings,
-        adapter=SimulatedHomeAdapter(),
+        adapter=_HomeAssistantControlFixtureAdapter(),
         dispatchable_battery_binding=_runtime_dispatchable_battery_binding(),
     )
     try:
@@ -835,3 +1311,35 @@ async def test_build_runtime_starts_degraded_when_discovery_fails(tmp_path: Path
     audit_events = await runtime.audit_repository.list_all()
     assert any(event.event_type == "runtime_started_degraded" for event in audit_events)
     await runtime.close()
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_runtime_owns_and_cancels_battery_supervisor_task(tmp_path: Path) -> None:
+    binding = _runtime_dispatchable_battery_binding()
+    settings = Settings(
+        database_path=tmp_path / "supervisor.sqlite3",
+        energy_live=True,
+        tariff_provider="omie",
+        solar_provider="open_meteo",
+        solar_latitude=40.4168,
+        solar_longitude=-3.7038,
+        solar_installed_kwp=6.0,
+        solar_tilt=30.0,
+        solar_azimuth=0.0,
+        solar_performance_ratio=0.82,
+    )
+
+    runtime = await build_runtime(
+        settings,
+        adapter=_HomeAssistantControlFixtureAdapter(),
+        dispatchable_battery_binding=binding,
+    )
+    await runtime.start()
+    task = runtime.battery_supervisor_task
+    assert task is not None
+    assert not task.done()
+
+    await runtime.close()
+    await asyncio.sleep(0)
+    assert task.done()

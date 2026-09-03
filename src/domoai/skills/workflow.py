@@ -38,9 +38,12 @@ def bundle_approval_digest(scenario_id: str, bundle: Sequence[Mapping[str, Any]]
             "validation_digest": member["validation_digest"],
             "execute_at": member.get("execute_at"),
         }
+        predecessor_plan_ids = list(member.get("predecessor_plan_ids", []))
         predecessor_plan_id = member.get("predecessor_plan_id")
-        if predecessor_plan_id is not None:
-            member_payload["predecessor_plan_id"] = predecessor_plan_id
+        if predecessor_plan_id is not None and predecessor_plan_id not in predecessor_plan_ids:
+            predecessor_plan_ids.insert(0, predecessor_plan_id)
+        if predecessor_plan_ids:
+            member_payload["predecessor_plan_ids"] = predecessor_plan_ids
         canonical_members.append(member_payload)
     payload = {
         "schema": "bundle-approval-v1",
@@ -263,7 +266,12 @@ class EnergySkillWorkflow:
                 },
                 stage=WorkflowStage.STARTED,
             )
-            self._check_state(state, required_devices, parsed_request.accept_stale_assumption)
+            self._check_state(
+                state,
+                required_devices,
+                parsed_request.capabilities,
+                parsed_request.accept_stale_assumption,
+            )
             completed.append("get_state")
 
             optimization_scenario = parsed_request.scenario
@@ -372,9 +380,9 @@ class EnergySkillWorkflow:
                     for device_id in devices_touched
                     if device_id in last_member_index_for_device
                 }
-                predecessor_plan_id = (
-                    bundle[max(predecessor_indexes)]["plan_id"] if predecessor_indexes else None
-                )
+                predecessor_plan_ids = [
+                    bundle[index]["plan_id"] for index in sorted(predecessor_indexes)
+                ]
                 bundle.append(
                     {
                         "plan_id": member_plan_id,
@@ -383,7 +391,10 @@ class EnergySkillWorkflow:
                         "execute_at": member_plan.execute_at.isoformat()
                         if member_plan.execute_at is not None
                         else None,
-                        "predecessor_plan_id": predecessor_plan_id,
+                        "predecessor_plan_id": (
+                            predecessor_plan_ids[0] if predecessor_plan_ids else None
+                        ),
+                        "predecessor_plan_ids": predecessor_plan_ids,
                     }
                 )
                 for device_id in devices_touched:
@@ -642,7 +653,10 @@ class EnergySkillWorkflow:
                     code="runtime_revision_changed",
                     message="Runtime revision changed before execution",
                 )
-            if "commit_or_schedule_bundle" in self._operation_bindings:
+            # A multi-plan proposal is always an aggregate operation.  The
+            # legacy v1/v2 skill contracts may still submit one-plan bundles,
+            # but they must not regain the old per-member physical path.
+            if "commit_or_schedule_bundle" in self._operation_bindings or len(bundle) > 1:
                 return await self._execute_v3_bundle(
                     run_id=run_id,
                     history=history,
@@ -678,7 +692,6 @@ class EnergySkillWorkflow:
                             "plan_id": member_plan_id,
                             "validation_digest": member_digest,
                             "operator_token": approval.operator_token or "",
-                            "bundle_digest": bundle_digest,
                         },
                         stage=WorkflowStage.EXECUTING,
                     )
@@ -695,7 +708,6 @@ class EnergySkillWorkflow:
                     }
                     if approval_id is not None:
                         arguments["approval_id"] = approval_id
-                        arguments["bundle_digest"] = bundle_digest
                     response = await self._call(
                         "execute_plan", arguments, stage=WorkflowStage.EXECUTING
                     )
@@ -837,17 +849,28 @@ class EnergySkillWorkflow:
                     "execute_at": entry["execute_at"],
                     "approval_id": approval_id,
                     "predecessor_plan_id": entry.get("predecessor_plan_id"),
+                    "predecessor_plan_ids": entry.get("predecessor_plan_ids", []),
                 }
             )
-        response = await self._call(
-            "commit_or_schedule_bundle",
-            {
-                "bundle_digest": bundle_digest,
-                "scenario_id": scenario_id,
-                "members": member_requests,
-            },
-            stage=WorkflowStage.EXECUTING,
-        )
+        commit_arguments = {
+            "bundle_digest": bundle_digest,
+            "scenario_id": scenario_id,
+            "members": member_requests,
+        }
+        if "commit_or_schedule_bundle" in self._operation_bindings:
+            response = await self._call(
+                "commit_or_schedule_bundle", commit_arguments, stage=WorkflowStage.EXECUTING
+            )
+        else:
+            # v1/v2 are single-plan contracts, but callers can still provide a
+            # multi-plan proposal.  Route that compatibility case through the
+            # aggregate MCP boundary rather than direct member execution.
+            response = await self._call_tool(
+                "mcp",
+                "commit_or_schedule_bundle",
+                commit_arguments,
+                stage=WorkflowStage.EXECUTING,
+            )
         raw_status = response.get("status")
         if not isinstance(raw_status, str):
             raise _WorkflowFailure(
@@ -1008,7 +1031,10 @@ class EnergySkillWorkflow:
 
     @staticmethod
     def _check_state(
-        response: dict[str, Any], required_devices: list[str], accept_stale: bool
+        response: dict[str, Any],
+        required_devices: list[str],
+        required_capabilities: list[str],
+        accept_stale: bool,
     ) -> None:
         states = response.get("states")
         if not isinstance(states, list):
@@ -1020,6 +1046,7 @@ class EnergySkillWorkflow:
             )
 
         seen_devices: set[str] = set()
+        seen_capabilities: set[tuple[str, str]] = set()
         for item in states:
             if not isinstance(item, Mapping):
                 raise _WorkflowFailure(
@@ -1039,6 +1066,9 @@ class EnergySkillWorkflow:
                 )
             if device_id in required_devices:
                 seen_devices.add(device_id)
+                capability = item.get("capability")
+                if isinstance(capability, str):
+                    seen_capabilities.add((device_id, capability))
             if status == "invalid":
                 raise _WorkflowFailure(
                     status=WorkflowStatus.BLOCKED,
@@ -1046,7 +1076,14 @@ class EnergySkillWorkflow:
                     code="invalid_state",
                     message="Required state is invalid",
                 )
-            if status in {"stale", "unavailable"} and not accept_stale:
+            if status == "unavailable":
+                raise _WorkflowFailure(
+                    status=WorkflowStatus.BLOCKED,
+                    stage=WorkflowStage.CONTEXT_READY,
+                    code="unavailable_state",
+                    message="Required state is unavailable",
+                )
+            if status == "stale" and not accept_stale:
                 raise _WorkflowFailure(
                     status=WorkflowStatus.BLOCKED,
                     stage=WorkflowStage.CONTEXT_READY,
@@ -1061,6 +1098,20 @@ class EnergySkillWorkflow:
                 code="missing_state",
                 message="Required device state was not available",
                 details={"count": len(missing)},
+            )
+        missing_capabilities = [
+            (device_id, capability)
+            for device_id in required_devices
+            for capability in required_capabilities
+            if (device_id, capability) not in seen_capabilities
+        ]
+        if missing_capabilities:
+            raise _WorkflowFailure(
+                status=WorkflowStatus.BLOCKED,
+                stage=WorkflowStage.CONTEXT_READY,
+                code="missing_state_capability",
+                message="Required capability state was not available",
+                details={"missing": missing_capabilities},
             )
 
     @staticmethod

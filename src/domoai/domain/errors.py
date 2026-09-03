@@ -35,9 +35,13 @@ class ErrorCode(StrEnum):
     PLAN_IDENTITY_CONFLICT = "plan_identity_conflict"
     RESCHEDULE_REQUIRES_REVALIDATION = "reschedule_requires_revalidation"
     BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN = "bundle_member_reschedule_forbidden"
+    BUNDLE_MEMBER_EXECUTION_FORBIDDEN = "bundle_member_execution_forbidden"
+    BUNDLE_MEMBER_CANCEL_FORBIDDEN = "bundle_member_cancel_forbidden"
     SCHEDULE_EVIDENCE_MISMATCH = "schedule_evidence_mismatch"
     INVALID_COMMAND_VALUE = "invalid_command_value"
     CONTROL_TAKEOVER_FAILED = "control_takeover_failed"
+    ACTUATOR_AUTHORIZATION_REQUIRED = "actuator_authorization_required"
+    INSUFFICIENT_SCOPE = "insufficient_scope"
 
 
 class DomainError(ValueError):

@@ -7,6 +7,7 @@ from domoai.domain.energy import (
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
+    EVActuator,
     NominalCapacityTrustPolicy,
 )
 from domoai.optimizer.energy import (
@@ -40,6 +41,7 @@ __all__ = [
     "BatterySocConversionEvidence",
     "BatterySocObservation",
     "DispatchableBatteryBinding",
+    "EVActuator",
     "battery_capacity_evidence_from_measurement",
     "battery_soc_observation_from_measurement",
     "battery_soc_observation_from_percentage_measurement",

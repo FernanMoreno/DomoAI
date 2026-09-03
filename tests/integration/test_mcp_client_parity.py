@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -88,3 +89,42 @@ async def test_two_mcp_clients_have_equivalent_read_and_safe_execution_results()
 
     assert execution["outcomes"][0]["status"] == "confirmed_success"
     assert [call.id for call in adapter.calls] == ["mcp-command-1"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clients_cannot_duplicate_one_physical_idempotency_key() -> None:
+    context = await build_context()
+    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
+    client_a = create_domotics_server(context)
+    client_b = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    command = {
+        "id": "mcp-concurrent-command",
+        "device_id": device_id,
+        "command": "turn_on",
+        "idempotency_key": "mcp-concurrent-intent",
+    }
+    plan = structured(
+        await client_a.call_tool(
+            "validate_plan",
+            {"plan": {"id": "mcp-concurrent-plan", "commands": [command]}},
+        )
+    )
+    arguments = {
+        "plan_id": "mcp-concurrent-plan",
+        "validation_digest": plan["validation"]["digest"],
+    }
+
+    first, second = await asyncio.gather(
+        client_a.call_tool("execute_plan", arguments),
+        client_b.call_tool("execute_plan", arguments),
+    )
+
+    assert len(adapter.calls) == 1
+    statuses = {
+        structured(first)["outcomes"][0]["status"],
+        structured(second)["outcomes"][0]["status"],
+    }
+    assert "confirmed_success" in statuses

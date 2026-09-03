@@ -1,0 +1,1 @@
+"""Disposable local laboratory assets."""

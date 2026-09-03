@@ -5,7 +5,10 @@ from typing import Any, cast
 
 import pytest
 
+from domoai.domain.energy import EVActuator, EVChargingBinding
+from domoai.domain.models import SourceRef, StateSnapshot, StateStatus
 from domoai.optimizer.energy import EVState, StaticEnergyContextProvider
+from domoai.optimizer.providers import StateStoreEVProvider
 from domoai.optimizer.scenario import ComfortLoad, EVChargingLoad, Horizon, OptimizationScenario
 from domoai.skills.workflow import EnergySkillRequest, EnergySkillWorkflow
 from tests.fixtures.energy import energy_context_for
@@ -129,3 +132,90 @@ async def test_executable_ev_proposal_requires_provider_state_and_matching_assum
     )
 
     assert result["status"] in {"optimal", "feasible", "optimal_hierarchy", "feasible_hierarchy"}
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_provider_produced_ev_state_with_elapsed_departure_is_rejected() -> None:
+    # Spec 162 (analysis finding E3 / edge case): a StateStoreEVProvider-produced
+    # EVState (not manually constructed) must integrate correctly with the
+    # existing, unmodified ev_departure_elapsed gate in
+    # validate_executable_scenario -- proving the new provider's output is a
+    # drop-in for what the scenario validator already expects.
+    fixture = await build_workflow_fixture()
+    ev_device = next(
+        device.id
+        for device in fixture.domotics_context.registry.devices
+        if device.type.value == "cover"
+    )
+    state_store = fixture.domotics_context.discovery.state_store
+    existing_source_ref = state_store.peek(ev_device, "position").source_ref
+    provider_id = existing_source_ref.adapter_id
+
+    observed_at = datetime(2026, 8, 15, tzinfo=UTC)
+    for capability, value in (
+        ("ev.connected", True),
+        ("ev.soc", 2.0),
+        ("ev.capacity", 10.0),
+        ("ev.departure_at", "2020-01-01T00:00:00+00:00"),  # deliberately elapsed
+    ):
+        await state_store.save(
+            StateSnapshot(
+                device_id=ev_device,
+                capability=capability,
+                value=value,
+                unit=None,
+                observed_at=observed_at,
+                received_at=observed_at,
+                status=StateStatus.CURRENT,
+                source_ref=SourceRef(
+                    adapter_id=provider_id, external_id=f"{ev_device}:{capability}"
+                ),
+            )
+        )
+    binding = EVChargingBinding.model_validate(
+        {
+            "provider_id": provider_id,
+            "device_id": ev_device,
+            "actuator": EVActuator(
+                device_id=ev_device,
+                capability="position",
+                charge_command="charge_ev",
+                stop_command="stop_ev",
+                connected_capability="ev.connected",
+                departure_capability="ev.departure_at",
+                max_charge_kw=4.0,
+            ),
+            "soc_capability": "ev.soc",
+            "capacity_capability": "ev.capacity",
+        }
+    )
+    ev_provider = StateStoreEVProvider(state_store=state_store, binding=binding)
+    scenario = OptimizationScenario(
+        id="ev-departure-elapsed-composition-1",
+        horizon=energy_context_for(with_battery=False).horizon,
+        energy_context=energy_context_for(with_battery=False),
+        ev_loads=[_ev_load(ev_device)],
+    )
+    state = ev_provider.get_state(scenario.horizon)
+    matched_revision_state = state.model_copy(
+        update={"source_revision": scenario.energy_context.source_revision}
+    )
+    context = scenario.energy_context.model_copy(
+        update={"ev_states": [matched_revision_state]}
+    )
+    proposal = scenario.model_copy(update={"energy_context": context})
+    fixture.domotics_context.energy_context_provider = StaticEnergyContextProvider(context)
+
+    result = _structured(
+        await fixture.router.call(
+            "mcp",
+            "optimize_scenario",
+            {"scenario": proposal.model_dump(mode="json"), "validate_proposal": True},
+        )
+    )
+
+    assert result["status"] == "invalid"
+    assert any(
+        diagnostic["code"] == "ev_departure_elapsed" for diagnostic in result["diagnostics"]
+    )

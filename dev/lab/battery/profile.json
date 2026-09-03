@@ -1,0 +1,13 @@
+{
+  "provider_id": "lab-battery-simulator",
+  "device_id": "lab-battery-1",
+  "capacity_kwh": 10.0,
+  "initial_soc_kwh": 5.0,
+  "min_soc_kwh": 2.0,
+  "max_soc_kwh": 9.0,
+  "max_charge_kw": 4.0,
+  "max_discharge_kw": 3.0,
+  "charge_efficiency": 0.9,
+  "discharge_efficiency": 0.9,
+  "tick_seconds": 1.0
+}

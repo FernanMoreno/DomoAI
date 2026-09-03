@@ -57,6 +57,56 @@ def capabilities_snapshot(registry: DeviceRegistry, runtime_revision: str) -> di
     return {"schema_version": "v1", "runtime_revision": runtime_revision, "capabilities": values}
 
 
+def runtime_snapshot(
+    registry: DeviceRegistry,
+    *,
+    runtime_revision: str,
+    active_provider_ids: tuple[str, ...] = (),
+    battery_qualification: str = "unsupported",
+) -> dict[str, Any]:
+    """Expose the non-secret deployment matrix an agent must inspect first.
+
+    This is deliberately derived from the canonical registry and live runtime
+    composition. It describes writable routes and their source availability,
+    but never turns that description into authority to execute them.
+    """
+
+    # Provider activity comes from the live runtime composition, not from
+    # persisted SourceRefs. Rehydrated routes are intentionally non-executable
+    # until discovery and must never make a disconnected provider look active.
+    providers = sorted({provider_id for provider_id in active_provider_ids if provider_id})
+    writable: list[dict[str, Any]] = []
+    for device in registry.devices:
+        for capability in device.capabilities:
+            if not capability.writable:
+                continue
+            routes = registry.routes_for(device.id, capability.name)
+            writable.append(
+                {
+                    "device_id": device.id,
+                    "capability": capability.name,
+                    "commands": sorted(capability.commands),
+                    "available": any(route.available for route in routes),
+                    "providers": sorted(
+                        {route.source_ref.adapter_id for route in routes}
+                    ),
+                }
+            )
+    return {
+        "schema_version": "v1",
+        "runtime_revision": runtime_revision,
+        "providers": [
+            {"provider_id": provider_id, "active": True} for provider_id in providers
+        ],
+        "writable_capabilities": writable,
+        "authority": {
+            "physical_execution": "plan_executor",
+            "risky_mutations": "policy_and_operator_approval",
+            "battery_dispatch": battery_qualification,
+        },
+    }
+
+
 def policies_snapshot(policies: list[Policy], runtime_revision: str) -> dict[str, Any]:
     return {
         "schema_version": "v1",

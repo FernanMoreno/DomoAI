@@ -11,8 +11,17 @@ from pydantic import Field, model_validator
 
 from domoai.domain.models import StrictModel
 
-KnxSemanticType = Literal["light", "switch", "sensor"]
-KnxCapabilityName = Literal["power", "brightness", "temperature", "humidity", "occupancy"]
+KnxSemanticType = Literal["light", "switch", "sensor", "energy"]
+KnxCapabilityName = Literal[
+    "power",
+    "brightness",
+    "temperature",
+    "humidity",
+    "occupancy",
+    "battery.soc",
+    "battery.power",
+    "battery.capacity",
+]
 
 CAPABILITY_DPTS: dict[str, str] = {
     "power": "1.001",
@@ -20,6 +29,9 @@ CAPABILITY_DPTS: dict[str, str] = {
     "temperature": "9.001",
     "humidity": "9.007",
     "occupancy": "1.018",
+    "battery.soc": "13.013",
+    "battery.power": "9.024",
+    "battery.capacity": "13.013",
 }
 
 _GROUP_ADDRESS_PATTERN = re.compile(r"^(\d+)/(\d+)(?:/(\d+))?$")
@@ -40,7 +52,7 @@ class KnxCapabilityBinding(StrictModel):
         _validate_group_address(self.state_group_address)
         if self.command_group_address is not None:
             _validate_group_address(self.command_group_address)
-            if self.name not in {"power", "brightness"}:
+            if self.name not in {"power", "brightness", "battery.power"}:
                 raise ValueError(f"{self.name} is read-only and cannot have a command address")
         return self
 
@@ -63,6 +75,7 @@ class KnxEntityConfig(StrictModel):
             "light": {"power", "brightness"},
             "switch": {"power"},
             "sensor": {"temperature", "humidity", "occupancy"},
+            "energy": {"battery.soc", "battery.power", "battery.capacity"},
         }[self.semantic_type]
         unsupported = set(names) - allowed
         if unsupported:

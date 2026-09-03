@@ -12,8 +12,12 @@ from domoai.optimizer.energy import (
     BatterySocObservation,
     DispatchableBatteryBinding,
     EnergyContext,
+    EVActuator,
+    EVChargingBinding,
+    ExteriorTemperaturePoint,
     NominalCapacityTrustPolicy,
     StaticEnergyContextProvider,
+    ThermalProfile,
 )
 from tests.fixtures.energy import energy_context_for, energy_horizon
 
@@ -217,6 +221,60 @@ def test_dispatchable_battery_binding_rejects_cross_field_drift(
 def test_dispatchable_battery_binding_requires_policy_for_measured_capacity() -> None:
     with pytest.raises(ValidationError, match="trust policy"):
         _dispatchable_binding(measured_capacity=True)
+
+
+def _ev_charging_binding(**overrides: object) -> EVChargingBinding:
+    actuator = EVActuator(
+        device_id="ev.home",
+        capability="ev_charging",
+        charge_command="charge_ev",
+        stop_command="stop_ev",
+        connected_capability="ev.connected",
+        departure_capability="ev.departure_at",
+        max_charge_kw=7.4,
+    )
+    payload: dict[str, object] = {
+        "provider_id": "ev_fixture",
+        "device_id": "ev.home",
+        "actuator": actuator,
+        "soc_capability": "ev.soc",
+        "capacity_capability": "ev.capacity",
+    }
+    payload.update(overrides)
+    return EVChargingBinding.model_validate(payload)
+
+
+def test_ev_charging_binding_round_trips_complete_contract() -> None:
+    binding = _ev_charging_binding()
+
+    restored = EVChargingBinding.model_validate(binding.model_dump(mode="json"))
+
+    assert restored == binding
+    assert restored.soc_capability == "ev.soc"
+    assert restored.capacity_capability == "ev.capacity"
+    assert restored.actuator.max_charge_kw == 7.4
+
+
+def test_ev_charging_binding_rejects_actuator_device_mismatch() -> None:
+    payload = _ev_charging_binding().model_dump(mode="python")
+    payload["device_id"] = "ev.other"
+
+    with pytest.raises(ValidationError, match="device"):
+        EVChargingBinding.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "collision_capability",
+    ["ev.connected", "ev.departure_at", "ev_charging"],
+)
+def test_ev_charging_binding_rejects_capability_role_collision(
+    collision_capability: str,
+) -> None:
+    payload = _ev_charging_binding().model_dump(mode="python")
+    payload["soc_capability"] = collision_capability
+
+    with pytest.raises(ValidationError, match="distinct"):
+        EVChargingBinding.model_validate(payload)
 
 
 def test_battery_soc_observation_round_trips_with_profile_provenance() -> None:
@@ -466,3 +524,55 @@ def test_static_provider_rejects_a_different_horizon() -> None:
 
     with pytest.raises(ValueError, match="horizon"):
         provider.get_context(different)
+
+
+def _thermal_profile() -> ThermalProfile:
+    return ThermalProfile(
+        capacitance_kwh_per_c=5.0,
+        ua_kw_per_c=0.2,
+        initial_temperature_c=20.0,
+        comfort_min_c=19.0,
+        comfort_max_c=22.0,
+        max_heat_kw=3.0,
+        max_cool_kw=2.0,
+        heating_cop=3.0,
+        cooling_cop=2.5,
+    )
+
+
+def test_exterior_temperature_point_allows_negative_value() -> None:
+    point = ExteriorTemperaturePoint(slot=0, temperature_c=-3.5)
+    assert point.temperature_c == -3.5
+    assert point.unit == "degC"
+
+
+def test_energy_context_thermal_and_exterior_forecast_are_optional() -> None:
+    context = energy_context_for()
+    assert context.thermal is None
+    assert context.exterior_temperature_forecast is None
+
+
+def test_energy_context_accepts_thermal_and_exterior_forecast_together() -> None:
+    context = energy_context_for()
+    slots = context.horizon.slots
+    updated = context.model_copy(
+        update={
+            "thermal": _thermal_profile(),
+            "exterior_temperature_forecast": [
+                ExteriorTemperaturePoint(slot=slot, temperature_c=5.0) for slot in range(slots)
+            ],
+        }
+    )
+    assert updated.thermal is not None
+    assert len(updated.exterior_temperature_forecast) == slots
+
+
+def test_energy_context_rejects_exterior_forecast_slot_mismatch() -> None:
+    context = energy_context_for()
+    short_forecast = [
+        ExteriorTemperaturePoint(slot=slot, temperature_c=5.0)
+        for slot in range(context.horizon.slots - 1)
+    ]
+    payload = context.model_copy(update={"exterior_temperature_forecast": short_forecast})
+    with pytest.raises(ValidationError, match="must contain exactly one point"):
+        EnergyContext.model_validate(payload.model_dump(mode="python"))

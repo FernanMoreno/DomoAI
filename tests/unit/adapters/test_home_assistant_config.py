@@ -6,9 +6,12 @@ import pytest
 from domoai.adapters.home_assistant.config import (
     HomeAssistantBatteryCapacityBinding,
     HomeAssistantDispatchableBatteryBinding,
+    HomeAssistantEVChargingBinding,
+    HomeAssistantIdentityClaims,
     HomeAssistantMappingConfigurationError,
     load_battery_capacity_bindings,
     load_battery_dispatch_bindings,
+    load_ev_charging_bindings,
     load_metric_mappings,
 )
 from domoai.domain.provider import NominalCapacityAttestation
@@ -105,6 +108,85 @@ def test_load_battery_dispatch_bindings_preserves_explicit_routes(tmp_path: Path
     assert binding.charge.entity_id == "number.powerwall_command"
     assert binding.charge.provider_command == "charge"
     assert binding.stop.provider_command == "stop"
+
+
+def test_dispatch_binding_accepts_explicit_canonical_device_id() -> None:
+    payload = _dispatch_payload()
+    dispatch = payload["battery_dispatch_bindings"]
+    assert isinstance(dispatch, dict)
+    entry = dispatch["home-battery"]
+    assert isinstance(entry, dict)
+    entry["canonical_device_id"] = "lab.battery"
+
+    binding = HomeAssistantDispatchableBatteryBinding.model_validate(entry)
+
+    assert binding.canonical_device_id == "lab.battery"
+
+
+def test_ev_binding_accepts_explicit_telemetry_and_numeric_routes(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": "v1",
+        "metric_mappings": {
+            "sensor.ev_soc": {"value": "ev.soc"},
+            "sensor.ev_power": {"value": "ev_charging"},
+            "sensor.ev_capacity": {"value": "ev.capacity"},
+            "binary_sensor.ev_connected": {"value": "ev.connected"},
+        },
+        "ev_charging_bindings": {
+            "lab-ev": {
+                "schema_version": "v1",
+                "canonical_device_id": "lab.ev_charger",
+                "device_id": "ha-ev-1",
+                "soc_entity_id": "sensor.ev_soc",
+                "power_feedback_entity_id": "sensor.ev_power",
+                "capacity_entity_id": "sensor.ev_capacity",
+                "connected_entity_id": "binary_sensor.ev_connected",
+                "charge": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "charge_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "as_is",
+                },
+                "stop": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "stop_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "zero",
+                },
+            }
+        },
+    }
+    path = tmp_path / "ev.json"
+    path.write_text(json_dumps(payload), encoding="utf-8")
+
+    loaded = load_ev_charging_bindings(path)
+
+    binding = loaded["lab-ev"]
+    assert isinstance(binding, HomeAssistantEVChargingBinding)
+    assert binding.canonical_device_id == "lab.ev_charger"
+    assert binding.connected_entity_id == "binary_sensor.ev_connected"
+    assert binding.charge.value_transform == "as_is"
+    assert binding.stop.value_transform == "zero"
+
+
+def test_identity_claims_allow_binding_without_current_device_id() -> None:
+    claims = HomeAssistantIdentityClaims(identity_keys=["mqtt:lab-battery-1"])
+
+    binding = HomeAssistantBatteryCapacityBinding(
+        identity_claims=claims,
+        semantics="nominal_capacity",
+        nominal_capacity_attestation=ATTESTATION,
+    )
+
+    assert binding.device_id is None
+    assert binding.identity_claims == claims
+
+
+def test_identity_claims_require_at_least_one_stable_claim() -> None:
+    with pytest.raises(ValueError, match="identity claim"):
+        HomeAssistantIdentityClaims()
 
 
 def test_load_battery_dispatch_bindings_accepts_numeric_setpoint_routes(tmp_path: Path) -> None:

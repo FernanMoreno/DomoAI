@@ -152,7 +152,7 @@ async def test_disconnected_transport_never_claims_command_success() -> None:
 
 @pytest.mark.asyncio
 async def test_read_state_projects_typed_values_and_source_references() -> None:
-    _transport, adapter = await build_adapter()
+    transport, adapter = await build_adapter()
     await adapter.discover()
 
     states = await adapter.read_state(
@@ -168,6 +168,8 @@ async def test_read_state_projects_typed_values_and_source_references() -> None:
     assert values == {"power": True, "brightness": 50}
     assert all(state.status is StateStatus.CURRENT for state in states)
     assert all(state.source_ref.external_id == "living_room/main_light" for state in states)
+    assert transport.published[-1].topic == "zigbee2mqtt/living_room/main_light/get"
+    assert transport.published[-1].payload == b'{"brightness":null,"state":null}'
 
 
 @pytest.mark.asyncio

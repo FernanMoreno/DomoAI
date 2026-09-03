@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from domoai.domain.models import RecurrenceRule
 
 _MAX_DAYS_SEARCHED = 8
+
+
+def recurrence_digest(plan_id: str, rule: RecurrenceRule) -> str:
+    payload = {
+        "schema": "standing-automation-v1",
+        "plan_id": plan_id,
+        "rule": rule.model_dump(mode="json"),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def next_occurrence(rule: RecurrenceRule, after: datetime) -> datetime:
@@ -37,6 +49,13 @@ def next_occurrence(rule: RecurrenceRule, after: datetime) -> datetime:
             candidate = datetime.combine(candidate_date, rule.time_of_day, tzinfo=zone).replace(
                 fold=0
             )
+            round_trip = candidate.astimezone(UTC).astimezone(zone)
+            if round_trip.replace(tzinfo=None) != candidate.replace(tzinfo=None):
+                # ZoneInfo represents a spring-forward gap with a synthetic
+                # offset. Use the first real local instant after that gap
+                # before comparing with `after`; otherwise a rule created at
+                # 03:10 would incorrectly skip today's 02:30 -> 03:30 run.
+                candidate = round_trip
             if candidate > local_after:
                 return candidate.astimezone(UTC)
         candidate_date = candidate_date + timedelta(days=1)

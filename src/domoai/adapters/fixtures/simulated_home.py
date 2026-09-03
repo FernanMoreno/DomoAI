@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time as _time
 from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
 from typing import Any
@@ -118,6 +119,64 @@ class SimulatedHomeAdapter:
         self._connected = False
         self.calls: list[Command] = []
         self._executed_idempotency_keys: set[str] = set()
+        # Spec 165 FR-009: climate.bedroom is the first fixture device whose
+        # temperature genuinely evolves over time rather than being a
+        # static dict. Deliberately NOT importing domoai.lab.thermal_simulator
+        # here: import-linter's "Composition-root layers must depend only
+        # downward" contract forbids domoai.adapters -> domoai.lab (caught by
+        # the architecture-contract composition test, not assumed) -- lab is
+        # a higher-level composition/test-harness layer built on top of
+        # adapters, not the reverse. This is a small, independent
+        # implementation of the same physical recurrence (research.md
+        # Decision 1's linear RC model), not a reuse of the lab module.
+        self._climate_hvac_mode: dict[str, str] = {}
+        self._climate_last_tick_by_entity: dict[str, float] = {}
+
+    def _sync_climate_state(self, entity: dict[str, Any]) -> None:
+        if entity["domain"] != "climate":
+            return
+        entity_id = entity["entity_id"]
+        state = entity.setdefault("state", {})
+        elapsed = min(max(_time.monotonic() - self._climate_last_tick(entity_id), 0.0), 10.0)
+        mode = self._climate_hvac_mode.get(entity_id, "off")
+        if elapsed and mode != "off":
+            current = float(state["temperature"])
+            # Same linear RC recurrence the CP-SAT optimizer reasons about
+            # (research.md Decision 1), evaluated directly in floating
+            # point for this fixture: dT = dt*(heat*COP - cool*COP)/C.
+            # No passive UA-loss term here -- deliberately simplified for
+            # the fixture (which never declares an exterior temperature),
+            # keeping the "unchanged unless commanded" baseline exact.
+            capacitance_kwh_per_c = 0.5
+            heat_kw = 2.0 if mode == "heat" else 0.0
+            cool_kw = 2.0 if mode == "cool" else 0.0
+            heating_cop = 3.0
+            cooling_cop = 2.5
+            dt_hours = elapsed / 3600
+            delta_c = (
+                dt_hours
+                * (heat_kw * heating_cop - cool_kw * cooling_cop)
+                / capacitance_kwh_per_c
+            )
+            updated = current + delta_c
+            target = state.get("target_temperature")
+            # Simple bang-bang thermostat control, matching what a real
+            # thermostat does: stop heating/cooling once the target is
+            # reached, rather than overshooting forever.
+            if target is not None:
+                if mode == "heat" and updated >= float(target):
+                    updated = float(target)
+                    self._climate_hvac_mode[entity_id] = "off"
+                elif mode == "cool" and updated <= float(target):
+                    updated = float(target)
+                    self._climate_hvac_mode[entity_id] = "off"
+            state["temperature"] = updated
+
+    def _climate_last_tick(self, entity_id: str) -> float:
+        last = self._climate_last_tick_by_entity.get(entity_id)
+        now = _time.monotonic()
+        self._climate_last_tick_by_entity[entity_id] = now
+        return last if last is not None else now
 
     async def connect(self) -> None:
         self._connected = True
@@ -126,10 +185,15 @@ class SimulatedHomeAdapter:
         self._connected = False
 
     async def discover(self) -> AdapterSnapshot:
+        for entity in self._entities:
+            self._sync_climate_state(entity)
         return HomeAssistantMapper().to_snapshot(self._entities)
 
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         wanted = {source_ref.external_id for source_ref in source_refs}
+        for entity in self._entities:
+            if entity["entity_id"] in wanted:
+                self._sync_climate_state(entity)
         snapshot = HomeAssistantMapper().to_snapshot(
             [entity for entity in self._entities if entity["entity_id"] in wanted]
         )
@@ -212,10 +276,21 @@ class SimulatedHomeAdapter:
                 return entity
         raise KeyError(device_id)
 
-    @staticmethod
-    def _apply_command(entity: dict[str, Any], command: str, value: Any) -> None:
+    def _apply_command(self, entity: dict[str, Any], command: str, value: Any) -> None:
         state = entity.setdefault("state", {})
-        if command == "turn_on":
+        if command == "set_temperature":
+            self._sync_climate_state(entity)
+            state["target_temperature"] = value
+            current = float(state["temperature"])
+            target = float(value)
+            entity_id = entity["entity_id"]
+            if target > current:
+                self._climate_hvac_mode[entity_id] = "heat"
+            elif target < current:
+                self._climate_hvac_mode[entity_id] = "cool"
+            else:
+                self._climate_hvac_mode[entity_id] = "off"
+        elif command == "turn_on":
             state["power"] = True
         elif command == "turn_off":
             state["power"] = False

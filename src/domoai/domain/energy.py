@@ -53,6 +53,65 @@ class BatteryActuator(StrictModel):
         return self
 
 
+class EVActuator(StrictModel):
+    """Explicit server-owned binding for a latched EV charge surface."""
+
+    schema_version: Literal["v1"] = "v1"
+    device_id: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    charge_command: str = Field(min_length=1)
+    stop_command: str = Field(min_length=1)
+    connected_capability: str = Field(default="ev.connected", min_length=1)
+    departure_capability: str | None = Field(default="ev.departure_at", min_length=1)
+    max_charge_kw: float = Field(gt=0)
+    power_unit: Literal["kW"] = "kW"
+
+    @model_validator(mode="after")
+    def validate_commands(self) -> EVActuator:
+        if self.charge_command == self.stop_command:
+            raise ValueError("EV actuator charge and stop commands must be distinct")
+        if self.connected_capability == self.capability:
+            raise ValueError("EV connected state must not use the writable command capability")
+        if self.departure_capability == self.capability:
+            raise ValueError("EV departure state must not use the writable command capability")
+        return self
+
+
+class EVChargingBinding(StrictModel):
+    """Explicit server-owned binding required to supply EV charging state.
+
+    Deliberately lighter than `DispatchableBatteryBinding`: `EVState.
+    capacity_kwh` is an ordinary observed value describing the connected
+    vehicle, not a regulatory nominal-capacity claim, so no capacity
+    attestation/trust-policy ceremony applies here (spec 162, research.md
+    Decision 1).
+    """
+
+    schema_version: Literal["v1"] = "v1"
+    provider_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64)
+    device_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9_.-]*$")
+    actuator: EVActuator
+    control_policy: BatteryControlPolicy = Field(default_factory=BatteryControlPolicy)
+    soc_capability: str = Field(default="ev.soc", min_length=1)
+    capacity_capability: str = Field(default="ev.capacity", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> EVChargingBinding:
+        if self.actuator.device_id != self.device_id:
+            raise ValueError("EV actuator device must match binding device")
+        roles = [
+            self.soc_capability,
+            self.capacity_capability,
+            self.actuator.capability,
+            self.actuator.connected_capability,
+        ]
+        if self.actuator.departure_capability is not None:
+            roles.append(self.actuator.departure_capability)
+        if len(set(roles)) != len(roles):
+            raise ValueError("EV binding capability roles must be distinct")
+        return self
+
+
 class NominalCapacityTrustPolicy(StrictModel):
     """Server-owned exact allowlist for measured nominal capacity evidence."""
 
@@ -254,9 +313,73 @@ class DispatchableBatteryBinding(StrictModel):
         return self
 
 
+class HVACActuator(StrictModel):
+    """Explicit canonical binding for physical HVAC dispatch.
+
+    Mirrors ``BatteryActuator``'s shape (power-feedback postcondition
+    verification), not ``EVActuator``'s -- HVAC commands are verified
+    against reported power the same way battery dispatch already is.
+    """
+
+    device_id: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    heat_command: str = Field(min_length=1)
+    cool_command: str = Field(min_length=1)
+    stop_command: str = Field(min_length=1)
+    power_feedback_capability: str = Field(min_length=1)
+    power_feedback_convention: Literal["heat_positive", "cool_positive"] = "heat_positive"
+    power_feedback_tolerance_kw: float = Field(gt=0)
+    power_feedback_settle_timeout_seconds: float = Field(default=0, ge=0, le=120)
+    power_feedback_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
+    power_unit: Literal["kW"] = "kW"
+
+    @model_validator(mode="after")
+    def validate_distinct_commands(self) -> HVACActuator:
+        commands = {self.heat_command, self.cool_command, self.stop_command}
+        if len(commands) != 3:
+            raise ValueError("HVAC actuator commands must be distinct")
+        if (
+            self.power_feedback_settle_timeout_seconds > 0
+            and self.power_feedback_poll_interval_seconds
+            > self.power_feedback_settle_timeout_seconds
+        ):
+            raise ValueError("power feedback poll interval must not exceed settle timeout")
+        return self
+
+
+class ThermalProfile(StrictModel):
+    """Whole-house thermal model consumed by the CP-SAT optimizer.
+
+    No ``DispatchableBatteryBinding``-style attestation wrapper: thermal
+    capacitance is an ordinary scenario-supplied value, not a regulated
+    claim (unlike battery capacity).
+    """
+
+    capacitance_kwh_per_c: float = Field(gt=0)
+    ua_kw_per_c: float = Field(gt=0)
+    initial_temperature_c: float
+    comfort_min_c: float
+    comfort_max_c: float
+    max_heat_kw: float = Field(ge=0)
+    max_cool_kw: float = Field(ge=0)
+    heating_cop: float = Field(gt=0)
+    cooling_cop: float = Field(gt=0)
+    actuator: HVACActuator | None = None
+
+    @model_validator(mode="after")
+    def validate_comfort_bounds(self) -> ThermalProfile:
+        if self.comfort_min_c >= self.comfort_max_c:
+            raise ValueError("comfort_min_c must be less than comfort_max_c")
+        return self
+
+
 __all__ = [
     "SOC_OBSERVATION_TOLERANCE_KWH",
     "BatteryActuator",
+    "EVActuator",
+    "EVChargingBinding",
+    "HVACActuator",
+    "ThermalProfile",
     "BatteryCapacityEvidence",
     "BatteryControlPolicy",
     "BatteryProfile",

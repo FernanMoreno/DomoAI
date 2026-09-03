@@ -15,6 +15,7 @@ from domoai.application.plan_service import PlanService
 from domoai.domain.models import ErrorDetail, StrictModel
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
+from domoai.mcp.request_context import with_request_principal
 from domoai.optimizer.ports import (
     BoundedOptimizerWorkerPort,
     OptimizationResult,
@@ -22,6 +23,7 @@ from domoai.optimizer.ports import (
     build_result,
 )
 from domoai.optimizer.scenario import (
+    MAX_HORIZON_SLOTS,
     OptimizationScenario,
     validate_executable_scenario,
 )
@@ -49,6 +51,7 @@ class OrtoolsMcpContext:
     plan_service: PlanService
     optimization_service: OptimizationService
     optimization_worker: BoundedOptimizerWorkerPort | None = None
+    max_horizon_slots: int = MAX_HORIZON_SLOTS
 
     @property
     def runtime_revision(self) -> str:
@@ -124,10 +127,13 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
         annotations=read_annotations,
         structured_output=True,
     )
+    @with_request_principal
     async def validate_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
-            diagnostics = validate_scenario_model(parsed, context.registry)
+            diagnostics = validate_scenario_model(
+                parsed, context.registry, max_horizon_slots=context.max_horizon_slots
+            )
             return {
                 "schema_version": "v1",
                 "scenario_id": parsed.id,
@@ -144,13 +150,18 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
         annotations=read_annotations,
         structured_output=True,
     )
+    @with_request_principal
     async def optimize_scenario(
         scenario: dict[str, Any], validate_proposal: bool = True
     ) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
             if parsed.ev_loads:
-                diagnostics = validate_executable_scenario(parsed, context.registry)
+                diagnostics = validate_executable_scenario(
+                    parsed,
+                    context.registry,
+                    max_horizon_slots=context.max_horizon_slots,
+                )
                 if diagnostics:
                     return {
                         "schema_version": "v1",
@@ -173,6 +184,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
         annotations=read_annotations,
         structured_output=True,
     )
+    @with_request_principal
     async def explain_solution(result: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationResult.model_validate(result)

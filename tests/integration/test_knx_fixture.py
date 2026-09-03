@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -33,6 +34,17 @@ async def build_adapter() -> tuple[InMemoryKnxTransport, KnxAdapter]:
     )
     await adapter.connect()
     return transport, adapter
+
+
+class ReadTimeoutKnxTransport(InMemoryKnxTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeout_reads = False
+
+    async def read_group(self, group_address: str, dpt: str):
+        if not self.timeout_reads:
+            return await super().read_group(group_address, dpt)
+        raise TimeoutError(f"no response for {group_address}")
 
 
 @pytest.mark.asyncio
@@ -136,6 +148,26 @@ async def test_shared_state_group_address_updates_every_configured_entity() -> N
 
 
 @pytest.mark.asyncio
+async def test_read_state_polls_knx_even_while_event_stream_is_active() -> None:
+    transport, adapter = await build_adapter()
+    await adapter.discover()
+    transport.incoming.clear()
+    event_stream = adapter.subscribe_events()
+    pending_event = asyncio.create_task(anext(event_stream))
+    await asyncio.sleep(0)
+
+    transport.set_group_read_response("1/0/1", "1.001", False)
+    states = await adapter.read_state(
+        [SourceRef(adapter_id="knx", external_id="living_room.main_light")]
+    )
+
+    assert next(state for state in states if state.capability == "power").value is False
+    assert ("1/0/1", "1.001") in transport.reads
+    pending_event.cancel()
+    await asyncio.gather(pending_event, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_events_update_state_and_unknown_values_are_diagnostics() -> None:
     transport, adapter = await build_adapter()
     await adapter.discover()
@@ -174,6 +206,21 @@ async def test_events_update_state_and_unknown_values_are_diagnostics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_idle_healthy_event_stream_stays_open_until_a_telegram_arrives() -> None:
+    transport, adapter = await build_adapter()
+    transport.incoming.clear()
+    events = adapter.subscribe_events()
+    pending = asyncio.create_task(anext(events))
+
+    await asyncio.sleep(1.1)
+    assert not pending.done()
+
+    transport.enqueue(updated_group_value("1/0/1", "1.001", False))
+    event = await asyncio.wait_for(pending, timeout=1.0)
+    assert event.kind == "state_changed"
+
+
+@pytest.mark.asyncio
 async def test_runtime_event_consumer_refreshes_knx_state() -> None:
     transport, adapter = await build_adapter()
     registry = DeviceRegistry()
@@ -192,6 +239,33 @@ async def test_runtime_event_consumer_refreshes_knx_state() -> None:
     assert event.kind == "state_changed"
     assert device_id is not None
     state = await state_store.get(device_id, "power")
+    assert state is not None
+    assert state.value is False
+    assert state.status is StateStatus.CURRENT
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_consumer_keeps_event_state_when_group_read_times_out() -> None:
+    transport = ReadTimeoutKnxTransport()
+    adapter = KnxAdapter(
+        transport,
+        KnxMappingDocument.model_validate(mapping_payload()),
+        discovery_timeout=0.05,
+    )
+    await adapter.connect()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    transport.timeout_reads = True
+    transport.enqueue(updated_group_value("1/0/1", "1.001", False))
+
+    consumer = RuntimeEventConsumer(adapter, discovery, state_store, audit)
+    event = await consumer.consume_once()
+
+    assert event is not None
+    state = await state_store.get("living_room.main-light", "power")
     assert state is not None
     assert state.value is False
     assert state.status is StateStatus.CURRENT

@@ -5,7 +5,13 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
+from urllib.parse import quote
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows uses a different host path.
+    fcntl = None  # type: ignore[assignment]
 
 from domoai.runtime.clock import Clock, SystemClock
 
@@ -23,6 +29,60 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 class DbOperationMetrics:
     operation_count: int = 0
     busy_count: int = 0
+
+
+@dataclass(frozen=True)
+class SQLiteBackupResult:
+    """Evidence returned after an online backup finishes."""
+
+    schema_migrations: tuple[str, ...]
+    integrity_check: str
+
+
+class SQLiteAdvisoryLock:
+    """Process lock shared by runtime ownership and administrative restore."""
+
+    def __init__(self, database_path: Path) -> None:
+        self.path = database_path.with_name(f"{database_path.name}.lock")
+        self._handle: BinaryIO | None = None
+
+    def acquire(self, *, blocking: bool = True) -> None:
+        if self._handle is not None:
+            raise RuntimeError("SQLite advisory lock is already held")
+        if fcntl is None:
+            raise OSError("SQLite advisory locks require a POSIX host")
+        if self.path.is_symlink():
+            raise OSError("SQLite advisory lock path cannot be a symlink")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            # Closing the descriptor still releases the process lock. There
+            # is no safe recovery action for an unlock error at shutdown.
+            pass
+        finally:
+            handle.close()
 
 
 class _InstrumentedConnection:
@@ -127,15 +187,69 @@ class SQLiteDatabase:
             # lifecycle write lock.
             self._connection.commit()
 
+    async def open_existing(self) -> None:
+        """Open an existing database without creating or migrating it.
+
+        Administrative reads must not turn an empty, corrupt, or partially
+        provisioned path into a runtime database. ``mode=rw`` also prevents a
+        TOCTOU gap from silently creating a file after the existence check.
+        """
+
+        if self.path.is_symlink() or not self.path.is_file():
+            raise FileNotFoundError(self.path)
+        uri = f"file:{quote(str(self.path.resolve()), safe='/')}?mode=rw"
+        self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        self._connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
+
+    def advisory_lock(self) -> SQLiteAdvisoryLock:
+        return SQLiteAdvisoryLock(self.path)
+
     @property
     def connection(self) -> sqlite3.Connection:
         if self._connection is None:
-            raise RuntimeError("SQLiteDatabase.initialize() must be called first")
+            raise RuntimeError(
+                "SQLiteDatabase.initialize() or open_existing() must be called first"
+            )
         return cast(sqlite3.Connection, _InstrumentedConnection(self._connection, self._metrics))
 
     @property
     def metrics(self) -> DbOperationMetrics:
         return replace(self._metrics)
+
+    def backup_to(self, destination: Path) -> SQLiteBackupResult:
+        """Create a consistent SQLite copy using the online backup API.
+
+        The caller must invoke this on the database's serialized storage owner.
+        In particular, this method intentionally does not copy the main file,
+        ``-wal`` file, or ``-shm`` file from a live database.
+        """
+
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError(
+                "SQLiteDatabase.initialize() or open_existing() must be called first"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        target = sqlite3.connect(destination, check_same_thread=False)
+        try:
+            connection.backup(target)
+            target.commit()
+            integrity_row = target.execute("PRAGMA integrity_check").fetchone()
+            integrity_check = str(integrity_row[0]) if integrity_row else ""
+            if integrity_check != "ok":
+                raise sqlite3.DatabaseError("backup integrity check failed")
+            migrations = tuple(
+                str(row[0])
+                for row in target.execute(
+                    "SELECT filename FROM schema_migrations ORDER BY filename"
+                ).fetchall()
+            )
+            return SQLiteBackupResult(
+                schema_migrations=migrations,
+                integrity_check=integrity_check,
+            )
+        finally:
+            target.close()
 
     async def close(self) -> None:
         if self._connection is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from domoai.domain.models import PolicyDecision, Precondition, StateSnapshot, StateStatus
@@ -38,8 +39,16 @@ class FreshnessDecision:
 class FreshnessEvaluator:
     """Evaluate value and evidence status without contacting an adapter."""
 
-    def __init__(self, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        *,
+        max_age: timedelta = timedelta(minutes=5),
+    ) -> None:
         self.clock = clock or SystemClock()
+        if max_age.total_seconds() <= 0:
+            raise ValueError("freshness max_age must be positive")
+        self.max_age = max_age
 
     def evaluate(
         self,
@@ -55,7 +64,32 @@ class FreshnessEvaluator:
                 None,
                 source_revision=source_revision,
             )
-        age_seconds = max(0.0, (self.clock.now() - snapshot.observed_at).total_seconds())
+        now = self.clock.now()
+        age_seconds = (now - snapshot.received_at).total_seconds()
+        if snapshot.status is StateStatus.UNAVAILABLE:
+            return FreshnessDecision(
+                False,
+                "evidence_unavailable",
+                snapshot,
+                age_seconds=age_seconds,
+                source_revision=source_revision,
+            )
+        if snapshot.status is StateStatus.INVALID:
+            return FreshnessDecision(
+                False,
+                "evidence_invalid",
+                snapshot,
+                age_seconds=age_seconds,
+                source_revision=source_revision,
+            )
+        if age_seconds < 0 or snapshot.observed_at > now:
+            return FreshnessDecision(
+                False,
+                "future_observation",
+                snapshot,
+                age_seconds=age_seconds,
+                source_revision=source_revision,
+            )
         if snapshot.value != precondition.expected:
             return FreshnessDecision(
                 False,
@@ -65,6 +99,14 @@ class FreshnessEvaluator:
                 source_revision=source_revision,
             )
         if snapshot.status is StateStatus.CURRENT:
+            if age_seconds > self.max_age.total_seconds():
+                return FreshnessDecision(
+                    False,
+                    "current_evidence_expired",
+                    snapshot,
+                    age_seconds=age_seconds,
+                    source_revision=source_revision,
+                )
             return FreshnessDecision(
                 True,
                 "current_evidence",
@@ -89,7 +131,7 @@ class FreshnessEvaluator:
             )
         return FreshnessDecision(
             False,
-            "precondition_state_not_current",
+            "stale_evidence_not_allowed",
             snapshot,
             age_seconds=age_seconds,
             source_revision=source_revision,

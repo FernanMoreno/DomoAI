@@ -26,6 +26,7 @@ POWER_SCALE = 1_000_000  # mW when the public unit is kW
 SOC_SCALE = 1_000_000  # mWh when the public unit is kWh
 EFFICIENCY_SCALE = 1_000
 OBJECTIVE_SCALE = 1_000_000
+TEMPERATURE_SCALE = 1_000  # milli-degC
 
 _SOLVER_VERSION: str = ortools.__version__  # type: ignore[attr-defined]
 
@@ -209,6 +210,53 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         model.Add(sum(variables.values()) >= comfort_load.min_active_slots)
         comfort_active_variables[comfort_load.id] = variables
 
+    thermal = context.thermal
+    temperature_variables: list[Any] = []
+    hvac_heat_variables: list[Any] = []
+    hvac_cool_variables: list[Any] = []
+    if thermal is not None:
+        resolution_hours = scenario.horizon.resolution_minutes / 60
+        # Precomputed once (not per-slot), mirroring how battery's
+        # charge_gain/discharge_cost are precomputed once outside the slot
+        # loop: T[t+1] = T[t] + dt*COP/C * P_heat - dt*COP/C * P_cool -
+        # dt*UA/C * (T[t] - T_ext[t]). UA/COP/C are scenario constants, not
+        # decision variables, so this stays linear (see research.md
+        # Decision 1).
+        heat_gain = round(
+            resolution_hours * thermal.heating_cop / thermal.capacitance_kwh_per_c
+            * TEMPERATURE_SCALE
+        )
+        cool_gain = round(
+            resolution_hours * thermal.cooling_cop / thermal.capacitance_kwh_per_c
+            * TEMPERATURE_SCALE
+        )
+        ua_loss = round(
+            resolution_hours * thermal.ua_kw_per_c / thermal.capacitance_kwh_per_c * POWER_SCALE
+        )
+        max_heat = to_solver_int(thermal.max_heat_kw, "kW")
+        max_cool = to_solver_int(thermal.max_cool_kw, "kW")
+        temperature_bound = to_temperature_int(200.0)
+        temperature_variables = [
+            model.NewIntVar(-temperature_bound, temperature_bound, f"indoor_temperature_{slot}")
+            for slot in range(horizon_slots + 1)
+        ]
+        model.Add(temperature_variables[0] == to_temperature_int(thermal.initial_temperature_c))
+        exterior_temperatures = (
+            [
+                to_temperature_int(point.temperature_c)
+                for point in context.exterior_temperature_forecast
+            ]
+            if context.exterior_temperature_forecast is not None
+            else [to_temperature_int(thermal.initial_temperature_c)] * horizon_slots
+        )
+    else:
+        heat_gain = 0
+        cool_gain = 0
+        ua_loss = 0
+        max_heat = 0
+        max_cool = 0
+        exterior_temperatures = []
+
     ev_charge_bound = sum(
         to_solver_int(ev_load.max_charge_kw, "kW") for ev_load in scenario.ev_loads
     )
@@ -221,6 +269,8 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         + max(base_load_powers, default=0)
         + ev_charge_bound
         + comfort_power_bound
+        + max_heat
+        + max_cool
     )
     solar_bound = max(solar_powers, default=0)
     grid_bound = max(1, load_bound + solar_bound + max_charge + max_discharge) * 2
@@ -260,6 +310,38 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             charge = 0
             discharge = 0
 
+        if thermal is not None:
+            hvac_heat = model.NewIntVar(0, max_heat, f"hvac_heat_{slot}")
+            hvac_cool = model.NewIntVar(0, max_cool, f"hvac_cool_{slot}")
+            hvac_heating = model.NewBoolVar(f"hvac_heating_{slot}")
+            model.Add(hvac_heat == 0).OnlyEnforceIf(hvac_heating.Not())
+            model.Add(hvac_cool == 0).OnlyEnforceIf(hvac_heating)
+            hvac_heat_variables.append(hvac_heat)
+            hvac_cool_variables.append(hvac_cool)
+            # A plain equality here (temperature_variables[slot+1]*POWER_SCALE
+            # == rhs) would force rhs to be exactly divisible by POWER_SCALE
+            # for every solver-chosen temperature_variables[slot] -- the
+            # passive UA-loss term is an always-present exogenous forcing
+            # term (unlike battery/EV, whose "do nothing" state trivially
+            # zeroes their equivalent adjustment), so exact divisibility
+            # fails generically after a few slots, forcing the solver to
+            # spend spurious sub-milliwatt heat/cool purely to satisfy
+            # integer divisibility rather than any real decision. A ±0.5
+            # unit (0.0005 degC) rounding-tolerance band keeps the equation
+            # linear (two inequalities, no AddDivisionEquality) and always
+            # feasible with heat/cool genuinely free to be zero.
+            rhs = (
+                temperature_variables[slot] * POWER_SCALE
+                + hvac_heat * heat_gain
+                - hvac_cool * cool_gain
+                - (temperature_variables[slot] - exterior_temperatures[slot]) * ua_loss
+            )
+            model.Add(temperature_variables[slot + 1] * POWER_SCALE - rhs <= POWER_SCALE // 2)
+            model.Add(temperature_variables[slot + 1] * POWER_SCALE - rhs >= -(POWER_SCALE // 2))
+        else:
+            hvac_heat = 0
+            hvac_cool = 0
+
         for ev_load in scenario.ev_loads:
             max_ev_charge = to_solver_int(ev_load.max_charge_kw, "kW")
             min_ev_charge = to_solver_int(ev_load.min_charge_kw, "kW")
@@ -292,6 +374,8 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             sum(_active_load_terms(scenario, start_variables, slot, load_powers))
             + ev_charge_total
             + comfort_total
+            + hvac_heat
+            + hvac_cool
         )
         model.Add(
             active_load + charge + base_load_powers[slot]
@@ -306,6 +390,7 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             grid_in,
             grid_out,
             soc_variables,
+            temperature_variables,
             grid_bound,
             soft_violations,
         )
@@ -315,6 +400,9 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             ev_soc_variables[ev_load.id][ev_load.deadline_slot]
             >= to_energy_int(ev_load.target_soc_kwh)
         )
+
+    if battery is not None:
+        _add_terminal_soc_constraints(model, scenario, soc_variables, soft_violations)
 
     terminal_policy = scenario.terminal_soc_policy
     if battery is not None and terminal_policy is not None:
@@ -367,12 +455,22 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             )
             for slot in range(horizon_slots)
         }
+    hvac_dispatch_slots: dict[int, tuple[float, float]] | None = None
+    if thermal is not None:
+        hvac_dispatch_slots = {
+            slot: (
+                solver.Value(hvac_heat_variables[slot]) / POWER_SCALE,
+                solver.Value(hvac_cool_variables[slot]) / POWER_SCALE,
+            )
+            for slot in range(horizon_slots)
+        }
     plans = _proposal_plan(
         scenario,
         selected_slots,
         ev_charge_slots,
         comfort_active_slots,
         battery_dispatch_slots,
+        hvac_dispatch_slots,
     )
     slots: list[dict[str, float | int]] = []
     energy_cost = 0.0
@@ -406,6 +504,11 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             if slot in comfort_active_variables[comfort_load.id]
             and solver.Value(comfort_active_variables[comfort_load.id][slot])
         )
+        hvac_heat_kw = solver.Value(hvac_heat_variables[slot]) / POWER_SCALE if thermal else 0.0
+        hvac_cool_kw = solver.Value(hvac_cool_variables[slot]) / POWER_SCALE if thermal else 0.0
+        indoor_temperature_c = (
+            solver.Value(temperature_variables[slot]) / TEMPERATURE_SCALE if thermal else 0.0
+        )
         battery_throughput_kwh += (charge_kw + discharge_kw) * resolution_hours
         energy_cost += import_kw * resolution_hours * context.tariffs[slot].price_per_kwh
         if context.export_tariffs is not None:
@@ -426,6 +529,8 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
                 "battery_soc_kwh": soc_kwh,
                 "ev_charge_kw": ev_charge_kw,
                 "comfort_power_kw": comfort_power_kw,
+                "hvac_power_kw": hvac_heat_kw - hvac_cool_kw,
+                "indoor_temperature_c": indoor_temperature_c,
             }
         )
     battery_degradation_cost = (
@@ -537,6 +642,7 @@ def _add_energy_constraints(
     grid_import: Any,
     grid_export: Any,
     soc_variables: list[Any],
+    temperature_variables: list[Any],
     grid_bound: int,
     soft_violations: list[tuple[str, int, Any]],
 ) -> None:
@@ -556,6 +662,16 @@ def _add_energy_constraints(
             True,
             SOC_SCALE * 10**6,
         ),
+        "comfort_temp_min": (
+            temperature_variables[slot] if temperature_variables else None,
+            False,
+            TEMPERATURE_SCALE * 200,
+        ),
+        "comfort_temp_max": (
+            temperature_variables[slot] if temperature_variables else None,
+            True,
+            TEMPERATURE_SCALE * 200,
+        ),
     }
     for constraint in scenario.constraints:
         resolved = quantity_by_type.get(constraint.type)
@@ -564,11 +680,12 @@ def _add_energy_constraints(
         actual, is_max_bound, violation_bound = resolved
         if actual is None:
             continue
-        limit = (
-            to_energy_int(constraint.value)
-            if constraint.type in {"battery_min_soc", "battery_max_soc"}
-            else to_solver_int(constraint.value, constraint.unit)
-        )
+        if constraint.type in {"battery_min_soc", "battery_max_soc"}:
+            limit = to_energy_int(constraint.value)
+        elif constraint.type in {"comfort_temp_min", "comfort_temp_max"}:
+            limit = to_temperature_int(constraint.value)
+        else:
+            limit = to_solver_int(constraint.value, constraint.unit)
         if constraint.hard:
             if is_max_bound:
                 model.Add(actual <= limit)
@@ -581,6 +698,36 @@ def _add_energy_constraints(
         else:
             model.Add(violation >= limit - actual)
         soft_violations.append((constraint.type, slot, violation))
+
+
+def _add_terminal_soc_constraints(
+    model: Any,
+    scenario: OptimizationScenario,
+    soc_variables: list[Any],
+    soft_violations: list[tuple[str, int, Any]],
+) -> None:
+    """Apply battery SOC constraints to the terminal state as well as slots."""
+
+    if not soc_variables:
+        return
+    terminal = soc_variables[-1]
+    terminal_slot = len(soc_variables) - 1
+    for constraint in scenario.constraints:
+        if constraint.type not in {"battery_min_soc", "battery_max_soc"}:
+            continue
+        limit = to_energy_int(constraint.value)
+        is_max_bound = constraint.type == "battery_max_soc"
+        if constraint.hard:
+            model.Add(terminal <= limit if is_max_bound else terminal >= limit)
+            continue
+        violation = model.NewIntVar(
+            0, SOC_SCALE * 10**6, f"soft_violation_{constraint.type}_{terminal_slot}"
+        )
+        if is_max_bound:
+            model.Add(violation >= terminal - limit)
+        else:
+            model.Add(violation >= limit - terminal)
+        soft_violations.append((constraint.type, terminal_slot, violation))
 
 
 def _objective_terms(
@@ -813,6 +960,7 @@ def _proposal_plan(
     ev_charge_slots: dict[str, dict[int, float]] | None = None,
     comfort_active_slots: dict[str, list[int]] | None = None,
     battery_dispatch_slots: dict[int, tuple[float, float]] | None = None,
+    hvac_dispatch_slots: dict[int, tuple[float, float]] | None = None,
 ) -> list[Plan]:
     def _slot_execute_at(slot: int) -> datetime:
         return scenario.horizon.start + timedelta(
@@ -998,6 +1146,89 @@ def _proposal_plan(
                     ],
                 )
             )
+    thermal = scenario.energy_context.thermal if scenario.energy_context is not None else None
+    hvac_actuator = thermal.actuator if thermal is not None else None
+    if hvac_actuator is not None:
+        # Mirrors the battery block above exactly (research.md Decision 7):
+        # continuous power-level commands, deduplicated at state
+        # transitions, postcondition-verified -- unlike EVActuator's
+        # fire-and-forget one-command-per-slot pattern, which doesn't fit
+        # HVAC's genuine continuous per-slot decision.
+        hvac_previous_state: tuple[str, float | None] | None = None
+        for slot in range(scenario.horizon.slots):
+            heat_kw, cool_kw = (hvac_dispatch_slots or {}).get(slot, (0.0, 0.0))
+            if heat_kw > 0 and cool_kw > 0:
+                raise ValueError("HVAC dispatch cannot heat and cool simultaneously")
+            if heat_kw > 0:
+                hvac_state: tuple[str, float | None] = (hvac_actuator.heat_command, heat_kw)
+                hvac_unit = hvac_actuator.power_unit
+            elif cool_kw > 0:
+                hvac_state = (hvac_actuator.cool_command, cool_kw)
+                hvac_unit = hvac_actuator.power_unit
+            else:
+                hvac_state = (hvac_actuator.stop_command, None)
+                hvac_unit = None
+            if hvac_previous_state is not None and hvac_state == hvac_previous_state:
+                continue
+            if hvac_state[1] is None:
+                hvac_feedback_value = 0.0
+            elif hvac_state[0] == hvac_actuator.heat_command:
+                hvac_feedback_value = hvac_state[1] * (
+                    1 if hvac_actuator.power_feedback_convention == "heat_positive" else -1
+                )
+            else:
+                hvac_feedback_value = hvac_state[1] * (
+                    -1 if hvac_actuator.power_feedback_convention == "heat_positive" else 1
+                )
+            groups.setdefault(_slot_execute_at(slot), []).append(
+                Command(
+                    id=f"{scenario.id}:hvac:{slot}",
+                    device_id=hvac_actuator.device_id,
+                    command=hvac_state[0],
+                    value=hvac_state[1],
+                    unit=hvac_unit,
+                    idempotency_key=f"optimization:{scenario.id}:hvac:{slot}",
+                    intent=(
+                        f"takeover_first_slot:{slot}"
+                        if hvac_previous_state is None
+                        else f"scheduled_slot:{slot}"
+                    ),
+                    postconditions=[
+                        CommandPostcondition(
+                            capability=hvac_actuator.power_feedback_capability,
+                            expected=hvac_feedback_value,
+                            tolerance=hvac_actuator.power_feedback_tolerance_kw,
+                            settle_timeout_seconds=(
+                                hvac_actuator.power_feedback_settle_timeout_seconds
+                            ),
+                            poll_interval_seconds=hvac_actuator.power_feedback_poll_interval_seconds,
+                        )
+                    ],
+                )
+            )
+            hvac_previous_state = hvac_state
+        if hvac_previous_state is not None and hvac_previous_state[0] != hvac_actuator.stop_command:
+            hvac_horizon_slot = scenario.horizon.slots
+            groups.setdefault(_slot_execute_at(hvac_horizon_slot), []).append(
+                Command(
+                    id=f"{scenario.id}:hvac:{hvac_horizon_slot}:end",
+                    device_id=hvac_actuator.device_id,
+                    command=hvac_actuator.stop_command,
+                    idempotency_key=f"optimization:{scenario.id}:hvac:{hvac_horizon_slot}:end",
+                    intent=f"scheduled_slot:{hvac_horizon_slot}",
+                    postconditions=[
+                        CommandPostcondition(
+                            capability=hvac_actuator.power_feedback_capability,
+                            expected=0.0,
+                            tolerance=hvac_actuator.power_feedback_tolerance_kw,
+                            settle_timeout_seconds=(
+                                hvac_actuator.power_feedback_settle_timeout_seconds
+                            ),
+                            poll_interval_seconds=hvac_actuator.power_feedback_poll_interval_seconds,
+                        )
+                    ],
+                )
+            )
     ordered_times = sorted(groups)
     single = len(ordered_times) == 1
     plans: list[Plan] = []
@@ -1088,6 +1319,10 @@ def to_solver_int(value: float, unit: str) -> int:
 
 def to_energy_int(value: float) -> int:
     return round(value * SOC_SCALE)
+
+
+def to_temperature_int(value: float) -> int:
+    return round(value * TEMPERATURE_SCALE)
 
 
 def _objective_weight(objectives: list[Objective], name: str) -> float:

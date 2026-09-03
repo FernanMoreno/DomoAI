@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -42,6 +43,8 @@ class AdapterPort(Protocol):
 
 
 class StateStorePort(Protocol):
+    stale_after: timedelta
+
     async def save(self, snapshot: StateSnapshot) -> None: ...
 
     def peek(self, device_id: str, capability: str) -> StateSnapshot | None: ...

@@ -13,6 +13,8 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantBatteryCapacityBinding,
     HomeAssistantBatteryCommandRoute,
     HomeAssistantDispatchableBatteryBinding,
+    HomeAssistantEVChargingBinding,
+    HomeAssistantIdentityClaims,
     HomeAssistantMappingConfigurationError,
 )
 from domoai.adapters.home_assistant.mapper import HomeAssistantMapper
@@ -153,10 +155,10 @@ class HomeAssistantProvider:
         client: HomeAssistantClient,
         *,
         metric_mappings: Mapping[str, Mapping[str, str]] | None = None,
-        battery_capacity_bindings: Mapping[str, HomeAssistantBatteryCapacityBinding]
-        | None = None,
+        battery_capacity_bindings: Mapping[str, HomeAssistantBatteryCapacityBinding] | None = None,
         battery_dispatch_bindings: Mapping[str, HomeAssistantDispatchableBatteryBinding]
         | None = None,
+        ev_charging_bindings: Mapping[str, HomeAssistantEVChargingBinding] | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.client = client
@@ -174,9 +176,16 @@ class HomeAssistantProvider:
             str(binding_id): HomeAssistantDispatchableBatteryBinding.model_validate(binding)
             for binding_id, binding in (battery_dispatch_bindings or {}).items()
         }
+        self.ev_charging_bindings = {
+            str(binding_id): HomeAssistantEVChargingBinding.model_validate(binding)
+            for binding_id, binding in (ev_charging_bindings or {}).items()
+        }
         self._entities: dict[str, dict[str, Any]] = {}
         self._entity_device: dict[str, str] = {}
         self._entity_commands: dict[str, set[str]] = {}
+        self._resolved_capacity_device_ids: dict[str, str] = {}
+        self._resolved_dispatch_device_ids: dict[str, str] = {}
+        self._resolved_ev_device_ids: dict[str, str] = {}
         # Best-effort, process-local duplicate suppression only -- reset on
         # restart, not shared across processes. The authoritative barrier
         # against re-executing a command is the persistent execution claim
@@ -298,8 +307,13 @@ class HomeAssistantProvider:
                 continue
             entity = deepcopy(self._entities.get(entity_id, {"entity_id": entity_id}))
             entity.update(new_state)
+            entity = self._apply_configured_canonical_ids([entity])[0]
+            entity = self._normalize_entity(entity)
             self._entities[entity_id] = entity
-            snapshot = self.mapper.to_snapshot([self._normalize_entity(entity)])
+            normalized = [entity]
+            snapshot = self.mapper.to_snapshot(normalized)
+            snapshot = self._project_battery_control_capabilities(snapshot)
+            snapshot = self._project_ev_charging_capabilities(snapshot)
             for measurement in self._measurements_for_snapshot(snapshot.source_states, None):
                 yield measurement
 
@@ -307,10 +321,13 @@ class HomeAssistantProvider:
         entities = await self.client.fetch_states()
         entities = await self._merge_entity_registry(entities)
         normalized = [self._normalize_entity(entity) for entity in entities]
+        normalized = self._apply_configured_canonical_ids(normalized)
         snapshot = self.mapper.to_snapshot(normalized)
         self._remember_routes(normalized, snapshot.source_entities)
         snapshot = self._project_battery_control_capabilities(snapshot)
+        snapshot = self._project_ev_charging_capabilities(snapshot)
         self._remember_routes(normalized, snapshot.source_entities)
+        self._resolve_configured_device_ids(snapshot.source_entities)
         self._validate_capacity_bindings()
         return snapshot
 
@@ -342,9 +359,7 @@ class HomeAssistantProvider:
                 elif route.provider_command not in existing.commands:
                     capabilities = [
                         capability.model_copy(
-                            update={
-                                "commands": [*capability.commands, route.provider_command]
-                            }
+                            update={"commands": [*capability.commands, route.provider_command]}
                         )
                         if capability.name == binding.control_capability
                         else capability
@@ -352,6 +367,198 @@ class HomeAssistantProvider:
                     ]
                 entity["capabilities"] = [capability.model_dump() for capability in capabilities]
         return snapshot.model_copy(update={"source_entities": entities})
+
+    def _project_ev_charging_capabilities(self, snapshot: AdapterSnapshot) -> AdapterSnapshot:
+        """Expose only explicitly bound EV telemetry and command routes.
+
+        Home Assistant's generic mapper intentionally does not assign runtime
+        semantics to ``binary_sensor`` and ``number`` entities.  An EV route
+        binding is the server-owned declaration that supplies those semantics;
+        this projection keeps the raw source timestamps and never invents a
+        value when the source did not publish one.
+        """
+
+        entities = [deepcopy(entity) for entity in snapshot.source_entities]
+        source_states = [dict(state) for state in snapshot.source_states]
+        by_entity_id = {str(entity["entity_id"]): entity for entity in entities}
+        state_keys = {
+            (str(state["entity_id"]), str(state["capability"])) for state in source_states
+        }
+        for binding in self.ev_charging_bindings.values():
+            telemetry = (
+                (binding.soc_entity_id, binding.soc_unit, CapabilityKind.NUMBER),
+                (
+                    binding.power_feedback_entity_id,
+                    binding.power_unit,
+                    CapabilityKind.NUMBER,
+                ),
+                (binding.capacity_entity_id, binding.capacity_unit, CapabilityKind.NUMBER),
+                (binding.connected_entity_id, None, CapabilityKind.BOOLEAN),
+            )
+            for entity_id, unit, kind in telemetry:
+                entity = by_entity_id.get(entity_id)
+                if entity is None:
+                    continue
+                capabilities = [
+                    Capability.model_validate(item) for item in entity.get("capabilities", [])
+                ]
+                if not any(capability.name == "value" for capability in capabilities):
+                    capabilities.append(
+                        Capability(
+                            name="value",
+                            kind=kind,
+                            unit=unit,
+                            readable=True,
+                            writable=False,
+                        )
+                    )
+                    entity["capabilities"] = [
+                        capability.model_dump() for capability in capabilities
+                    ]
+                if (entity_id, "value") not in state_keys:
+                    raw = self._entities.get(entity_id)
+                    if raw is None:
+                        continue
+                    raw_state = raw.get("state", {})
+                    value = raw_state.get("value") if isinstance(raw_state, dict) else None
+                    if kind is CapabilityKind.BOOLEAN and value is not None:
+                        value = _on_state(value)
+                    source_states.append(
+                        {
+                            "entity_id": entity_id,
+                            "capability": "value",
+                            "value": value,
+                            "unit": unit,
+                            "available": raw.get("available", value is not None),
+                            "observed_at": raw.get("last_updated")
+                            or raw.get("last_changed"),
+                            "received_at": raw.get("received_at"),
+                        }
+                    )
+                    state_keys.add((entity_id, "value"))
+
+            commands = [binding.charge.provider_command, binding.stop.provider_command]
+            for route in (binding.charge, binding.stop):
+                command_entity = by_entity_id.get(route.entity_id)
+                if command_entity is None:
+                    continue
+                capabilities = [
+                    Capability.model_validate(item)
+                    for item in command_entity.get("capabilities", [])
+                ]
+                existing = next(
+                    (
+                        capability
+                        for capability in capabilities
+                        if capability.name == "ev_charging"
+                    ),
+                    None,
+                )
+                if existing is None:
+                    capabilities.append(self._ev_control_capability(route, commands))
+                else:
+                    capabilities = [
+                        capability.model_copy(
+                            update={
+                                "commands": list(
+                                    dict.fromkeys([*capability.commands, *commands])
+                                )
+                            }
+                        )
+                        if capability.name == "ev_charging"
+                        else capability
+                        for capability in capabilities
+                    ]
+                command_entity["capabilities"] = [
+                    capability.model_dump() for capability in capabilities
+                ]
+        for binding in self.ev_charging_bindings.values():
+            for state in source_states:
+                if (
+                    str(state.get("entity_id")) == binding.connected_entity_id
+                    and state.get("value") is not None
+                ):
+                    state["value"] = _on_state(state["value"])
+        return snapshot.model_copy(
+            update={"source_entities": entities, "source_states": source_states}
+        )
+
+    def _ev_control_capability(
+        self, route: HomeAssistantBatteryCommandRoute, commands: list[str]
+    ) -> Capability:
+        minimum, maximum = self._numeric_route_bounds(route)
+        return Capability(
+            name="ev_charging",
+            kind=CapabilityKind.NUMBER,
+            unit="kW",
+            readable=False,
+            writable=True,
+            minimum=minimum,
+            maximum=maximum,
+            commands=commands,
+        )
+
+    def _apply_configured_canonical_ids(
+        self, entities: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Project only explicit mapping identities onto configured battery routes.
+
+        A Home Assistant entity/device ID is provider-local.  The canonical ID
+        is therefore supplied by the server-owned mapping and copied to every
+        route entity of that binding.  This method deliberately does not
+        create a dispatch binding or grant actuator authority.
+        """
+
+        projected = [deepcopy(entity) for entity in entities]
+        by_entity_id = {str(entity["entity_id"]): entity for entity in projected}
+        assigned: dict[str, str] = {}
+        for binding in self.battery_dispatch_bindings.values():
+            canonical_device_id = binding.canonical_device_id
+            if canonical_device_id is None:
+                continue
+            entity_ids = (
+                binding.soc_entity_id,
+                binding.power_feedback_entity_id,
+                binding.capacity_entity_id,
+                binding.charge.entity_id,
+                binding.discharge.entity_id,
+                binding.stop.entity_id,
+            )
+            for entity_id in dict.fromkeys(entity_ids):
+                entity = by_entity_id.get(entity_id)
+                if entity is None:
+                    continue
+                previous = assigned.get(entity_id)
+                if previous is not None and previous != canonical_device_id:
+                    raise HomeAssistantMappingConfigurationError(
+                        "Home Assistant entity is assigned to multiple canonical devices"
+                    )
+                assigned[entity_id] = canonical_device_id
+                entity["canonical_id"] = canonical_device_id
+        for ev_binding in self.ev_charging_bindings.values():
+            canonical_device_id = ev_binding.canonical_device_id
+            if canonical_device_id is None:
+                continue
+            entity_ids = (
+                ev_binding.soc_entity_id,
+                ev_binding.power_feedback_entity_id,
+                ev_binding.capacity_entity_id,
+                ev_binding.connected_entity_id,
+                ev_binding.charge.entity_id,
+                ev_binding.stop.entity_id,
+            )
+            for entity_id in dict.fromkeys(entity_ids):
+                entity = by_entity_id.get(entity_id)
+                if entity is None:
+                    continue
+                previous = assigned.get(entity_id)
+                if previous is not None and previous != canonical_device_id:
+                    raise HomeAssistantMappingConfigurationError(
+                        "Home Assistant entity is assigned to multiple canonical devices"
+                    )
+                assigned[entity_id] = canonical_device_id
+                entity["canonical_id"] = canonical_device_id
+        return projected
 
     def _battery_control_capability(
         self, route: HomeAssistantBatteryCommandRoute, name: str
@@ -392,7 +599,7 @@ class HomeAssistantProvider:
         return 0.0, magnitude
 
     async def _merge_entity_registry(self, entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not entities or all(entity.get("device_id") for entity in entities):
+        if not entities:
             return entities
         fetch_registry = getattr(self.client, "fetch_entity_registry", None)
         if not callable(fetch_registry):
@@ -401,10 +608,20 @@ class HomeAssistantProvider:
             registry_entries = await fetch_registry()
         except Exception:
             return entities
+        fetch_devices = getattr(self.client, "fetch_device_registry", None)
+        try:
+            device_entries = await fetch_devices() if callable(fetch_devices) else []
+        except Exception:
+            device_entries = []
         registry = {
             str(entry["entity_id"]): entry
             for entry in registry_entries
             if isinstance(entry, dict) and entry.get("entity_id")
+        }
+        devices = {
+            str(entry["id"]): entry
+            for entry in device_entries
+            if isinstance(entry, dict) and entry.get("id")
         }
         merged: list[dict[str, Any]] = []
         for entity in entities:
@@ -416,6 +633,10 @@ class HomeAssistantProvider:
                     if value is not None
                 }
             )
+            device = devices.get(str(item.get("device_id")))
+            if device is not None:
+                item["identity_keys"] = _registry_values(device.get("identifiers", []))
+                item["connections"] = _registry_values(device.get("connections", []))
             merged.append(item)
         return merged
 
@@ -436,14 +657,130 @@ class HomeAssistantProvider:
             for entity in source_entities
         }
 
-    def _validate_capacity_bindings(self) -> None:
+    def _resolve_configured_device_ids(self, source_entities: list[dict[str, Any]]) -> None:
+        self._resolved_capacity_device_ids.clear()
+        self._resolved_dispatch_device_ids.clear()
+        self._resolved_ev_device_ids.clear()
         for entity_id, binding in self.battery_capacity_bindings.items():
-            actual_device_id = self._entity_device.get(entity_id)
-            if actual_device_id is None:
-                continue
-            if actual_device_id != binding.device_id:
+            self._resolved_capacity_device_ids[entity_id] = self._resolve_binding_device_id(
+                source_entities=source_entities,
+                entity_ids=[entity_id],
+                configured_device_id=binding.device_id,
+                identity_claims=binding.identity_claims,
+                label="capacity",
+            )
+
+    def _resolve_dispatch_device_ids(self, source_entities: list[dict[str, Any]]) -> None:
+        self._resolved_dispatch_device_ids.clear()
+        for binding_id, binding in self.battery_dispatch_bindings.items():
+            entity_ids = [
+                binding.soc_entity_id,
+                binding.power_feedback_entity_id,
+                binding.capacity_entity_id,
+                binding.charge.entity_id,
+                binding.discharge.entity_id,
+                binding.stop.entity_id,
+            ]
+            resolved_device_id = self._resolve_binding_device_id(
+                source_entities=source_entities,
+                entity_ids=list(dict.fromkeys(entity_ids)),
+                configured_device_id=binding.device_id,
+                identity_claims=binding.identity_claims,
+                label="dispatch",
+            )
+            self._resolved_dispatch_device_ids[binding_id] = resolved_device_id
+            capacity_device_id = self._resolved_capacity_device_ids.get(binding.capacity_entity_id)
+            if capacity_device_id != resolved_device_id:
                 raise HomeAssistantMappingConfigurationError(
-                    "Home Assistant capacity binding device does not match entity registry"
+                "Home Assistant battery capacity and dispatch identities "
+                "resolve to different devices"
+            )
+
+    def _resolve_ev_device_ids(self, source_entities: list[dict[str, Any]]) -> None:
+        self._resolved_ev_device_ids.clear()
+        for binding_id, binding in self.ev_charging_bindings.items():
+            entity_ids = [
+                binding.soc_entity_id,
+                binding.power_feedback_entity_id,
+                binding.capacity_entity_id,
+                binding.connected_entity_id,
+                binding.charge.entity_id,
+                binding.stop.entity_id,
+            ]
+            self._resolved_ev_device_ids[binding_id] = self._resolve_binding_device_id(
+                source_entities=source_entities,
+                entity_ids=list(dict.fromkeys(entity_ids)),
+                configured_device_id=binding.device_id,
+                identity_claims=binding.identity_claims,
+                label="EV charging",
+            )
+
+    def _resolve_binding_device_id(
+        self,
+        *,
+        source_entities: list[dict[str, Any]],
+        entity_ids: list[str],
+        configured_device_id: str | None,
+        identity_claims: HomeAssistantIdentityClaims | None,
+        label: str,
+    ) -> str:
+        by_entity = {str(entity["entity_id"]): entity for entity in source_entities}
+        if identity_claims is None:
+            if configured_device_id is None:
+                raise HomeAssistantMappingConfigurationError(
+                    f"Home Assistant {label} binding has no device identity"
+                )
+            for entity_id in entity_ids:
+                entity = by_entity.get(entity_id)
+                if entity is None:
+                    continue
+                actual_device_id = str(entity.get("device_id") or entity_id)
+                if actual_device_id != configured_device_id:
+                    raise HomeAssistantMappingConfigurationError(
+                        f"Home Assistant {label} binding device does not match entity registry"
+                    )
+            return configured_device_id
+
+        candidates = {
+            str(entity.get("device_id") or entity.get("entity_id"))
+            for entity in source_entities
+            if self._entity_matches_identity(entity, identity_claims)
+        }
+        if not candidates:
+            raise HomeAssistantMappingConfigurationError(
+                f"Home Assistant {label} identity claims were not found"
+            )
+        if len(candidates) != 1:
+            raise HomeAssistantMappingConfigurationError(
+                f"Home Assistant {label} identity claims are ambiguous"
+            )
+        resolved_device_id = next(iter(candidates))
+        for entity_id in entity_ids:
+            entity = by_entity.get(entity_id)
+            if entity is None:
+                continue
+            actual_device_id = str(entity.get("device_id") or entity_id)
+            if actual_device_id != resolved_device_id:
+                raise HomeAssistantMappingConfigurationError(
+                    f"Home Assistant {label} entity belongs to a different resolved device"
+                )
+        return resolved_device_id
+
+    @staticmethod
+    def _entity_matches_identity(
+        entity: dict[str, Any], identity_claims: HomeAssistantIdentityClaims
+    ) -> bool:
+        identity_keys = {str(item) for item in entity.get("identity_keys", [])}
+        connections = {str(item) for item in entity.get("connections", [])}
+        return set(identity_claims.identity_keys).issubset(identity_keys) and set(
+            identity_claims.connections
+        ).issubset(connections)
+
+    def _validate_capacity_bindings(self) -> None:
+        for entity_id in self.battery_capacity_bindings:
+            if entity_id not in self._resolved_capacity_device_ids:
+                raise HomeAssistantMappingConfigurationError(
+                    "Home Assistant capacity binding device could not be resolved"
                 )
 
     def validate_battery_dispatch_routes(self, snapshot: AdapterSnapshot) -> None:
@@ -457,13 +794,16 @@ class HomeAssistantProvider:
         if not self.battery_dispatch_bindings:
             return
 
-        source_entities = {
-            str(entity["entity_id"]): entity for entity in snapshot.source_entities
-        }
-        source_states = [
-            state for state in snapshot.source_states if isinstance(state, dict)
-        ]
-        for binding in self.battery_dispatch_bindings.values():
+        self._resolve_dispatch_device_ids(snapshot.source_entities)
+
+        source_entities = {str(entity["entity_id"]): entity for entity in snapshot.source_entities}
+        source_states = [state for state in snapshot.source_states if isinstance(state, dict)]
+        for binding_id, binding in self.battery_dispatch_bindings.items():
+            resolved_device_id = self._resolved_dispatch_device_ids.get(binding_id)
+            if resolved_device_id is None:
+                raise HomeAssistantMappingConfigurationError(
+                    "Home Assistant battery dispatch binding device could not be resolved"
+                )
             telemetry_entities = {
                 binding.soc_entity_id,
                 binding.power_feedback_entity_id,
@@ -494,7 +834,7 @@ class HomeAssistantProvider:
                         "Home Assistant battery dispatch source entity is missing"
                     )
                 actual_device_id = str(entity.get("device_id") or entity_id)
-                if actual_device_id != binding.device_id:
+                if actual_device_id != resolved_device_id:
                     raise HomeAssistantMappingConfigurationError(
                         "Home Assistant battery dispatch source device does not match"
                     )
@@ -522,11 +862,151 @@ class HomeAssistantProvider:
             self._validate_battery_capacity_route(
                 source_entities,
                 source_states,
-                binding.device_id,
+                resolved_device_id,
                 binding.capacity_entity_id,
             )
             for route in (binding.charge, binding.discharge, binding.stop):
                 self._validate_battery_command_route(source_entities, route)
+
+    def validate_ev_charging_routes(self, snapshot: AdapterSnapshot) -> None:
+        """Validate configured EV telemetry and command routes read-only."""
+
+        if not self.ev_charging_bindings:
+            return
+        self._resolve_ev_device_ids(snapshot.source_entities)
+        source_entities = {str(entity["entity_id"]): entity for entity in snapshot.source_entities}
+        source_states = [state for state in snapshot.source_states if isinstance(state, dict)]
+        for binding_id, binding in self.ev_charging_bindings.items():
+            resolved_device_id = self._resolved_ev_device_ids.get(binding_id)
+            if resolved_device_id is None:
+                raise HomeAssistantMappingConfigurationError(
+                    "Home Assistant EV charging binding device could not be resolved"
+                )
+            all_routes = [
+                binding.soc_entity_id,
+                binding.power_feedback_entity_id,
+                binding.capacity_entity_id,
+                binding.connected_entity_id,
+                binding.charge.entity_id,
+                binding.stop.entity_id,
+            ]
+            for entity_id in set(all_routes):
+                entity = source_entities.get(entity_id)
+                if entity is None:
+                    raise HomeAssistantMappingConfigurationError(
+                        "Home Assistant EV charging source entity is missing"
+                    )
+                actual_device_id = str(entity.get("device_id") or entity_id)
+                if actual_device_id != resolved_device_id:
+                    raise HomeAssistantMappingConfigurationError(
+                        "Home Assistant EV charging source device does not match"
+                    )
+                if not entity.get("available", True):
+                    raise HomeAssistantMappingConfigurationError(
+                        "Home Assistant EV charging source entity is unavailable: "
+                        f"{entity_id}"
+                    )
+
+            self._validate_ev_telemetry_route(
+                source_entities,
+                source_states,
+                entity_id=binding.soc_entity_id,
+                expected_metric=binding.soc_capability,
+                expected_unit=binding.soc_unit,
+                label="SOC",
+            )
+            self._validate_ev_telemetry_route(
+                source_entities,
+                source_states,
+                entity_id=binding.power_feedback_entity_id,
+                expected_metric=binding.power_feedback_capability,
+                expected_unit=binding.power_unit,
+                label="power feedback",
+            )
+            self._validate_ev_telemetry_route(
+                source_entities,
+                source_states,
+                entity_id=binding.capacity_entity_id,
+                expected_metric=binding.capacity_metric,
+                expected_unit=binding.capacity_unit,
+                label="capacity",
+            )
+            self._validate_ev_connected_route(source_entities, source_states, binding)
+            for route in (binding.charge, binding.stop):
+                self._validate_battery_command_route(source_entities, route)
+
+    def _validate_ev_telemetry_route(
+        self,
+        source_entities: Mapping[str, dict[str, Any]],
+        source_states: list[dict[str, Any]],
+        *,
+        entity_id: str,
+        expected_metric: str,
+        expected_unit: str,
+        label: str,
+    ) -> None:
+        entity = source_entities[entity_id]
+        capabilities = [Capability.model_validate(item) for item in entity.get("capabilities", [])]
+        matching_states = [
+            state
+            for state in source_states
+            if str(state.get("entity_id")) == entity_id
+            and self.semantic_capability(entity_id, str(state.get("capability")))
+            == expected_metric
+        ]
+        matching_capabilities = [
+            capability
+            for capability in capabilities
+            if capability.name in {str(state.get("capability")) for state in matching_states}
+        ]
+        if not matching_capabilities or not any(
+            capability.readable
+            and capability.kind is CapabilityKind.NUMBER
+            and capability.unit == expected_unit
+            for capability in matching_capabilities
+        ):
+            raise HomeAssistantMappingConfigurationError(
+                f"Home Assistant EV charging {label} capability is missing or incompatible"
+            )
+        if not any(
+            state.get("available", True)
+            and state.get("unit") == expected_unit
+            and _finite_number(state.get("value"))
+            for state in matching_states
+        ):
+            raise HomeAssistantMappingConfigurationError(
+                f"Home Assistant EV charging {label} state is unavailable or invalid"
+            )
+
+    def _validate_ev_connected_route(
+        self,
+        source_entities: Mapping[str, dict[str, Any]],
+        source_states: list[dict[str, Any]],
+        binding: HomeAssistantEVChargingBinding,
+    ) -> None:
+        entity = source_entities[binding.connected_entity_id]
+        capabilities = [Capability.model_validate(item) for item in entity.get("capabilities", [])]
+        matching_states = [
+            state
+            for state in source_states
+            if str(state.get("entity_id")) == binding.connected_entity_id
+            and self.semantic_capability(
+                binding.connected_entity_id, str(state.get("capability"))
+            ) == binding.connected_capability
+        ]
+        if not any(
+            capability.readable
+            and capability.kind is CapabilityKind.BOOLEAN
+            and capability.unit is None
+            for capability in capabilities
+            if capability.name in {str(state.get("capability")) for state in matching_states}
+        ) or not any(
+            state.get("available", True) and isinstance(state.get("value"), bool)
+            for state in matching_states
+        ):
+            raise HomeAssistantMappingConfigurationError(
+                "Home Assistant EV charging connected capability is missing or unavailable"
+            )
 
     def _validate_battery_telemetry_route(
         self,
@@ -539,14 +1019,13 @@ class HomeAssistantProvider:
         label: str,
     ) -> None:
         entity = source_entities[entity_id]
-        capabilities = [
-            Capability.model_validate(item) for item in entity.get("capabilities", [])
-        ]
+        capabilities = [Capability.model_validate(item) for item in entity.get("capabilities", [])]
         matching_states = [
             state
             for state in source_states
             if str(state.get("entity_id")) == entity_id
-            and self._metric_for(entity_id, str(state.get("capability"))) == expected_metric
+            and self.semantic_capability(entity_id, str(state.get("capability")))
+            == expected_metric
         ]
         matching_capabilities = [
             capability
@@ -579,27 +1058,21 @@ class HomeAssistantProvider:
         device_id: str,
         entity_id: str,
     ) -> None:
-        capacity_binding = self.battery_capacity_bindings[entity_id]
-        if capacity_binding.device_id != device_id:
+        resolved_device_id = self._resolved_capacity_device_ids.get(entity_id)
+        if resolved_device_id != device_id:
             raise HomeAssistantMappingConfigurationError(
                 "Home Assistant battery capacity binding device does not match"
             )
         raw_entity = self._entities.get(entity_id, {})
         attributes = raw_entity.get("attributes", {})
-        if not isinstance(attributes, dict) or attributes.get("device_class") != (
-            "energy_storage"
-        ):
+        if not isinstance(attributes, dict) or attributes.get("device_class") != ("energy_storage"):
             raise HomeAssistantMappingConfigurationError(
                 "Home Assistant battery capacity requires energy_storage device class"
             )
         entity = source_entities[entity_id]
-        capabilities = [
-            Capability.model_validate(item) for item in entity.get("capabilities", [])
-        ]
+        capabilities = [Capability.model_validate(item) for item in entity.get("capabilities", [])]
         capacity_states = [
-            state
-            for state in source_states
-            if str(state.get("entity_id")) == entity_id
+            state for state in source_states if str(state.get("entity_id")) == entity_id
         ]
         if not any(
             capability.readable
@@ -622,9 +1095,7 @@ class HomeAssistantProvider:
         route: HomeAssistantBatteryCommandRoute,
     ) -> None:
         entity = source_entities[route.entity_id]
-        capabilities = [
-            Capability.model_validate(item) for item in entity.get("capabilities", [])
-        ]
+        capabilities = [Capability.model_validate(item) for item in entity.get("capabilities", [])]
         configured_capability = next(
             (
                 capability
@@ -676,14 +1147,8 @@ class HomeAssistantProvider:
             provider_id=self.manifest.provider_id,
             external_device_id=route.entity_id,
             command=route.provider_command,
-            params=(
-                {"value": 0}
-                if route.value_transform in {"as_is", "negate"}
-                else {}
-            ),
-            idempotency_key=(
-                f"route-validation:{route.entity_id}:{route.provider_command}"
-            ),
+            params=({"value": 0} if route.value_transform in {"as_is", "negate"} else {}),
+            idempotency_key=(f"route-validation:{route.entity_id}:{route.provider_command}"),
         )
         if self._translate_command(route.entity_id, candidate) is None:
             raise HomeAssistantMappingConfigurationError(
@@ -708,7 +1173,8 @@ class HomeAssistantProvider:
             capacity_binding = self.battery_capacity_bindings.get(entity_id)
             metric: str | None
             if capacity_binding is not None:
-                if device_id != capacity_binding.device_id:
+                resolved_device_id = self._resolved_capacity_device_ids.get(entity_id)
+                if resolved_device_id != device_id:
                     raise HomeAssistantMappingConfigurationError(
                         "Home Assistant capacity binding device does not match entity state"
                     )
@@ -721,13 +1187,16 @@ class HomeAssistantProvider:
                     )
                 metric = "battery.capacity"
             else:
-                metric = self._metric_for(entity_id, str(state["capability"]))
+                metric = self.semantic_capability(entity_id, str(state["capability"]))
             if metric is None:
                 continue
             observed_at = _timestamp(
                 raw.get("last_updated"), raw.get("last_changed"), fallback=received_at
             )
-            measurement_received_at = max(received_at, observed_at)
+            measurement_received_at = max(
+                observed_at,
+                _timestamp(raw.get("received_at"), fallback=received_at),
+            )
             value = _scalar(state.get("value"))
             quality = (
                 MeasurementQuality.GOOD
@@ -764,6 +1233,29 @@ class HomeAssistantProvider:
         if entity_id.split(".", 1)[0] == "sensor":
             return None
         return capability
+
+    def semantic_capability(self, entity_id: str, capability: str) -> str | None:
+        """Return the configured runtime capability for one source field."""
+
+        if entity_id in self.battery_capacity_bindings:
+            return "battery.capacity"
+        for ev_binding in self.ev_charging_bindings.values():
+            if entity_id == ev_binding.soc_entity_id:
+                return ev_binding.soc_capability
+            if entity_id == ev_binding.power_feedback_entity_id:
+                return ev_binding.power_feedback_capability
+            if entity_id == ev_binding.capacity_entity_id:
+                return ev_binding.capacity_metric
+            if entity_id == ev_binding.connected_entity_id:
+                return ev_binding.connected_capability
+        for battery_binding in self.battery_dispatch_bindings.values():
+            if entity_id == battery_binding.soc_entity_id:
+                return battery_binding.soc_capability
+            if entity_id == battery_binding.power_feedback_entity_id:
+                return battery_binding.power_feedback_capability
+            if entity_id == battery_binding.capacity_entity_id:
+                return battery_binding.capacity_metric
+        return self._metric_for(entity_id, capability)
 
     @staticmethod
     def _normalize_entity(entity: dict[str, Any]) -> dict[str, Any]:
@@ -822,6 +1314,12 @@ class HomeAssistantProvider:
                 return self._translate_numeric_battery_route(route, command)
             if command.params.get("value") is not None:
                 return None
+        ev_route = self._ev_route(entity_id, command.command)
+        if ev_route is not None:
+            if ev_route.service == "set_value":
+                return self._translate_numeric_battery_route(ev_route, command)
+            if command.params.get("value") is not None:
+                return None
         domain = entity_id.split(".", 1)[0]
         data: dict[str, Any] = {"entity_id": entity_id}
         if domain in {"light", "switch"} and command.command in {"turn_on", "turn_off", "toggle"}:
@@ -852,6 +1350,15 @@ class HomeAssistantProvider:
     ) -> HomeAssistantBatteryCommandRoute | None:
         for binding in self.battery_dispatch_bindings.values():
             for route in (binding.charge, binding.discharge, binding.stop):
+                if route.entity_id == entity_id and route.provider_command == command_name:
+                    return route
+        return None
+
+    def _ev_route(
+        self, entity_id: str, command_name: str
+    ) -> HomeAssistantBatteryCommandRoute | None:
+        for binding in self.ev_charging_bindings.values():
+            for route in (binding.charge, binding.stop):
                 if route.entity_id == entity_id and route.provider_command == command_name:
                     return route
         return None
@@ -987,3 +1494,17 @@ def _unique_strings(values: object) -> list[str]:
     if not isinstance(values, (list, tuple, set)):
         values = [values]
     return list(dict.fromkeys(str(value) for value in values if value is not None))
+
+
+def _registry_values(values: object) -> list[str]:
+    """Normalize HA registry identifiers and connections for configuration claims."""
+
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            normalized.append(f"{value[0]}:{value[1]}")
+        elif value is not None:
+            normalized.append(str(value))
+    return _unique_strings(normalized)

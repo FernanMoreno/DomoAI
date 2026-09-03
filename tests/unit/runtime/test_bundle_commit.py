@@ -12,7 +12,9 @@ from domoai.application.bundle_commit import (
     BundleRecoveryService,
     bundle_approval_digest,
 )
+from domoai.domain.errors import DomainError
 from domoai.domain.models import (
+    Approval,
     BundleCommit,
     BundleCommitStatus,
     BundleMemberCommit,
@@ -94,7 +96,8 @@ class _Facade:
         self.calls: list[str] = []
         self.failures = failures or set()
 
-    async def execute_plan(self, plan: Plan) -> ExecutionSummary:
+    async def execute_plan(self, plan: Plan, *, aggregate_owner: bool = False) -> ExecutionSummary:
+        assert aggregate_owner is True
         self.calls.append(plan.id)
         if plan.id in self.failures:
             raise RuntimeError(f"failure:{plan.id}")
@@ -200,3 +203,38 @@ async def test_future_only_bundle_schedules_all_members_as_one_commit(tmp_path: 
         first.id,
         second.id,
     ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_commit_rejects_existing_approval_for_another_bundle(tmp_path: Path) -> None:
+    _database, bundle_repository, _plan_repository, scheduled_repository = await _repositories(
+        tmp_path
+    )
+    plan = _plan("plan-wrong-bundle-approval", datetime.now(UTC) + timedelta(hours=1))
+    approved = plan.model_copy(
+        update={
+            "status": PlanStatus.APPROVED,
+            "approval": Approval(
+                status="approved",
+                approved_by="operator",
+                approved_at=datetime.now(UTC),
+                validation_digest=plan.validation.digest if plan.validation else "missing",
+                scope="bundle",
+                bundle_digest="sha256:another-bundle",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        }
+    )
+    service = BundleCommitService(
+        facade=_Facade(),
+        plans={approved.id: approved},
+        approval_store=ApprovalStore(operator_token="secret", allow_legacy_token=True),
+        bundle_repository=bundle_repository,
+        scheduled_repository=scheduled_repository,
+        audit=AuditLog(),
+    )
+
+    with pytest.raises(DomainError, match="bundle"):
+        await service.commit(_request([approved]))
+
+    assert await scheduled_repository.list_pending() == []

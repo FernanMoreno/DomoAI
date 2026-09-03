@@ -36,21 +36,41 @@ class DeviceRegistry:
     def load_persisted(self, devices: list[Device]) -> None:
         """Restore a readable-but-not-yet-executable inventory from persistence.
 
-        ``_source_entity_ids`` is restored as a durable identity anchor. Routes
-        and source-device mappings are rebuilt only by a live ``apply_snapshot``
-        this session, so a restored device cannot be resolved for execution
-        until the runtime has reconfirmed it. Persisted canonical IDs are also
-        reserved so a replacement source with the same friendly-name fallback
-        cannot silently merge into the old device during rehydration.
+        ``_source_entity_ids`` and stable source-device identity anchors are
+        restored from persistence. Routes remain rebuilt only by a live
+        ``apply_snapshot`` this session, so a restored device cannot be
+        resolved for execution until the runtime has reconfirmed it.
+        Persisted canonical IDs are also reserved so a replacement source with
+        the same friendly-name fallback cannot silently merge into the old
+        device during rehydration.
         """
 
         for device in devices:
             self._devices[device.id] = device
             for source_ref in device.source_refs:
                 self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = device.id
+                if source_ref.source_device_id:
+                    self._source_device_ids[
+                        (source_ref.adapter_id, source_ref.source_device_id)
+                    ] = device.id
+                    self._identity_to_canonical[
+                        f"source:{source_ref.adapter_id}:{source_ref.source_device_id}"
+                    ] = device.id
+                if device.identity_keys:
+                    self._identity_to_canonical[
+                        f"source-identity:{source_ref.adapter_id}:{'|'.join(sorted(device.identity_keys))}"
+                    ] = device.id
+                if device.connections:
+                    self._identity_to_canonical[
+                        f"source-connection:{source_ref.adapter_id}:{'|'.join(sorted(device.connections))}"
+                    ] = device.id
 
     def apply_snapshot(
-        self, snapshot: AdapterSnapshot, adapter_id: str
+        self,
+        snapshot: AdapterSnapshot,
+        adapter_id: str,
+        *,
+        configured_adapter_ids: set[str] | frozenset[str] | None = None,
     ) -> tuple[list[Device], list[Area]]:
         for raw_area in snapshot.areas:
             area_id = str(raw_area["id"])
@@ -82,7 +102,12 @@ class DeviceRegistry:
             else:
                 seen[effective_adapter_id].add(source_entity_id)
 
-        self._reconcile(seen, snapshot.unsupported_sources, adapter_id)
+        self._reconcile(
+            seen,
+            snapshot.unsupported_sources,
+            adapter_id,
+            configured_adapter_ids=configured_adapter_ids,
+        )
 
         return self.devices, self.areas
 
@@ -111,11 +136,23 @@ class DeviceRegistry:
     def parent_source_device_for(self, adapter_id: str, source_device_id: str) -> str | None:
         return self._parent_source_devices.get((adapter_id, source_device_id))
 
-    def mark_source_unavailable(self, adapter_id: str) -> None:
+    def mark_source_unavailable(self, adapter_id: str, external_id: str | None = None) -> bool:
+        return self._mark_source_availability(adapter_id, external_id=external_id, available=False)
+
+    def mark_source_available(self, adapter_id: str, external_id: str | None = None) -> bool:
+        return self._mark_source_availability(adapter_id, external_id=external_id, available=True)
+
+    def _mark_source_availability(
+        self, adapter_id: str, *, external_id: str | None, available: bool
+    ) -> bool:
+        changed = False
         for key, routes in self._routes.items():
             updated = [
                 route
-                if route.source_ref.adapter_id != adapter_id
+                if (
+                    route.source_ref.adapter_id != adapter_id
+                    or (external_id is not None and route.source_ref.external_id != external_id)
+                )
                 else CapabilityRoute(
                     canonical_device_id=route.canonical_device_id,
                     capability=route.capability,
@@ -123,27 +160,45 @@ class DeviceRegistry:
                     source_device_id=route.source_device_id,
                     local_canonical_id=route.local_canonical_id,
                     commands=route.commands,
-                    available=False,
+                    available=available,
+                    readable=route.readable,
+                    writable=route.writable,
                 )
                 for route in routes
             ]
+            changed = changed or any(
+                before.available != after.available
+                for before, after in zip(routes, updated, strict=True)
+            )
             self._routes[key] = updated
             self._refresh_device_availability(key[0])
+        return changed
 
     def _reconcile(
         self,
         seen: dict[str, set[str]],
         unsupported_sources: list[dict[str, Any]],
         default_adapter_id: str,
+        *,
+        configured_adapter_ids: set[str] | frozenset[str] | None = None,
     ) -> None:
         failed_adapter_ids = {
-            str(diagnostic.get("adapter_id", default_adapter_id))
+            str(
+                diagnostic.get("adapter_id")
+                or diagnostic.get("source_adapter_id")
+                or default_adapter_id
+            )
             for diagnostic in unsupported_sources
             if diagnostic.get("failure")
         }
         authoritative = set(seen) - failed_adapter_ids
         if not authoritative:
             return
+        known_source_adapters = (
+            set(configured_adapter_ids) | failed_adapter_ids
+            if configured_adapter_ids is not None
+            else None
+        )
         for canonical_id in list(self._devices):
             device = self._devices.get(canonical_id)
             if device is None:
@@ -151,7 +206,14 @@ class DeviceRegistry:
             stale_refs = [
                 ref
                 for ref in device.source_refs
-                if ref.adapter_id in authoritative and ref.external_id not in seen[ref.adapter_id]
+                if (
+                    known_source_adapters is not None
+                    and ref.adapter_id not in known_source_adapters
+                )
+                or (
+                    ref.adapter_id in authoritative
+                    and ref.external_id not in seen[ref.adapter_id]
+                )
             ]
             if stale_refs:
                 self._remove_source_refs(canonical_id, stale_refs)
@@ -209,7 +271,11 @@ class DeviceRegistry:
         )
         if capability is None:
             return RouteResolution(route=None, reason="unsupported_command")
-        candidates = self.routes_for(device_id, capability.name)
+        candidates = tuple(
+            route
+            for route in self.routes_for(device_id, capability.name)
+            if command_name in route.commands
+        )
         if len(candidates) != 1:
             return RouteResolution(
                 route=None,
@@ -233,6 +299,7 @@ class DeviceRegistry:
         source_ref = SourceRef(
             adapter_id=adapter_id,
             external_id=identity.source_entity_id,
+            source_device_id=identity.source_device_id,
             external_type=str(entity.get("domain") or "unknown"),
         )
         existing = self._devices.get(canonical_id)
@@ -240,8 +307,11 @@ class DeviceRegistry:
             ref.adapter_id == source_ref.adapter_id and ref.external_id == source_ref.external_id
             for ref in existing.source_refs
         )
+        if same_source:
+            self._remove_source_capabilities(canonical_id, source_ref)
+            existing = self._devices.get(canonical_id)
         merged_capabilities = self._merge_capabilities(
-            existing, capabilities, canonical_id, same_source=same_source
+            existing, capabilities, canonical_id
         )
         source_refs = self._merge_source_refs(existing, source_ref)
         source_protocols = {ref.adapter_id for ref in source_refs}
@@ -287,6 +357,22 @@ class DeviceRegistry:
                 else AvailabilityStatus.UNAVAILABLE
             ),
             source_refs=source_refs,
+            identity_keys=list(
+                dict.fromkeys(
+                    [
+                        *(existing.identity_keys if existing is not None else []),
+                        *identity.identity_keys,
+                    ]
+                )
+            ),
+            connections=list(
+                dict.fromkeys(
+                    [
+                        *(existing.connections if existing is not None else []),
+                        *identity.connections,
+                    ]
+                )
+            ),
         )
         self._devices[canonical_id] = device
         self._source_device_ids[(adapter_id, identity.source_device_id)] = canonical_id
@@ -304,6 +390,8 @@ class DeviceRegistry:
                 local_canonical_id=identity.local_canonical_id,
                 commands=tuple(capability.commands),
                 available=available,
+                readable=capability.readable,
+                writable=capability.writable,
             )
             routes = self._routes.setdefault((canonical_id, capability.name), [])
             existing_route = next(
@@ -321,6 +409,46 @@ class DeviceRegistry:
                 routes[existing_route] = route
         self._refresh_device_availability(canonical_id)
         return identity.source_entity_id
+
+    def _remove_source_capabilities(
+        self,
+        canonical_id: str,
+        source_ref: SourceRef,
+    ) -> None:
+        """Replace one source entity's capability surface on rediscovery."""
+
+        for key, routes in list(self._routes.items()):
+            if key[0] != canonical_id:
+                continue
+            remaining = [
+                route
+                for route in routes
+                if (
+                    route.source_ref.adapter_id != source_ref.adapter_id
+                    or route.source_ref.external_id != source_ref.external_id
+                )
+            ]
+            if remaining:
+                self._routes[key] = remaining
+            else:
+                del self._routes[key]
+        device = self._devices.get(canonical_id)
+        if device is None:
+            return
+        route_capabilities = {
+            capability
+            for (device_id, capability), routes in self._routes.items()
+            if device_id == canonical_id and routes
+        }
+        self._devices[canonical_id] = device.model_copy(
+            update={
+                "capabilities": [
+                    capability
+                    for capability in device.capabilities
+                    if capability.name in route_capabilities
+                ]
+            }
+        )
 
     def _refresh_device_availability(self, canonical_id: str) -> None:
         device = self._devices.get(canonical_id)
@@ -373,8 +501,6 @@ class DeviceRegistry:
         existing: Device | None,
         capabilities: list[Capability],
         canonical_id: str,
-        *,
-        same_source: bool,
     ) -> list[Capability]:
         merged = {
             capability.name: capability
@@ -382,7 +508,11 @@ class DeviceRegistry:
         }
         for capability in capabilities:
             previous = merged.get(capability.name)
-            if previous is not None and previous != capability and not same_source:
+            if previous is None or previous == capability:
+                merged[capability.name] = capability
+                continue
+            combined = self._combine_capabilities(previous, capability)
+            if combined is None:
                 self._diagnostics.append(
                     {
                         "kind": "capability_metadata_conflict",
@@ -392,8 +522,49 @@ class DeviceRegistry:
                     }
                 )
                 continue
-            merged[capability.name] = capability
+            # A canonical capability can legitimately have separate source
+            # surfaces: one entity may publish readback while another exposes
+            # the command route (the bound HA EV does exactly this). Preserve
+            # both surfaces only when their type/unit/domain metadata agrees.
+            merged[capability.name] = combined
         return [merged[key] for key in sorted(merged)]
+
+    @staticmethod
+    def _combine_capabilities(left: Capability, right: Capability) -> Capability | None:
+        """Merge complementary read/write surfaces without hiding conflicts."""
+
+        if left.kind is not right.kind or left.unit != right.unit:
+            return None
+        for field_name in ("minimum", "maximum"):
+            left_value = getattr(left, field_name)
+            right_value = getattr(right, field_name)
+            if left_value is not None and right_value is not None and left_value != right_value:
+                return None
+        if (
+            left.enum_values
+            and right.enum_values
+            and set(left.enum_values) != set(right.enum_values)
+        ):
+            return None
+        if any(
+            key in left.constraints
+            and key in right.constraints
+            and left.constraints[key] != right.constraints[key]
+            for key in set(left.constraints) | set(right.constraints)
+        ):
+            return None
+        constraints = {**left.constraints, **right.constraints}
+        return left.model_copy(
+            update={
+                "readable": left.readable or right.readable,
+                "writable": left.writable or right.writable,
+                "minimum": left.minimum if left.minimum is not None else right.minimum,
+                "maximum": left.maximum if left.maximum is not None else right.maximum,
+                "enum_values": list(dict.fromkeys([*left.enum_values, *right.enum_values])),
+                "commands": list(dict.fromkeys([*left.commands, *right.commands])),
+                "constraints": constraints,
+            }
+        )
 
     @staticmethod
     def _merge_source_refs(existing: Device | None, source_ref: SourceRef) -> list[SourceRef]:

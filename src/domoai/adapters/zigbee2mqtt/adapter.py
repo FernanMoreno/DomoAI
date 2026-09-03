@@ -82,6 +82,7 @@ class Zigbee2MqttAdapter:
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         self._require_connected()
         wanted = {source_ref.external_id for source_ref in source_refs}
+        await self._request_state_refresh(wanted)
         now = self._clock.now()
         snapshots: list[StateSnapshot] = []
         for (friendly_name, capability), state in self._states.items():
@@ -105,6 +106,46 @@ class Zigbee2MqttAdapter:
                 )
             )
         return snapshots
+
+    async def _request_state_refresh(self, wanted: set[str]) -> None:
+        """Ask Zigbee2MQTT for source-owned state before using its cache."""
+
+        property_by_capability = {
+            "power": "state",
+            "brightness": "brightness",
+            "temperature": "temperature",
+            "humidity": "humidity",
+            "occupancy": "occupancy",
+        }
+        for friendly_name in sorted(wanted):
+            definition = self._definitions.get(friendly_name)
+            if definition is None:
+                continue
+            entity = map_definition(
+                definition,
+                available=self._availability.get(friendly_name, self._bridge_online),
+            )
+            capabilities = entity.get("capabilities", [])
+            properties = sorted(
+                {
+                    property_by_capability[str(capability.get("name"))]
+                    for capability in capabilities
+                    if isinstance(capability, dict)
+                    and str(capability.get("name")) in property_by_capability
+                }
+            )
+            if not properties:
+                continue
+            try:
+                await self.transport.publish(
+                    f"{self.base_topic}/{friendly_name}/get",
+                    json.dumps(
+                        {property_name: None for property_name in properties},
+                        separators=(",", ":"),
+                    ).encode(),
+                )
+            except (ConnectionError, OSError, TimeoutError) as error:
+                raise ConnectionError(f"Zigbee2MQTT state refresh failed: {error}") from error
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None

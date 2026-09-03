@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from domoai.application.execution_admission import AdmissionOperation, ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.recurrence import next_occurrence
 from domoai.domain.errors import DomainError, ErrorCode
@@ -32,6 +33,7 @@ from domoai.runtime.events import AuditLog
 class _PredecessorGateResult:
     allowed: bool
     predecessor_plan_id: str | None = None
+    predecessor_plan_ids: tuple[str, ...] = ()
     state_version_overrides: dict[str, int] = field(default_factory=dict)
 
 
@@ -56,6 +58,7 @@ class Scheduler:
         poll_interval: timedelta = timedelta(seconds=30),
         recurring_repository: RecurringScheduleRepository | None = None,
         bundle_repository: BundleCommitRepository | None = None,
+        execution_admission: ExecutionAdmission | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.executor = executor
@@ -65,6 +68,7 @@ class Scheduler:
         self.poll_interval = poll_interval
         self.recurring_repository = recurring_repository
         self.bundle_repository = bundle_repository
+        self.execution_admission = execution_admission
         self.clock = clock or SystemClock()
         self.alive = False
         self.last_lateness_seconds: float | None = None
@@ -76,9 +80,24 @@ class Scheduler:
         self.execution_partial_total = 0
 
     async def schedule(self, plan: Plan) -> None:
+        if self.execution_admission is not None:
+            await self.execution_admission.admit(
+                plan,
+                operation=AdmissionOperation.SCHEDULE,
+                aggregate_owner=False,
+            )
         await self.repository.schedule(plan)
 
     async def cancel(self, plan_id: str) -> bool:
+        scheduled = await self.repository.get(plan_id)
+        if scheduled is None or scheduled[1] != "pending":
+            return False
+        if self.execution_admission is not None:
+            await self.execution_admission.admit(
+                scheduled[0],
+                operation=AdmissionOperation.CANCEL,
+                aggregate_owner=False,
+            )
         return await self.repository.cancel(plan_id)
 
     async def reschedule(
@@ -90,6 +109,15 @@ class Scheduler:
         expected_validation_digest: str | None = None,
         replacement_plan: Plan | None = None,
     ) -> bool:
+        scheduled = await self.repository.get(plan_id)
+        if scheduled is None or scheduled[1] != "pending":
+            return False
+        if self.execution_admission is not None:
+            await self.execution_admission.admit(
+                scheduled[0],
+                operation=AdmissionOperation.RESCHEDULE,
+                aggregate_owner=False,
+            )
         return await self.repository.reschedule(
             plan_id,
             execute_at,
@@ -269,36 +297,44 @@ class Scheduler:
         if bundle is None:
             return _PredecessorGateResult(allowed=True)
         member = next((item for item in bundle.members if item.plan_id == plan.id), None)
-        if member is None or member.predecessor_plan_id is None:
+        if member is None or not member.all_predecessor_plan_ids:
             return _PredecessorGateResult(allowed=True)
-        predecessor_plan_id = member.predecessor_plan_id
-        predecessor = next(
-            (item for item in bundle.members if item.plan_id == predecessor_plan_id),
-            None,
-        )
-        if predecessor is None or predecessor.status is not BundleMemberCommitStatus.EXECUTED:
-            return _PredecessorGateResult(
-                allowed=False, predecessor_plan_id=predecessor_plan_id
-            )
-        evidence = predecessor.details.get("dependency_evidence")
-        if not isinstance(evidence, dict) or (
-            evidence.get("status") != ExecutionStatus.CONFIRMED_SUCCESS.value
-        ):
-            return _PredecessorGateResult(
-                allowed=False, predecessor_plan_id=predecessor_plan_id
-            )
+        predecessor_ids = tuple(member.all_predecessor_plan_ids)
         overrides: dict[str, int] = {}
-        versions = evidence.get("state_versions")
         dependencies = plan.validation.dependencies if plan.validation is not None else None
-        if isinstance(versions, dict) and dependencies is not None:
-            overrides = {
-                key: value
-                for key, value in versions.items()
-                if key in dependencies.state_versions and isinstance(value, int)
-            }
+        for predecessor_plan_id in predecessor_ids:
+            predecessor = next(
+                (item for item in bundle.members if item.plan_id == predecessor_plan_id),
+                None,
+            )
+            if predecessor is None or predecessor.status is not BundleMemberCommitStatus.EXECUTED:
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+            evidence = predecessor.details.get("dependency_evidence")
+            if not isinstance(evidence, dict) or (
+                evidence.get("status") != ExecutionStatus.CONFIRMED_SUCCESS.value
+            ):
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+            versions = evidence.get("state_versions")
+            if isinstance(versions, dict) and dependencies is not None:
+                overrides.update(
+                    {
+                        key: value
+                        for key, value in versions.items()
+                        if key in dependencies.state_versions and isinstance(value, int)
+                    }
+                )
         return _PredecessorGateResult(
             allowed=True,
-            predecessor_plan_id=predecessor_plan_id,
+            predecessor_plan_id=predecessor_ids[0],
+            predecessor_plan_ids=predecessor_ids,
             state_version_overrides=overrides,
         )
 
@@ -421,25 +457,31 @@ class Scheduler:
                             plan.id,
                             status=BundleMemberCommitStatus.DEPENDENCY_FAILED,
                             execution_status=None,
-                            details={
-                                "reason": "predecessor_not_confirmed_success",
-                                "predecessor_plan_id": gate.predecessor_plan_id,
-                            },
+                        details={
+                            "reason": "predecessor_not_confirmed_success",
+                            "predecessor_plan_id": gate.predecessor_plan_id,
+                            "predecessor_plan_ids": list(gate.predecessor_plan_ids),
+                        },
                         )
                     self.audit.append(
                         event_type="schedule_dependency_failed",
                         actor="runtime",
                         subject_id=plan.id,
-                        payload={"predecessor_plan_id": gate.predecessor_plan_id},
+                        payload={
+                            "predecessor_plan_id": gate.predecessor_plan_id,
+                            "predecessor_plan_ids": list(gate.predecessor_plan_ids),
+                        },
                     )
                     results.append({"plan_id": plan.id, "outcome": "dependency_failed"})
                     continue
                 if gate.state_version_overrides:
                     execution = await self.executor.execute(
-                        plan, state_version_overrides=gate.state_version_overrides
+                        plan,
+                        state_version_overrides=gate.state_version_overrides,
+                        aggregate_owner=True,
                     )
                 else:
-                    execution = await self.executor.execute(plan)
+                    execution = await self.executor.execute(plan, aggregate_owner=True)
                 statuses = {outcome.status for outcome in execution.outcomes}
                 if ExecutionStatus.UNKNOWN in statuses:
                     self.execution_unknown_total += 1
@@ -612,7 +654,7 @@ class Scheduler:
                     continue
                 validated = self.executor.plan_service.validate(plan)
                 if validated.status is PlanStatus.READY:
-                    await self.executor.execute(validated)
+                    await self.executor.execute(validated, aggregate_owner=True)
                     outcome = "executed"
                 else:
                     reason = (

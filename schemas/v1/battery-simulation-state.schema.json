@@ -1,0 +1,81 @@
+{
+  "properties": {
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_id": {
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "soc_kwh": {
+      "title": "Soc Kwh",
+      "type": "number"
+    },
+    "power_kw": {
+      "title": "Power Kw",
+      "type": "number"
+    },
+    "capacity_kwh": {
+      "title": "Capacity Kwh",
+      "type": "number"
+    },
+    "mode": {
+      "enum": [
+        "idle",
+        "charging",
+        "discharging"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "available": {
+      "title": "Available",
+      "type": "boolean"
+    },
+    "fault": {
+      "anyOf": [
+        {
+          "enum": [
+            "stale",
+            "unavailable",
+            "rejected"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Fault"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "revision": {
+      "title": "Revision",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "device_id",
+    "soc_kwh",
+    "power_kw",
+    "capacity_kwh",
+    "mode",
+    "available",
+    "fault",
+    "observed_at",
+    "revision"
+  ],
+  "title": "BatterySimulationState",
+  "type": "object"
+}

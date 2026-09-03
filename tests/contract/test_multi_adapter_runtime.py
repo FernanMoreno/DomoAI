@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from domoai.domain.models import SourceRef
+from domoai.domain.models import AdapterSnapshot, SourceRef
 from domoai.runtime.registry import DeviceRegistry
-from tests.fixtures.multi_adapter import source_snapshot
+from tests.fixtures.multi_adapter import entity, source_snapshot
 
 
 def test_registry_groups_entities_and_keeps_capability_routes() -> None:
@@ -21,7 +21,10 @@ def test_registry_groups_entities_and_keeps_capability_routes() -> None:
     brightness_route = registry.resolve_command_route("living_room.main_light", "set_brightness")
     assert power_route.route is not None
     assert power_route.route.source_ref == SourceRef(
-        adapter_id="home_assistant", external_id="light.main_power", external_type="light"
+        adapter_id="home_assistant",
+        external_id="light.main_power",
+        source_device_id="physical-light-1",
+        external_type="light",
     )
     assert brightness_route.route is not None
     assert brightness_route.route.source_ref.external_id == "light.main_brightness"
@@ -51,6 +54,55 @@ def test_ambiguous_capability_route_is_reported_before_write() -> None:
     assert resolution.route is None
     assert resolution.reason == "ambiguous_route"
     assert len(resolution.candidates) == 2
+
+
+def test_command_route_ignores_read_only_feedback_route_for_same_capability() -> None:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                entity(
+                    entity_id="number.ev_command",
+                    source_device_id="ev-1",
+                    canonical_id="ev.home",
+                    name="EV command",
+                    capabilities=[
+                        {
+                            "name": "ev_charging",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": True,
+                            "writable": True,
+                            "commands": ["charge_ev", "stop_ev"],
+                        }
+                    ],
+                ),
+                entity(
+                    entity_id="sensor.ev_feedback",
+                    source_device_id="ev-1",
+                    canonical_id="ev.home",
+                    name="EV feedback",
+                    capabilities=[
+                        {
+                            "name": "ev_charging",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": True,
+                            "writable": False,
+                            "commands": [],
+                        }
+                    ],
+                ),
+            ],
+            source_states=[],
+        ),
+        "home_assistant",
+    )
+
+    resolution = registry.resolve_command_route("ev.home", "charge_ev")
+
+    assert resolution.route is not None
+    assert resolution.route.source_ref.external_id == "number.ev_command"
 
 
 def test_legacy_source_ids_remain_resolvable() -> None:

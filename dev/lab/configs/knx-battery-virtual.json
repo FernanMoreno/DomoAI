@@ -1,0 +1,31 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "lab.battery",
+      "name": "Virtual Battery",
+      "area_id": "lab",
+      "semantic_type": "energy",
+      "manufacturer": "DomoAI Lab",
+      "model": "KNX Virtual battery facade",
+      "capabilities": [
+        {
+          "name": "battery.power",
+          "dpt": "9.024",
+          "state_group_address": "4/0/2",
+          "command_group_address": "4/0/0"
+        },
+        {
+          "name": "battery.soc",
+          "dpt": "13.013",
+          "state_group_address": "4/0/1"
+        },
+        {
+          "name": "battery.capacity",
+          "dpt": "13.013",
+          "state_group_address": "4/0/3"
+        }
+      ]
+    }
+  ]
+}

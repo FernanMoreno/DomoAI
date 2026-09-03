@@ -64,9 +64,20 @@ async def test_plan_executor_reaches_zigbee2mqtt_adapter() -> None:
 
     assert validated.status is PlanStatus.READY
     assert summary.outcomes[0].status.value == "confirmed_success"
-    assert len(transport.published) == 1
-    assert transport.published[0].topic == "zigbee2mqtt/living_room/main_light/set"
-    assert transport.published[0].payload == b'{"state":"ON"}'
+    command_publications = [
+        publication
+        for publication in transport.published
+        if publication.topic == "zigbee2mqtt/living_room/main_light/set"
+    ]
+    refresh_publications = [
+        publication
+        for publication in transport.published
+        if publication.topic == "zigbee2mqtt/living_room/main_light/get"
+    ]
+    assert len(command_publications) == 1
+    assert command_publications[0].payload == b'{"state":"ON"}'
+    assert len(refresh_publications) == 1
+    assert refresh_publications[0].payload == b'{"brightness":null,"state":null}'
 
 
 @pytest.mark.asyncio

@@ -8,12 +8,19 @@ import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
+from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.scheduler import Scheduler
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    BundleCommit,
+    BundleCommitStatus,
+    BundleMemberCommit,
+    BundleMemberCommitStatus,
     Command,
+    CommandPostcondition,
     Plan,
     PlanStatus,
     Precondition,
@@ -22,6 +29,7 @@ from domoai.domain.models import (
     StateStatus,
 )
 from domoai.persistence.repositories import (
+    BundleCommitRepository,
     PlanRepository,
     RecurringScheduleRepository,
     ScheduledPlanRepository,
@@ -39,6 +47,7 @@ async def _build_scheduler(
     grace_window: timedelta = timedelta(minutes=15),
     clock: Clock | None = None,
     durable: bool = False,
+    bundle_aware: bool = False,
 ) -> tuple[SimulatedHomeAdapter, PlanService, Scheduler, ScheduledPlanRepository, AuditLog]:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
@@ -49,21 +58,28 @@ async def _build_scheduler(
     database = SQLiteDatabase(tmp_path / "repo.sqlite3")
     await database.initialize()
     plan_repository = PlanRepository(database) if durable else None
+    repository = ScheduledPlanRepository(database)
+    recurring_repository = RecurringScheduleRepository(database)
+    bundle_repository = BundleCommitRepository(database) if bundle_aware else None
+    execution_admission = (
+        ExecutionAdmission(bundle_repository=bundle_repository) if bundle_aware else None
+    )
     executor = PlanExecutor(
         adapter,
         plan_service,
         audit,
         clock=clock,
         plan_repository=plan_repository,
+        execution_admission=execution_admission,
     )
-    repository = ScheduledPlanRepository(database)
-    recurring_repository = RecurringScheduleRepository(database)
     scheduler = Scheduler(
         executor,
         repository,
         audit,
         grace_window=grace_window,
         recurring_repository=recurring_repository,
+        bundle_repository=bundle_repository,
+        execution_admission=execution_admission,
         clock=clock,
     )
     return adapter, plan_service, scheduler, repository, audit
@@ -98,6 +114,50 @@ def _plan(device_id: str, *, plan_id: str, execute_at: datetime) -> Plan:
     )
 
 
+def _bundle_repository(scheduler: Scheduler) -> BundleCommitRepository:
+    repository = scheduler.bundle_repository
+    assert repository is not None
+    return repository
+
+
+async def _build_bundle_member(
+    plan_service: PlanService,
+    scheduler: Scheduler,
+    repository: ScheduledPlanRepository,
+    *,
+    plan_id: str,
+    execute_at: datetime,
+    scheduled: bool,
+) -> Plan:
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan = plan_service.validate(_plan(device_id, plan_id=plan_id, execute_at=execute_at))
+    bundle = BundleCommit(
+        id=f"bundle-{plan_id}",
+        bundle_digest=f"sha256:{plan_id}-bundle",
+        scenario_id=f"scenario-{plan_id}",
+        status=BundleCommitStatus.SCHEDULED if scheduled else BundleCommitStatus.COMMITTING,
+        members=[
+            BundleMemberCommit(
+                plan_id=plan.id,
+                validation_digest=plan.validation.digest if plan.validation else "missing",
+                execute_at=plan.execute_at,
+                status=(
+                    BundleMemberCommitStatus.SCHEDULED
+                    if scheduled
+                    else BundleMemberCommitStatus.PENDING
+                ),
+                scheduled=scheduled,
+            )
+        ],
+    )
+    await _bundle_repository(scheduler).save(bundle)
+    if scheduled:
+        await repository.schedule(plan)
+    return plan
+
+
 class _StopTest(BaseException):
     """Sentinel used to deterministically end a `run()` loop under test.
 
@@ -115,7 +175,8 @@ class _FailingExecutorWrapper:
         self._failing_plan_prefix = failing_plan_prefix
         self.plan_service = real_executor.plan_service
 
-    async def execute(self, plan: Plan):
+    async def execute(self, plan: Plan, *, aggregate_owner: bool = False):
+        assert aggregate_owner is True
         if plan.id.startswith(self._failing_plan_prefix):
             raise RuntimeError("simulated unexpected execution failure")
         return await self._real.execute(plan)
@@ -175,6 +236,19 @@ async def test_one_plan_failure_does_not_abandon_other_due_plans_in_sweep(tmp_pa
                     value=22,
                     unit="°C",
                     idempotency_key="plan-c:intent",
+                    # Spec 165 made climate.bedroom's set_temperature a real,
+                    # confirmable command (previously dead code that always
+                    # left target_temperature unchanged, which is what
+                    # incidentally produced "unknown" here before -- an
+                    # accidental coupling to a bug, not a deliberate test
+                    # design). An explicit postcondition with a value the
+                    # fixture will never report keeps this test's original
+                    # intent (prove "unknown" outcomes survive sweep
+                    # continuation) genuinely independent of the fixture's
+                    # real behavior.
+                    postconditions=[
+                        CommandPostcondition(capability="target_temperature", expected=999.0)
+                    ],
                 )
             ],
         ),
@@ -503,6 +577,108 @@ async def test_reschedule_requires_a_new_temporal_revision(tmp_path) -> None:
     assert await scheduler.reschedule("plan-reschedule-1", new_time) is False
     pending = await scheduler.list_pending()
     assert pending[0].execute_at == plan.execute_at
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejects_a_pending_bundle_member_without_settling_schedule(tmp_path) -> None:
+    _, plan_service, scheduler, repository, _ = await _build_scheduler(
+        tmp_path, bundle_aware=True
+    )
+    member = await _build_bundle_member(
+        plan_service,
+        scheduler,
+        repository,
+        plan_id="plan-scheduler-cancel-member",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        scheduled=True,
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        await scheduler.cancel(member.id)
+
+    assert excinfo.value.code is ErrorCode.BUNDLE_MEMBER_CANCEL_FORBIDDEN
+    stored = await repository.get(member.id)
+    assert stored is not None
+    assert stored[1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_reschedule_rejects_a_pending_bundle_member_without_changing_temporal_evidence(
+    tmp_path,
+) -> None:
+    _, plan_service, scheduler, repository, _ = await _build_scheduler(
+        tmp_path, bundle_aware=True
+    )
+    member = await _build_bundle_member(
+        plan_service,
+        scheduler,
+        repository,
+        plan_id="plan-scheduler-reschedule-member",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        scheduled=True,
+    )
+    stored_before = await repository.get(member.id)
+    assert stored_before is not None
+    original_plan, original_status = stored_before
+    assert original_status == "pending"
+    new_execute_at = original_plan.execute_at + timedelta(hours=1)
+
+    with pytest.raises(DomainError) as excinfo:
+        await scheduler.reschedule(member.id, new_execute_at)
+
+    assert excinfo.value.code is ErrorCode.BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN
+    stored_after = await repository.get(member.id)
+    assert stored_after is not None
+    assert stored_after[1] == "pending"
+    assert stored_after[0].execute_at == original_plan.execute_at
+    assert stored_after[0].schedule_revision == original_plan.schedule_revision
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_a_bundle_member_for_a_generic_caller(tmp_path) -> None:
+    _, plan_service, scheduler, repository, _ = await _build_scheduler(
+        tmp_path, bundle_aware=True
+    )
+    member = await _build_bundle_member(
+        plan_service,
+        scheduler,
+        repository,
+        plan_id="plan-scheduler-schedule-member",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        scheduled=False,
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        await scheduler.schedule(member)
+
+    assert excinfo.value.code is ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN
+    assert await repository.get(member.id) is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_allows_non_member_mutations_with_bundle_admission_enabled(
+    tmp_path,
+) -> None:
+    _, plan_service, scheduler, repository, _ = await _build_scheduler(
+        tmp_path, bundle_aware=True
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    plan = plan_service.validate(
+        _plan(
+            device_id,
+            plan_id="plan-scheduler-non-member",
+            execute_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+
+    await scheduler.schedule(plan)
+
+    assert await scheduler.cancel(plan.id) is True
+    stored = await repository.get(plan.id)
+    assert stored is not None
+    assert stored[1] == "cancelled"
 
 
 @pytest.mark.asyncio

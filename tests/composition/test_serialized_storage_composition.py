@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.runtime_factory import build_runtime
 from domoai.config.settings import Settings
-from domoai.persistence.serialized import StorageOperationTimeoutError
+from domoai.persistence.serialized import SerializedStorageExecutor, StorageOperationTimeoutError
 
 
 @pytest.mark.composition
@@ -58,3 +59,32 @@ async def test_sqlite_contention_does_not_block_scheduler_event_loop(tmp_path) -
         if not lock_closed:
             lock_connection.close()
         await runtime.close()
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_cancelled_storage_call_drains_worker_before_return() -> None:
+    storage = SerializedStorageExecutor(operation_timeout_seconds=5.0)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_operation() -> str:
+        started.set()
+        release.wait(timeout=5)
+        finished.set()
+        return "done"
+
+    task = asyncio.create_task(storage.run(blocking_operation))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+    finally:
+        release.set()
+        await storage.close()

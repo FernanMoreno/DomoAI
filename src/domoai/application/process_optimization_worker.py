@@ -55,6 +55,7 @@ class ProcessOptimizationWorker:
         budget: WorkerBudget | None = None,
         *,
         max_tasks_per_worker: int = 0,
+        max_horizon_slots: int = 10080,
         solve_fn: Callable[[OptimizationScenario], OptimizationResult] = solve_validated_scenario,
     ) -> None:
         # `solve_fn` is a test seam (spec 150 SC-001): the function actually
@@ -68,6 +69,7 @@ class ProcessOptimizationWorker:
         self.registry = registry
         self.budget = budget or WorkerBudget()
         self._solve_fn = solve_fn
+        self.max_horizon_slots = max_horizon_slots
         self._pool = pebble.ProcessPool(
             max_workers=self.budget.max_concurrency,
             max_tasks=max_tasks_per_worker,
@@ -84,7 +86,9 @@ class ProcessOptimizationWorker:
         # Validation stays in this (parent) process: it needs the live
         # registry, and it's cheap enough that a process round trip for a
         # reject would be pure waste (spec 150 FR-002).
-        diagnostics = validate_scenario(scenario, self.registry)
+        diagnostics = validate_scenario(
+            scenario, self.registry, max_horizon_slots=self.max_horizon_slots
+        )
         if diagnostics:
             return OptimizationResult(
                 scenario_id=scenario.id,

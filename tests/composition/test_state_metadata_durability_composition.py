@@ -8,7 +8,14 @@ from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
-from domoai.domain.models import Command, Plan, StateChangedEvent
+from domoai.domain.models import (
+    Command,
+    Plan,
+    SourceRef,
+    StateChangedEvent,
+    StateSnapshot,
+    StateStatus,
+)
 from domoai.persistence.repositories import (
     DeviceRepository,
     PlanRepository,
@@ -21,6 +28,27 @@ from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
+
+
+class _CountingPersistence:
+    def __init__(self) -> None:
+        self.persist_calls = 0
+
+    async def persist(self, snapshots, metadata) -> None:
+        del snapshots, metadata
+        self.persist_calls += 1
+
+    async def delete(self, device_id, metadata) -> None:
+        del device_id, metadata
+
+
+class _CountingLegacySink:
+    def __init__(self) -> None:
+        self.save_calls = 0
+
+    async def save(self, snapshot) -> None:
+        del snapshot
+        self.save_calls += 1
 
 
 @pytest.mark.composition
@@ -111,3 +139,34 @@ async def test_discovery_event_and_executor_readback_restore_one_state_revision(
     assert restored is not None
     assert restored.value is False
     assert restored.status.value == "stale"
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_executor_uses_one_authoritative_readback_persistence_path() -> None:
+    persistence = _CountingPersistence()
+    legacy_sink = _CountingLegacySink()
+    state_store = StateStore()
+    state_store.bind_persistence(persistence)
+    plan_service = PlanService(DeviceRegistry(), state_store, PolicyEngine([]), AuditLog())
+    executor = PlanExecutor(
+        SimulatedHomeAdapter(),
+        plan_service,
+        AuditLog(),
+        state_snapshot_repository=legacy_sink,
+    )
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    snapshot = StateSnapshot(
+        device_id="light.main",
+        capability="power",
+        value=False,
+        observed_at=now,
+        received_at=now,
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.main"),
+    )
+
+    await executor._persist_snapshot(snapshot)
+
+    assert persistence.persist_calls == 1
+    assert legacy_sink.save_calls == 0

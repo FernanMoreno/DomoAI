@@ -60,6 +60,30 @@
       ],
       "title": "HomeAssistantBatteryCommandRoute",
       "type": "object"
+    },
+    "HomeAssistantIdentityClaims": {
+      "additionalProperties": false,
+      "description": "Stable Home Assistant registry claims used to resolve a live device ID.",
+      "properties": {
+        "identity_keys": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Identity Keys",
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Connections",
+          "type": "array"
+        }
+      },
+      "title": "HomeAssistantIdentityClaims",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -72,10 +96,44 @@
       "type": "string"
     },
     "device_id": {
-      "maxLength": 256,
-      "minLength": 1,
-      "title": "Device Id",
-      "type": "string"
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Id"
+    },
+    "canonical_device_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Canonical Device Id"
+    },
+    "identity_claims": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HomeAssistantIdentityClaims"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "control_capability": {
       "default": "battery_control",
@@ -141,7 +199,6 @@
     }
   },
   "required": [
-    "device_id",
     "soc_entity_id",
     "power_feedback_entity_id",
     "capacity_entity_id",

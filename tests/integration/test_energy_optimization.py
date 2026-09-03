@@ -16,8 +16,10 @@ from domoai.optimizer.energy import (
     BatteryProfile,
     ConfidenceBand,
     EnergyContext,
+    ExteriorTemperaturePoint,
     SolarForecastPoint,
     TariffPoint,
+    ThermalProfile,
 )
 from domoai.optimizer.ports import OptimizationStatus
 from domoai.optimizer.scenario import (
@@ -2404,3 +2406,212 @@ async def test_energy_minimize_start_maximize_direction_is_honored() -> None:
     }
     assert result.plan is not None
     assert result.plan.commands[0].intent == "scheduled_slot:3"
+
+
+def _thermal_profile_for_test(
+    *,
+    initial_temperature_c: float = 20.5,
+    comfort_min_c: float = 19.0,
+    comfort_max_c: float = 22.0,
+    max_heat_kw: float = 3.0,
+) -> ThermalProfile:
+    return ThermalProfile(
+        capacitance_kwh_per_c=5.0,
+        ua_kw_per_c=0.2,
+        initial_temperature_c=initial_temperature_c,
+        comfort_min_c=comfort_min_c,
+        comfort_max_c=comfort_max_c,
+        max_heat_kw=max_heat_kw,
+        max_cool_kw=3.0,
+        heating_cop=3.0,
+        cooling_cop=2.5,
+    )
+
+
+def test_hvac_shifts_to_cheap_period_while_staying_comfortable() -> None:
+    """Spec 165 User Story 1 acceptance scenario: cost-driven HVAC scheduling
+    respects comfort, mirroring the golden-scenario style already proven for
+    solar (test_maximize_solar_self_consumption_shifts_load_into_solar_slot).
+
+    A ThermalProfile's own comfort_min_c/comfort_max_c fields are
+    declarative (mirrors how BatteryProfile's min/max_soc_kwh are also just
+    IntVar bounds) -- they do not self-enforce. Enforcement requires an
+    explicit comfort_temp_min/max Constraint (soft by default per FR-005),
+    so this golden scenario includes one to give heating a genuine reason
+    to happen, not just a shape assertion over whatever the solver happens
+    to pick with zero incentive either way.
+    """
+
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.05, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.50, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(slot=0, power=0.0),
+            SolarForecastPoint(slot=1, power=0.0),
+        ],
+        battery=None,
+        thermal=_thermal_profile_for_test(initial_temperature_c=19.0, comfort_min_c=19.0),
+        exterior_temperature_forecast=[
+            ExteriorTemperaturePoint(slot=0, temperature_c=5.0),
+            ExteriorTemperaturePoint(slot=1, temperature_c=5.0),
+        ],
+        source_revision="golden-thermal-direction",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="thermal-direction-1",
+        horizon=horizon,
+        energy_context=context,
+        constraints=[
+            Constraint(type="comfort_temp_min", value=19.0, unit="degC", hard=False),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+
+    slots = result.constraint_summary["slots"]
+    hvac_powers = [slot["hvac_power_kw"] for slot in slots]
+    temperatures = [slot["indoor_temperature_c"] for slot in slots]
+    assert hvac_powers[0] > 0.0
+    assert hvac_powers[0] >= hvac_powers[1] - 1e-6
+    assert all(value >= 19.0 - 0.01 for value in temperatures)
+    assert result.constraint_summary["soft_violations"] == []
+
+
+def test_hvac_power_counts_against_shared_house_power_constraint() -> None:
+    """Spec 165 User Story 1, Acceptance Scenario 3: HVAC power is counted
+    against max_house_power exactly like every other load kind already is."""
+
+    horizon = energy_horizon(slots=1, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR")],
+        solar_forecast=[SolarForecastPoint(slot=0, power=0.0)],
+        battery=None,
+        thermal=_thermal_profile_for_test(max_heat_kw=3.0),
+        exterior_temperature_forecast=[ExteriorTemperaturePoint(slot=0, temperature_c=0.0)],
+        source_revision="thermal-house-power-1",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="thermal-house-power-1",
+        horizon=horizon,
+        energy_context=context,
+        constraints=[
+            Constraint(type="comfort_temp_min", value=25.0, unit="degC", hard=False),
+            Constraint(type="max_house_power", value=1.0, unit="kW"),
+        ],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+
+    slots = result.constraint_summary["slots"]
+    # comfort_temp_min=25 is unreachable (soft, will violate) and would
+    # otherwise pull max_heat_kw=3.0 -- max_house_power=1.0 must still cap
+    # actual HVAC draw, proving it shares the same constraint battery/EV/
+    # comfort loads already do.
+    assert all(slot["hvac_power_kw"] <= 1.0 + 1e-6 for slot in slots)
+
+
+@pytest.mark.asyncio
+async def test_scenario_without_thermal_profile_is_unaffected() -> None:
+    """Spec 165 FR-007/SC-002: a non-thermal scenario's result is identical
+    to what it was before this feature existed."""
+
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[
+            TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR"),
+            TariffPoint(slot=1, price_per_kwh=0.10, currency="EUR"),
+        ],
+        solar_forecast=[
+            SolarForecastPoint(slot=0, power=0.0),
+            SolarForecastPoint(slot=1, power=5.0),
+        ],
+        battery=None,
+        source_revision="golden-solar-direction-regression",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    assert context.thermal is None
+    assert context.exterior_temperature_forecast is None
+    scenario = OptimizationScenario(
+        id="solar-direction-regression-1",
+        horizon=horizon,
+        energy_context=context,
+        loads=[
+            flexible_load(device_id, power_kw=1.0, earliest_slot=0, latest_slot=1, duration_slots=1)
+        ],
+        constraints=[
+            Constraint(type="max_grid_import", value=10, unit="kW"),
+            Constraint(type="max_grid_export", value=10, unit="kW"),
+        ],
+        objectives=[Objective(name="maximize_solar_self_consumption", direction="maximize")],
+    )
+
+    result = service.optimize(scenario)
+
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+    }
+    assert result.plan is not None
+    command = next(cmd for cmd in result.plan.commands if cmd.device_id == device_id)
+    # Byte-identical to the pre-165 golden result
+    # (test_maximize_solar_self_consumption_shifts_load_into_solar_slot):
+    # scheduled into the solar slot, unaffected by this feature existing.
+    assert command.intent == "scheduled_slot:1"
+    slots = result.constraint_summary["slots"]
+    assert all(slot["hvac_power_kw"] == 0.0 for slot in slots)
+    assert all(slot["indoor_temperature_c"] == 0.0 for slot in slots)
+
+
+def test_infeasible_comfort_reports_violation_instead_of_failing() -> None:
+    """Spec 165 User Story 2 acceptance scenario: a genuinely unreachable
+    comfort bound is reported honestly, not silently absorbed and not
+    turned into a hard failure of the whole optimization."""
+
+    horizon = energy_horizon(slots=1, resolution_minutes=15)
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[TariffPoint(slot=0, price_per_kwh=0.10, currency="EUR")],
+        solar_forecast=[SolarForecastPoint(slot=0, power=0.0)],
+        battery=None,
+        # A cold start too far below comfort, with too little heating
+        # power and too short a horizon to close the gap in one slot --
+        # deliberately infeasible-if-hard, per FR-005/spec User Story 2.
+        thermal=_thermal_profile_for_test(
+            initial_temperature_c=10.0, comfort_min_c=19.0, max_heat_kw=0.5
+        ),
+        exterior_temperature_forecast=[ExteriorTemperaturePoint(slot=0, temperature_c=0.0)],
+        source_revision="thermal-soft-violation-acceptance-1",
+        observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC),
+    )
+    scenario = OptimizationScenario(
+        id="thermal-soft-violation-acceptance-1",
+        horizon=horizon,
+        energy_context=context,
+        constraints=[Constraint(type="comfort_temp_min", value=19.0, unit="degC", hard=False)],
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+
+    assert result.status in {
+        OptimizationStatus.FEASIBLE_HIERARCHY,
+        OptimizationStatus.OPTIMAL_HIERARCHY,
+        OptimizationStatus.NO_ACTION_REQUIRED,
+    }
+    violations = result.constraint_summary["soft_violations"]
+    comfort_violations = [v for v in violations if v["type"] == "comfort_temp_min"]
+    assert comfort_violations
+    assert comfort_violations[0]["amount"] > 0
+    assert comfort_violations[0]["slot"] == 0

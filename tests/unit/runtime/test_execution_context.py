@@ -6,7 +6,11 @@ from domoai.adapters.knx.transport import InMemoryKnxTransport
 from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.adapters.modbus.transport import InMemoryModbusTransport
 from domoai.adapters.zigbee2mqtt.transport import InMemoryMqttTransport
-from domoai.runtime.execution_context import ExecutionContext
+from domoai.runtime.execution_context import (
+    ExecutionContext,
+    current_execution_principal,
+    execution_principal,
+)
 
 
 def _context() -> ExecutionContext:
@@ -16,6 +20,18 @@ def _context() -> ExecutionContext:
         execution_attempt_id="attempt-transport-1",
         adapter_request_id="adapter-transport-1",
     )
+
+
+def test_execution_principal_is_scoped_and_has_a_safe_local_default() -> None:
+    assert current_execution_principal() == "local"
+
+    with execution_principal("agent-codex"):
+        assert current_execution_principal() == "agent-codex"
+        with execution_principal("agent-claude"):
+            assert current_execution_principal() == "agent-claude"
+        assert current_execution_principal() == "agent-codex"
+
+    assert current_execution_principal() == "local"
 
 
 @pytest.mark.asyncio

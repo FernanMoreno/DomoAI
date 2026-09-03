@@ -43,6 +43,7 @@ class RiskOverride:
     device_id: str | None = None
     area_id: str | None = None
     risk_class: RiskClass = RiskClass.RESTRICTED
+    privileged_exception: bool = False
 
 
 @dataclass
@@ -56,13 +57,28 @@ class RiskClassifier:
     overrides: tuple[RiskOverride, ...] = field(default_factory=tuple)
 
     def classify(self, device: Device, capability: str, command: Command) -> RiskClass:
+        default = self._classify_default(device, capability, command)
         for override in self.overrides:
             if override.device_id is not None and override.device_id == device.id:
-                return override.risk_class
+                return self._effective_override(default, override)
         for override in self.overrides:
             if override.area_id is not None and override.area_id == device.area_id:
-                return override.risk_class
-        return self._classify_default(device, capability, command)
+                return self._effective_override(default, override)
+        return default
+
+    @staticmethod
+    def _effective_override(default: RiskClass, override: RiskOverride) -> RiskClass:
+        # Deployment overrides may harden a decision. Lowering a restricted
+        # or confirmation gate requires a separate privileged exception
+        # contract, never an ordinary risk-overrides file.
+        rank = {RiskClass.SAFE: 0, RiskClass.CONFIRM: 1, RiskClass.RESTRICTED: 2}
+        if override.privileged_exception:
+            return override.risk_class
+        return (
+            override.risk_class
+            if rank[override.risk_class] >= rank[default]
+            else default
+        )
 
     @staticmethod
     def _classify_default(device: Device, capability: str, command: Command) -> RiskClass:

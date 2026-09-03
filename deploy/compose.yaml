@@ -1,0 +1,117 @@
+name: domoai
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${DOMOAI_MQTT_HOST_PORT:-1883}:1883"
+    volumes:
+      - mqtt-data:/mosquitto/data
+    healthcheck:
+      test:
+        - CMD
+        - mosquitto_pub
+        - -h
+        - 127.0.0.1
+        - -p
+        - "1883"
+        - -t
+        - domoai/healthcheck
+        - -n
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${DOMOAI_HOME_ASSISTANT_HOST_PORT:-8123}:8123"
+    environment:
+      TZ: ${TZ:-Europe/Madrid}
+    volumes:
+      - homeassistant-config:/config
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8123/', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["domoai-mcp-gateway"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    env_file:
+      - gateway.env
+    depends_on:
+      mqtt:
+        condition: service_healthy
+      homeassistant:
+        condition: service_healthy
+    expose:
+      - "8124"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - domoai-data:/app/data
+      - ${DOMOAI_MCP_CLIENT_TOKEN_FILE_HOST:-./clients.json}:/run/secrets/mcp-clients.json:ro
+      - ${DOMOAI_KNX_CONFIG_PATH_HOST:-./knx-config.json}:/app/config/knx-config.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8124/healthz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  proxy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    environment:
+      DOMOAI_CADDY_HOSTNAME: ${DOMOAI_CADDY_HOSTNAME:-mcp.example.test}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "${DOMOAI_PROXY_HTTP_BIND:-0.0.0.0}:80:80"
+      - "${DOMOAI_PROXY_HTTPS_BIND:-0.0.0.0}:443:443"
+    volumes:
+      - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --insecure --silent --show-error --output /dev/null
+          --resolve "$${DOMOAI_CADDY_HOSTNAME}:443:127.0.0.1"
+          "https://$${DOMOAI_CADDY_HOSTNAME}/healthz"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  domoai-data:
+  homeassistant-config:
+  mqtt-data:
+  caddy-data:
+  caddy-config:

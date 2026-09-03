@@ -1,0 +1,53 @@
+{
+  "schema_version": "v1",
+  "entities": [
+    {
+      "entity_id": "lab.ev_charger",
+      "name": "Virtual EV Charger",
+      "area_id": "lab",
+      "semantic_type": "energy",
+      "manufacturer": "DomoAI Lab",
+      "model": "Deterministic EV Charger",
+      "unit_id": 1,
+      "capabilities": [
+        {
+          "name": "ev.soc",
+          "state": {
+            "area": "input_register",
+            "address": 0,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "ev_charging",
+          "state": {
+            "area": "input_register",
+            "address": 2,
+            "data_type": "float32"
+          },
+          "command": {
+            "area": "holding_register",
+            "address": 10,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "ev.capacity",
+          "state": {
+            "area": "input_register",
+            "address": 4,
+            "data_type": "float32"
+          }
+        },
+        {
+          "name": "ev.connected",
+          "state": {
+            "area": "discrete_input",
+            "address": 0,
+            "data_type": "bool"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -118,9 +118,7 @@ class SerializedStorageExecutor:
     async def run(self, operation: Callable[[], T]) -> T:
         """Admit and await one synchronous operation without blocking the loop."""
 
-        acquired = await asyncio.to_thread(
-            self._acquire_slot, True, self.queue_wait_seconds
-        )
+        acquired = await asyncio.to_thread(self._acquire_slot, True, self.queue_wait_seconds)
         if not acquired:
             with self._state_lock:
                 self._overloaded_count += 1
@@ -142,6 +140,14 @@ class SerializedStorageExecutor:
             raise StorageOperationTimeoutError("storage operation timed out") from error
         except asyncio.CancelledError:
             result.add_done_callback(self._release_slot)
+            # Cancellation cannot interrupt the synchronous worker. Drain its
+            # result before propagating cancellation so callers cannot clean
+            # up files or release ownership while the operation still uses
+            # the resource.
+            try:
+                await asyncio.shield(asyncio.wrap_future(result))
+            except BaseException:
+                pass
             raise
         else:
             self._release_slot()
@@ -236,9 +242,7 @@ class SerializedRepositoryProxy:
         if inspect.iscoroutinefunction(attribute):
 
             async def invoke(*args: Any, **kwargs: Any) -> Any:
-                return await self._storage.run_async(
-                    lambda: attribute(*args, **kwargs)
-                )
+                return await self._storage.run_async(lambda: attribute(*args, **kwargs))
 
             return invoke
 

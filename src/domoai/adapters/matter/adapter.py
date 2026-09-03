@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import re
 from collections.abc import AsyncIterator, Sequence
@@ -90,6 +91,7 @@ class MatterServerAdapter:
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         self._require_connected()
         wanted = {source_ref.external_id for source_ref in source_refs}
+        await self._poll_attributes(wanted)
         snapshots: list[StateSnapshot] = []
         for (source_entity_id, capability), state in self._states.items():
             if source_entity_id not in wanted:
@@ -115,6 +117,85 @@ class MatterServerAdapter:
                 )
             )
         return snapshots
+
+    async def _poll_attributes(self, wanted: set[str]) -> None:
+        """Read current attributes instead of rejuvenating cached reports."""
+
+        for source_entity_id in sorted(wanted):
+            parsed = self._parse_source_entity_id(source_entity_id)
+            entity = self._source_entities.get(source_entity_id)
+            if parsed is None or entity is None:
+                continue
+            node_id, endpoint_id = parsed
+            node = self._nodes.get(node_id)
+            if node is None or not bool(node.get("available", False)):
+                continue
+            capabilities = entity.get("capabilities", [])
+            if not isinstance(capabilities, list):
+                continue
+            candidate = copy.deepcopy(node)
+            attributes = candidate.get("attributes")
+            if not isinstance(attributes, dict):
+                continue
+            fresh_capabilities: set[str] = set()
+            for raw_capability in capabilities:
+                if not isinstance(raw_capability, dict):
+                    continue
+                capability = str(raw_capability.get("name") or "")
+                path = self._attribute_path_for_capability(endpoint_id, capability)
+                if path is None:
+                    continue
+                try:
+                    result = await asyncio.wait_for(
+                        self.transport.request(
+                            "read_attribute",
+                            {
+                                "node_id": node_id,
+                                "attribute_path": path,
+                            },
+                        ),
+                        self.discovery_timeout,
+                    )
+                except (ConnectionError, OSError, TimeoutError):
+                    continue
+                if not isinstance(result, dict) or path not in result:
+                    continue
+                attributes[path] = result[path]
+                fresh_capabilities.add(capability)
+            if not fresh_capabilities:
+                continue
+            self._nodes[node_id] = candidate
+            states, _diagnostics = self.mapper.map_states(candidate)
+            received_at = self._clock.now()
+            for state in states:
+                if (
+                    state["entity_id"] == source_entity_id
+                    and state["capability"] in fresh_capabilities
+                ):
+                    self._states[(source_entity_id, state["capability"])] = {
+                        **state,
+                        "received_at": received_at,
+                    }
+
+    @staticmethod
+    def _parse_source_entity_id(source_entity_id: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"node:(\d+)/endpoint:(\d+)", source_entity_id)
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    @staticmethod
+    def _attribute_path_for_capability(endpoint_id: int, capability: str) -> str | None:
+        cluster_id = {
+            "power": ON_OFF_CLUSTER,
+            "brightness": LEVEL_CONTROL_CLUSTER,
+            "temperature": TEMPERATURE_CLUSTER,
+            "humidity": HUMIDITY_CLUSTER,
+            "occupancy": OCCUPANCY_CLUSTER,
+        }.get(capability)
+        if cluster_id is None:
+            return None
+        return MatterMapper.path(endpoint_id, cluster_id, 0)
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None

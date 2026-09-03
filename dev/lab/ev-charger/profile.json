@@ -1,0 +1,10 @@
+{
+  "provider_id": "lab-ev-simulator",
+  "device_id": "lab-ev-1",
+  "capacity_kwh": 60.0,
+  "initial_soc_kwh": 20.0,
+  "max_charge_kw": 7.4,
+  "charge_efficiency": 0.95,
+  "initial_connected": true,
+  "tick_seconds": 1.0
+}

@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import Field, model_validator
 
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    AggregateExecutionCapability,
     BundleCommit,
     BundleCommitStatus,
     BundleMemberCommit,
@@ -23,6 +24,8 @@ from domoai.domain.models import (
     Plan,
     PlanStatus,
     StrictModel,
+    execution_dependency_evidence_digest,
+    execution_outcome_digest,
 )
 from domoai.persistence.repositories import (
     BundleCommitRepository,
@@ -32,6 +35,7 @@ from domoai.persistence.repositories import (
 from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 
 
 class BundleCommitRequestMember(StrictModel):
@@ -105,6 +109,7 @@ class BundleCommitService:
         audit: AuditLog,
         plan_repository: PlanRepository | None = None,
         clock: Clock | None = None,
+        operational_metrics: RuntimeOperationalMetrics | None = None,
     ) -> None:
         self.facade = facade
         self.plans = plans
@@ -114,6 +119,7 @@ class BundleCommitService:
         self.audit = audit
         self.plan_repository = plan_repository
         self.clock = clock or SystemClock()
+        self.operational_metrics = operational_metrics
 
     async def commit(self, request: BundleCommitRequest) -> BundleCommit:
         expected_digest = bundle_approval_digest(request.scenario_id, request.members)
@@ -131,6 +137,14 @@ class BundleCommitService:
             await self._preflight_member(member, bundle_digest=request.bundle_digest)
             for member in request.members
         ]
+        authority_keys = {
+            (plan.authority.tenant_id, plan.authority.household_id) for plan in plans
+        }
+        if len(authority_keys) != 1:
+            raise DomainError(
+                ErrorCode.VALIDATION_ERROR,
+                "All bundle members must belong to one tenant and household",
+            )
         member_ids = [member.plan_id for member in request.members]
         for index, member in enumerate(request.members):
             if any(
@@ -142,9 +156,11 @@ class BundleCommitService:
                     "A predecessor must refer to an earlier bundle member",
                 )
         bundle = BundleCommit(
+            authority=plans[0].authority.model_copy(update={"principal_id": "runtime"}),
             id=f"bundle-commit-{uuid4().hex}",
             bundle_digest=request.bundle_digest,
             scenario_id=request.scenario_id,
+            approval_reservation_id=f"bundle-commit-{uuid4().hex}",
             members=[
                 BundleMemberCommit(
                     plan_id=member.plan_id,
@@ -174,16 +190,27 @@ class BundleCommitService:
             },
         )
 
+        # The bundle row is durable before any approval is reserved. A
+        # reservation keeps grants pending while projections and preflight
+        # settle; only the commit point below consumes them.
+        reservation_id = bundle.approval_reservation_id or bundle.id
         try:
-            plans = await self._consume_approvals(
-                request.members, plans, bundle_digest=request.bundle_digest
+            plans = await self._reserve_approvals(
+                request.members,
+                plans,
+                bundle_digest=request.bundle_digest,
+                reservation_id=reservation_id,
             )
         except Exception as error:
-            return await self._finish_failure(bundle, error, committed=False)
+            return await self._finish_failure(
+                bundle, error, committed=False, reservation_committed=False
+            )
         try:
             self._assert_all_executable(plans)
         except Exception as error:
-            return await self._finish_failure(bundle, error, committed=False)
+            return await self._finish_failure(
+                bundle, error, committed=False, reservation_committed=False
+            )
 
         now = self.clock.now()
         due_indexes = [
@@ -197,14 +224,40 @@ class BundleCommitService:
 
         if not due_indexes:
             try:
-                return await self.bundle_repository.schedule_members_transaction(
+                scheduled_bundle = await self.bundle_repository.schedule_members_transaction(
                     bundle,
                     plans,
                     future_indexes,
                     final_status=BundleCommitStatus.SCHEDULED,
                 )
             except Exception as error:
-                return await self._finish_failure(bundle, error, committed=False)
+                return await self._finish_failure(
+                    bundle, error, committed=False, reservation_committed=False
+                )
+            try:
+                self.approval_store.commit_reservation(reservation_id)
+            except Exception as error:
+                for plan in plans:
+                    try:
+                        await self.scheduled_repository.cancel(plan.id)
+                    except Exception:
+                        pass
+                return await self._finish_failure(
+                    scheduled_bundle,
+                    error,
+                    committed=False,
+                    reservation_committed=False,
+                    unknown=True,
+                )
+            return scheduled_bundle
+
+        try:
+            self.approval_store.commit_reservation(reservation_id)
+        except Exception as error:
+            return await self._finish_failure(
+                bundle, error, committed=False, reservation_committed=False, unknown=True
+            )
+        reservation_committed = True
 
         for index in due_indexes:
             plan = plans[index]
@@ -213,13 +266,11 @@ class BundleCommitService:
             )
             try:
                 if state_version_overrides:
-                    summary = await self.facade.execute_plan(
-                        plan,
-                        state_version_overrides=state_version_overrides,
-                        aggregate_owner=True,
+                    summary = await self._execute_member(
+                        plan, state_version_overrides=state_version_overrides, bundle=bundle
                     )
                 else:
-                    summary = await self.facade.execute_plan(plan, aggregate_owner=True)
+                    summary = await self._execute_member(plan, bundle=bundle)
             except Exception as error:
                 bundle = await self._mark_member(
                     bundle,
@@ -230,7 +281,7 @@ class BundleCommitService:
                 )
                 return await self._finish_failure(bundle, error, committed=any(
                     item.status is BundleMemberCommitStatus.EXECUTED for item in bundle.members
-                ), unknown=True)
+                ), reservation_committed=reservation_committed, unknown=True)
 
             member_status, execution_status = self._classify_execution(summary)
             bundle = await self._mark_member(
@@ -239,7 +290,11 @@ class BundleCommitService:
                 status=member_status,
                 execution_status=execution_status,
                 details=(
-                    {"dependency_evidence": self._dependency_evidence(plan, summary)}
+                    {
+                        "dependency_evidence": self._dependency_evidence(
+                            bundle.id, plan, summary
+                        )
+                    }
                     if member_status is BundleMemberCommitStatus.EXECUTED
                     else None
                 ),
@@ -252,6 +307,7 @@ class BundleCommitService:
                         item.status is BundleMemberCommitStatus.EXECUTED
                         for item in bundle.members
                     ),
+                    reservation_committed=reservation_committed,
                     unknown=member_status is BundleMemberCommitStatus.UNKNOWN,
                 )
 
@@ -264,11 +320,39 @@ class BundleCommitService:
                     final_status=BundleCommitStatus.SCHEDULED,
                 )
             except Exception as error:
-                return await self._finish_failure(bundle, error, committed=True)
+                return await self._finish_failure(
+                    bundle, error, committed=True, reservation_committed=reservation_committed
+                )
 
-        return await self.bundle_repository.save(
+        result = await self.bundle_repository.save(
             bundle.model_copy(update={"status": BundleCommitStatus.COMPLETED})
         )
+        self._record_bundle_status(result.status)
+        return result
+
+    async def _execute_member(
+        self,
+        plan: Plan,
+        *,
+        bundle: BundleCommit,
+        state_version_overrides: dict[str, int] | None = None,
+    ) -> ExecutionSummary:
+        """Execute a member with a server-issued, single-use aggregate proof."""
+
+        kwargs: dict[str, Any] = {}
+        if state_version_overrides:
+            kwargs["state_version_overrides"] = state_version_overrides
+        admission = getattr(self.facade, "execution_admission", None)
+        if admission is None:
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Bundle execution requires the authoritative admission boundary",
+            )
+        capability: AggregateExecutionCapability = await admission.issue_aggregate_capability(
+            bundle.id, plan.id
+        )
+        kwargs["aggregate_capability"] = capability
+        return cast(ExecutionSummary, await self.facade.execute_plan(plan, **kwargs))
 
     async def is_scheduled_member(self, plan_id: str) -> bool:
         return await self.bundle_repository.is_scheduled_member(plan_id)
@@ -321,43 +405,49 @@ class BundleCommitService:
                 overrides[key] = state_store.state_version(device_id, _capability)
         return overrides
 
-    def _dependency_evidence(self, plan: Plan, summary: ExecutionSummary) -> dict[str, Any]:
+    def _dependency_evidence(
+        self, bundle_id: str, plan: Plan, summary: ExecutionSummary
+    ) -> dict[str, Any]:
         plan_service = getattr(self.facade, "plan_service", None)
-        if plan_service is None:
-            return {}
         state_store = getattr(plan_service, "state_store", None)
-        if state_store is None:
-            return {}
         state_versions: dict[str, int] = {}
-        for command in plan.commands:
-            capability = plan_service.capability_for_command(command)
-            if capability is not None:
-                key = f"{command.device_id}::{capability.name}"
-                state_versions[key] = state_store.state_version(
-                    command.device_id, capability.name
-                )
-            for precondition in command.preconditions:
-                key = f"{precondition.device_id}::{precondition.capability}"
-                state_versions[key] = state_store.state_version(
-                    precondition.device_id, precondition.capability
-                )
+        if plan_service is not None and state_store is not None:
+            for command in plan.commands:
+                capability = plan_service.capability_for_command(command)
+                if capability is not None:
+                    key = f"{command.device_id}::{capability.name}"
+                    state_versions[key] = state_store.state_version(
+                        command.device_id, capability.name
+                    )
+                for precondition in command.preconditions:
+                    key = f"{precondition.device_id}::{precondition.capability}"
+                    state_versions[key] = state_store.state_version(
+                        precondition.device_id, precondition.capability
+                    )
         first_outcome = summary.outcomes[0]
         captured_at = self.clock.now()
-        canonical_payload = {
-            "predecessor_plan_id": plan.id,
-            "predecessor_command_ids": [outcome.command_id for outcome in summary.outcomes],
-            "status": first_outcome.status.value,
-            "state_versions": state_versions,
-            "captured_at": captured_at.isoformat(),
-        }
-        canonical = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
+        outcome_digest = execution_outcome_digest(summary.outcomes)
         evidence = ExecutionDependencyEvidence(
+            bundle_id=bundle_id,
+            member_plan_id=plan.id,
             predecessor_plan_id=plan.id,
             predecessor_command_ids=[outcome.command_id for outcome in summary.outcomes],
             status=first_outcome.status,
             state_versions=state_versions,
             captured_at=captured_at,
-            evidence_digest=f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}",
+            outcome_digest=outcome_digest,
+            evidence_digest=execution_dependency_evidence_digest(
+                bundle_id=bundle_id,
+                member_plan_id=plan.id,
+                predecessor_plan_id=plan.id,
+                predecessor_command_ids=[
+                    outcome.command_id for outcome in summary.outcomes
+                ],
+                status=first_outcome.status,
+                state_versions=state_versions,
+                captured_at=captured_at,
+                outcome_digest=outcome_digest,
+            ),
         )
         return evidence.model_dump(mode="json")
 
@@ -429,27 +519,33 @@ class BundleCommitService:
                     device_id=command.device_id,
                 )
 
-    async def _consume_approvals(
+    async def _reserve_approvals(
         self,
         members: list[BundleCommitRequestMember],
         plans: list[Plan],
         *,
         bundle_digest: str,
+        reservation_id: str,
     ) -> list[Plan]:
         approved = list(plans)
         grants: list[tuple[int, Any]] = []
-        for index, member in enumerate(members):
-            if member.approval_id is not None:
-                grants.append(
-                    (
-                        index,
-                        self.approval_store.consume(
-                            member.approval_id,
-                            plans[index],
-                            bundle_digest=bundle_digest,
-                        ),
+        try:
+            for index, member in enumerate(members):
+                if member.approval_id is not None:
+                    grants.append(
+                        (
+                            index,
+                            self.approval_store.reserve(
+                                member.approval_id,
+                                plans[index],
+                                reservation_id=reservation_id,
+                                bundle_digest=bundle_digest,
+                            ),
+                        )
                     )
-                )
+        except Exception:
+            self.approval_store.release_reservation(reservation_id)
+            raise
         for index, grant in grants:
             approved[index] = self.facade.approve_plan(plans[index], grant=grant)
             self.plans[approved[index].id] = approved[index]
@@ -484,8 +580,13 @@ class BundleCommitService:
         error: Exception,
         *,
         committed: bool,
+        reservation_committed: bool,
         unknown: bool = False,
     ) -> BundleCommit:
+        if not reservation_committed:
+            self.approval_store.release_reservation(
+                bundle.approval_reservation_id or bundle.id
+            )
         status = (
             BundleCommitStatus.UNKNOWN
             if unknown and not committed
@@ -509,7 +610,18 @@ class BundleCommitService:
             subject_id=result.id,
             payload={"status": result.status.value, "member_count": len(result.members)},
         )
+        self._record_bundle_status(result.status)
         return result
+
+    def _record_bundle_status(self, status: BundleCommitStatus) -> None:
+        if self.operational_metrics is None:
+            return
+        if status is BundleCommitStatus.COMPLETED:
+            self.operational_metrics.record_bundle("completed")
+        elif status is BundleCommitStatus.PARTIALLY_COMMITTED:
+            self.operational_metrics.record_bundle("partial")
+        elif status is BundleCommitStatus.UNKNOWN:
+            self.operational_metrics.record_bundle("unknown")
 
     @staticmethod
     def _classify_execution(
@@ -542,11 +654,15 @@ class BundleRecoveryService:
         plan_repository: PlanRepository | None,
         scheduled_repository: ScheduledPlanRepository,
         audit: AuditLog,
+        approval_store: ApprovalStore | None = None,
+        operational_metrics: RuntimeOperationalMetrics | None = None,
     ) -> None:
         self.bundle_repository = bundle_repository
         self.plan_repository = plan_repository
         self.scheduled_repository = scheduled_repository
         self.audit = audit
+        self.approval_store = approval_store
+        self.operational_metrics = operational_metrics
 
     async def recover_orphaned_bundles(self) -> list[str]:
         recovered: list[str] = []
@@ -656,11 +772,34 @@ class BundleRecoveryService:
             updated = await self.bundle_repository.save(
                 bundle.model_copy(update={"members": members, "status": status})
             )
+            if self.approval_store is not None:
+                reservation_id = updated.approval_reservation_id or updated.id
+                authority_required = any(
+                    member.status
+                    in {
+                        BundleMemberCommitStatus.EXECUTED,
+                        BundleMemberCommitStatus.UNKNOWN,
+                        BundleMemberCommitStatus.SCHEDULED,
+                    }
+                    for member in updated.members
+                )
+                if authority_required:
+                    self.approval_store.commit_reservation(reservation_id)
+                else:
+                    self.approval_store.release_reservation(reservation_id)
             self.audit.append(
                 event_type="bundle_commit_recovered",
                 actor="runtime",
                 subject_id=updated.id,
                 payload={"status": updated.status.value, "replayed": False},
             )
+            if self.operational_metrics is not None:
+                self.operational_metrics.record_bundle("recovered")
+                if updated.status is BundleCommitStatus.COMPLETED:
+                    self.operational_metrics.record_bundle("completed")
+                elif updated.status is BundleCommitStatus.PARTIALLY_COMMITTED:
+                    self.operational_metrics.record_bundle("partial")
+                elif updated.status is BundleCommitStatus.UNKNOWN:
+                    self.operational_metrics.record_bundle("unknown")
             recovered.append(updated.id)
         return recovered

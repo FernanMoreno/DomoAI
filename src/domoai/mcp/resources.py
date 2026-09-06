@@ -35,9 +35,11 @@ def inventory_snapshot(
     }
 
 
-def capabilities_snapshot(registry: DeviceRegistry, runtime_revision: str) -> dict[str, Any]:
+def capabilities_snapshot(
+    registry: DeviceRegistry, runtime_revision: str, devices: list[Any] | None = None
+) -> dict[str, Any]:
     capabilities: dict[str, dict[str, Any]] = {}
-    for device in registry.devices:
+    for device in devices if devices is not None else registry.devices:
         for capability in device.capabilities:
             capabilities.setdefault(
                 capability.name,
@@ -63,6 +65,7 @@ def runtime_snapshot(
     runtime_revision: str,
     active_provider_ids: tuple[str, ...] = (),
     battery_qualification: str = "unsupported",
+    devices: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Expose the non-secret deployment matrix an agent must inspect first.
 
@@ -76,7 +79,7 @@ def runtime_snapshot(
     # until discovery and must never make a disconnected provider look active.
     providers = sorted({provider_id for provider_id in active_provider_ids if provider_id})
     writable: list[dict[str, Any]] = []
-    for device in registry.devices:
+    for device in devices if devices is not None else registry.devices:
         for capability in device.capabilities:
             if not capability.writable:
                 continue
@@ -87,17 +90,13 @@ def runtime_snapshot(
                     "capability": capability.name,
                     "commands": sorted(capability.commands),
                     "available": any(route.available for route in routes),
-                    "providers": sorted(
-                        {route.source_ref.adapter_id for route in routes}
-                    ),
+                    "providers": sorted({route.source_ref.adapter_id for route in routes}),
                 }
             )
     return {
         "schema_version": "v1",
         "runtime_revision": runtime_revision,
-        "providers": [
-            {"provider_id": provider_id, "active": True} for provider_id in providers
-        ],
+        "providers": [{"provider_id": provider_id, "active": True} for provider_id in providers],
         "writable_capabilities": writable,
         "authority": {
             "physical_execution": "plan_executor",
@@ -105,6 +104,51 @@ def runtime_snapshot(
             "battery_dispatch": battery_qualification,
         },
     }
+
+
+def coverage_snapshot(
+    registry: DeviceRegistry,
+    *,
+    runtime_revision: str,
+    active_provider_ids: tuple[str, ...] = (),
+    devices: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Describe semantic routes without exposing execution authority."""
+
+    providers = set(active_provider_ids)
+    routes: list[dict[str, Any]] = []
+    for device in devices if devices is not None else registry.devices:
+        for capability in device.capabilities:
+            source_ids = sorted(
+                {
+                    route.source_ref.adapter_id
+                    for route in registry.routes_for(device.id, capability.name)
+                }
+            )
+            routes.append(
+                {
+                    "device_id": device.id,
+                    "capability": capability.name,
+                    "protocols": source_ids,
+                    "operations": {
+                        "read": capability.readable,
+                        "write": capability.writable,
+                        "commands": sorted(capability.commands),
+                    },
+                    "guarantees": capability.guarantees.model_dump(mode="json"),
+                    "limits": {
+                        "unit": capability.unit,
+                        "minimum": capability.minimum,
+                        "maximum": capability.maximum,
+                        "enum_values": sorted(capability.enum_values),
+                    },
+                    "status": "active"
+                    if source_ids and providers.intersection(source_ids)
+                    else "unavailable",
+                    "writable": capability.writable,
+                }
+            )
+    return {"schema_version": "v1", "runtime_revision": runtime_revision, "routes": routes}
 
 
 def policies_snapshot(policies: list[Policy], runtime_revision: str) -> dict[str, Any]:
@@ -117,10 +161,13 @@ def policies_snapshot(policies: list[Policy], runtime_revision: str) -> dict[str
     }
 
 
-def energy_snapshot(registry: DeviceRegistry, runtime_revision: str) -> dict[str, Any]:
+def energy_snapshot(
+    registry: DeviceRegistry, runtime_revision: str, devices: list[Any] | None = None
+) -> dict[str, Any]:
+    available_devices = devices if devices is not None else registry.devices
     devices = [
         device
-        for device in registry.devices
+        for device in available_devices
         if device.type in {DeviceType.ENERGY, DeviceType.EV_CHARGER}
         or any(
             capability.name in {"energy", "power", "power_consumption"}
@@ -146,5 +193,8 @@ def energy_context_snapshot(context: EnergyContext, runtime_revision: str) -> di
     }
 
 
-def as_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+def as_json(value: Any) -> str:
+    payload = getattr(value, "structuredContent", value)
+    if not isinstance(payload, dict):
+        payload = {"error": str(payload)}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)

@@ -13,6 +13,29 @@ Los modelos usan `schema_version: "v1"`, timestamps con zona horaria y
 `extra="forbid"`. Por tanto, una entrada desconocida no se ignora
 silenciosamente: produce un error de validación seguro.
 
+La presencia de un contrato semántico no implica que cualquier protocolo tenga
+un adapter nativo ni que un dispositivo esté cualificado físicamente. La matriz
+vigente de soporte y sus límites se mantiene en
+[`adapter-coverage.md`](adapter-coverage.md); esa matriz no cambia las
+fronteras de policy, aprobación, admisión ni ejecución de este documento.
+
+## Cualificación multi-host v1
+
+`multihost-qualification-evidence.schema.json` es la evidencia canónica de
+una prueba atendida active-passive. Incluye el `LeaseScope`,
+`gateway_identity`, checks obligatorios, resultado derivado, caducidad y un
+digest SHA-256 de su contenido canónico. No acepta checks faltantes, IDs
+duplicados ni claves diagnósticas con forma de credencial.
+
+`gateway-fencing-probe-request.schema.json` y
+`gateway-fencing-probe-result.schema.json` definen el único intercambio JSONL
+con el bridge físico: un epoch positivo para un scope y una respuesta con el
+`probe_id` correspondiente, `accepted` y `observed_epoch`. El bridge debe
+rechazar los epochs menores o iguales al último aceptado. La evidencia no es
+una API MCP ni activa infraestructura: el runtime externo solo la acepta
+cuando `DOMOAI_MULTI_HOST_PRODUCTION_ENABLED=true`, está vigente y coincide
+exactamente con scope e identidad configurados.
+
 ## Superficie MCP v1
 
 ### Gateway compartido para agentes
@@ -28,6 +51,15 @@ la autenticación del agente no sustituye una aserción de consentimiento
 humano. `/healthz` solo indica liveness y `/readyz` exige lifecycle y adapter
 conectados. Los binds no locales requieren HTTPS y token file.
 
+En la deployment Compose de referencia, Caddy es el único borde publicado.
+El puerto 8124 del gateway queda solo en la red interna, y las rutas públicas
+se limitan a /mcp, /healthz y /readyz. Home Assistant y MQTT se enlazan a
+localhost para operación del host, no como endpoints remotos; sus puertos
+locales por defecto son 8123 y 1883 y pueden cambiarse mediante variables de
+deployment server-owned si el lab virtual ya los ocupa, manteniendo siempre el
+bind loopback. /healthz prueba liveness; /readyz conserva la señal estricta de
+readiness sin que el proxy la transforme.
+
 El gateway compartido aplica bootstrap estricto: si no existe al menos un
 adapter/provider configurado, `domoai-mcp-gateway` falla con un error explícito
 y no selecciona `SimulatedHomeAdapter`. La ruta `domoai-mcp` puede usar el
@@ -35,13 +67,24 @@ simulador únicamente como fixture local explícito. Antes de construir el
 runtime, el builder valida el token file; una credencial ausente o inválida no
 debe abrir SQLite, reclamar ownership ni conectar providers.
 
-Con `DOMOAI_BOOTSTRAP_PROFILE=lab`, el bootstrap puede seleccionar los assets
-canónicos `dispatchable-battery-lab.json` y `ev-charging-lab.json` cuando HA
-local está autenticado y reachable y no hay paths explícitos. Esto solo carga
-bindings server-owned: no infiere rutas, no crea evidencia HIL ni habilita
-production dispatch. El manifest registra esos paths no secretos en
+Con `DOMOAI_BOOTSTRAP_PROFILE=lab`, el bootstrap puede seleccionar el mapping y
+los assets canónicos `dispatchable-battery-lab.json` y
+`ev-charging-lab.json` cuando HA local está autenticado y reachable, tanto si
+el endpoint fue descubierto como si se declaró explícitamente como
+`http://127.0.0.1:8123`, y no hay paths explícitos. Esto solo carga bindings
+server-owned: no infiere rutas, no crea evidencia HIL ni habilita production
+dispatch. El manifest registra esos paths no secretos en
 `operational_paths`, y `/readyz` continúa bloqueando la autoridad física hasta
-qualification válida.
+qualification válida. URLs remotas o endpoints locales inalcanzables no
+seleccionan assets del lab.
+
+En la topología Windows/WSL de KNX Virtual, la IP del upstream de Windows y la
+IP del túnel local no son la misma autoridad. El launcher de `knxd` debe usar
+el endpoint Windows actualmente alcanzable (en WSL2 mirrored suele ser
+`127.0.0.1:3671`) y el gateway DomoAI debe usar `127.0.0.1:3672`. Un túnel
+KNX conectado no implica disponibilidad: discovery/readback debe recibir
+respuestas válidas de las direcciones configuradas. `/readyz` conserva esta
+señal estricta y no se relaja para ocultar una configuración ETS incompleta.
 
 `domotics://runtime` es una resource autenticada de solo lectura con esta forma
 estable v1:
@@ -84,15 +127,26 @@ El único servidor stdio local registra estas tools semánticas:
 | --- | --- |
 | `discover_devices` | Lee o refresca el inventario canónico; admite `area_id`, tipos y `refresh`. |
 | `inspect_commissioning` | Lee el informe v1 compartido de candidatos de batería/EV; solo `refresh=true` ejecuta discovery y nunca crea autoridad. |
+| `verify_commissioning` | Verifica evidencia acotada contra el candidato y devuelve una qualification; nunca crea binding, approval, lease ni llama adapters. |
 | `get_state` | Lee estados acotados por dispositivos/capacidades. |
+| `get_history` | Lee muestras históricas acotadas por hogar, dispositivos, capacidades y ventana temporal; no refresca adapters ni muta estado. |
 | `get_energy_context` | Lee un horizonte completo de tarifas, solar y batería opcional mediante un provider tipado. |
-| `validate_command` | Valida un comando sin invocar el adapter. |
-| `validate_plan` | Aplica capacidades, políticas, revisión y digest a un plan. |
+| `preview_command` | Valida un comando sin invocar el adapter ni persistirlo. Es read-only. |
+| `prepare_command` | Valida y persiste un comando para una operación posterior; requiere scope de mutación. |
+| `preview_plan` | Aplica capacidades, políticas, revisión y digest sin persistir el plan. Es read-only. |
+| `prepare_plan` | Aplica capacidades, políticas, revisión y digest y persiste el plan preparado. |
+| `validate_command` | Alias persistente legacy de `prepare_command`; declara efecto de mutación. |
+| `validate_plan` | Alias persistente legacy de `prepare_plan`; declara efecto de mutación. |
 | `request_approval` | Emite un `ApprovalGrant` de un solo uso, ligado al digest del plan/bundle y a una aserción humana del host. Único origen válido de una aprobación. |
 | `execute_plan` | Ejecuta un plan validado. Si requiere confirmación, exige un `approval_id` emitido por `request_approval`; ya no acepta un objeto de aprobación construido por el caller. |
 | `validate_scenario` | Valida un escenario de optimización contra dispositivos y capacidades canónicas. |
 | `optimize_scenario` | Produce una propuesta determinista sin ejecutar comandos físicos. |
 | `explain_solution` | Explica una propuesta tipada sin cambiar el estado del runtime. |
+| `summarize_solution` | Proyecta un `ProductSummary` determinista sin comandos ni efectos físicos. |
+| `compare_scenarios` | Compara un baseline y variaciones acotadas como proyección read-only; no ejecuta ni fabrica diffs inviables. |
+| `execute_scene` | Compromete una escena ordenada y digest-bound mediante `BundleCommitService`; exige scope, revisión, approval, admission y readback. |
+| `export_household_data` | Exporta categorías autorizadas del hogar con redacción de campos sensibles; solo está disponible en el runtime configurado. |
+| `delete_household_data` | Borra categorías autorizadas con scope de owner/service y conserva auditoría inmutable; solo está disponible en el runtime configurado. |
 
 Resources de solo lectura:
 
@@ -109,6 +163,41 @@ domotics://commissioning
 comisionamiento, no bindings. Un candidato `ready_for_binding` todavía
 requiere profile, identidad, takeover, readback, HIL y las gates de producción
 server-owned; discovery nunca convierte una ruta en autoridad física.
+
+## Fase 4 — garantías, qualification, producto y privacidad
+
+`Capability.guarantees` es una extensión aditiva del modelo universal. Los
+defaults legacy no son evidencia física: `readback_required`, límites,
+resolución, tolerancia, latencia esperada, reversibilidad, confirmación,
+disponibilidad local/remota y requisito de commissioning se conservan en la
+capability y en el `CapabilityDeclaration`. Si una capability exige readback,
+`PlanService.validate()` requiere una postcondición verificable antes de
+producir evidencia de validación.
+
+`CommissioningService.verify_evidence()` solo cruza digest de candidato,
+autoridad, expiración y checks obligatorios (`identity`, `read_observation`,
+`safe_actuation`, `readback`). La qualification resultante declara
+`authority_created: false`; una evidencia de simulador queda
+`blocked_external_dependency`. La persistencia de qualifications usa una
+migración separada y no contiene credenciales.
+
+`ConformanceHarness` combina lifecycle, discovery estable, identidad,
+disponibilidad, timestamps, ejecución segura, readback, idempotencia y la
+comparación manifest↔snapshot. Un rango ampliado, escritura no declarada,
+readback omitido o garantía temporal incompatible produce diagnóstico
+sanitizado y resultado fallido.
+
+El optimizador expone `summarize_solution` como proyección read-only. El
+`ProductSummary` es determinista y solo contiene objetivos, restricciones,
+alternativas, confianza, diagnósticos y siguiente paso; la ejecución sigue
+siendo responsabilidad del flujo de plan, policy, approval y admission.
+
+La privacidad se limita por `AuthorityContext` y `HouseholdDataPolicy`.
+`export_household_data` y `delete_household_data` están conectadas al SQLite
+operacional en el builder configurado; el export redacciona campos con forma
+de credencial, el borrado no toca la base de auditoría y cada borrado produce
+un evento mínimo con autoridad. La retención se configura con
+`DOMOAI_PRIVACY_RETENTION_DAYS`.
 
 ## Bundle commit boundary v3 (2026-08-21)
 
@@ -211,8 +300,9 @@ autorizable.
 
 Las señales estructuradas `source_unavailable` del `CompositeAdapter` llegan a
 `RuntimeEventConsumer`, que marca solo el adapter afectado. La fuente vuelve a
-ser utilizable únicamente después de reconexión y discovery, evitando que un
-refresh de otra fuente reinstale silenciosamente una caché sana aparente.
+ser utilizable únicamente después de reconexión y una lectura de recuperación
+confirmada del mismo adapter; un refresh de otra fuente no reinstala
+silenciosamente una caché sana aparente.
 
 ## Supervisión de actuadores latched (2026-08-30)
 
@@ -266,7 +356,10 @@ carga no es utilizable.
 
 La CLI HIL carga un único `DispatchableBatteryBinding` y lo pasa explícitamente
 al composition root; no puede ejecutar el profile B sobre un runtime construido
-con A. Los valores de prueba se limitan al envelope del profile y al ceiling
+con A. Cuando el binding llega como argumento programático, el bootstrap no
+vuelve a auto-seleccionar el profile de batería del lab; si `Settings` contiene
+además un path explícito, la composición lo rechaza como conflicto. Los valores
+de prueba se limitan al envelope del profile y al ceiling
 server-owned del deployment. `takeover_baseline` exige un `TakeoverResult`
 adquirido, con owner/device/provider/capability correctos, baseline observado,
 lease aún vivo y primer comando confirmado.
@@ -369,25 +462,39 @@ pero conserva el diagnóstico y la postura conservadora ante metadata
 incompatible de otra fuente. No se añade migration SQLite: los planes son JSON
 y el campo nuevo tiene default vacío.
 
-## Event pipeline incremental (2026-08-18)
+## Event pipeline incremental (2026-09-03)
 
-Cierra `specs/023-incremental-event-pipeline/`: `RuntimeEventConsumer` ya no
-hace `DiscoveryService.refresh()` completo por cada evento.
+Cierra `specs/174-event-driven-refresh-and-graceful-shutdown/` sobre la base de
+`specs/023-incremental-event-pipeline/`: `RuntimeEventConsumer` ya no hace
+`DiscoveryService.refresh()` completo por cada evento y el refresher no genera
+polling físico redundante para fuentes con eventos autoritativos.
 
-- Eventos `kind="state_changed"` (todos los adapters ya emiten este kind
-  solo para entidades ya conocidas) toman un camino barato: leen valores
-  actuales vía `AdapterPort.read_state()` sobre los `SourceRef` ya conocidos
-  de ese adapter en el registry, sin re-descubrir identidad/capacidades.
-- Cualquier otro kind (`availability_changed`, `device_membership_changed`,
-  `metadata_changed`, `adapter_diagnostic`, o uno no reconocido) sigue
-  disparando `discovery.refresh()` completo exactamente como antes — la
-  ruta rápida es un allowlist, nunca un denylist, para no crear un punto
-  ciego de detección de inventario.
+- Eventos `kind="state_changed"` toman un camino barato. Los adapters que
+  declaran un stream de estado autoritativo (actualmente KNX) transportan la
+  observación recibida dentro del evento y el runtime la persiste directamente,
+  sin ejecutar otra lectura física. Los eventos legacy/no autoritativos pueden
+  leer solo los `SourceRef` conocidos de ese adapter, sin re-descubrir
+  identidad/capacidades. Esto evita el ciclo `GroupValueRead` →
+  `GroupValueResponse` → `StateChangedEvent` en KNX.
+- Los eventos `availability_changed` actualizan la disponibilidad de la fuente
+  y su estado cacheado mediante la frontera compartida, sin reconstruir el
+  inventario. La pérdida de un child de un composite degrada solo esa fuente.
+- Los diagnósticos ordinarios no disparan lecturas físicas globales. Los
+  eventos `device_membership_changed` y `metadata_changed` sí conservan la
+  `discovery.refresh()` completa porque modifican inventario ejecutable o
+  semántica. Un kind desconocido falla cerrado y no hace una lectura amplia.
+- `RuntimeStateRefresher` excluye de `refresh_state()` las fuentes que declaran
+  eventos de estado autoritativos. KNX además declara su inventario estático,
+  por lo que las rediscoveries periódicas no vuelven a enviar
+  `GroupValueRead`; discovery inicial, telegramas del bus y readback explícito
+  siguen siendo válidos.
 - `read_state()` devuelve `device_id` como el external_id crudo del
   adapter, no el canonical id del registry; `_apply_state_only` lo remapea
   vía `registry.canonical_id_for_source(...)` antes de guardar, igual que
   ya hacía `PlanExecutor._readback`.
-- No hay cambios en adapters, `SourceEvent` ni contrato MCP.
+- La extensión interna `payload.states` solo transporta evidencia ya recibida;
+  no cambia el contrato MCP. La fuente sigue siendo responsable de no emitir
+  una observación sin timestamps válidos.
 
 ## Registry reconciliation (2026-08-18)
 
@@ -2682,6 +2789,33 @@ plan contra el estado real actual de la casa no era posible.
 Evidencia: `547 → 555 passed, 8 skipped` (8 tests nuevos, todos
 pasando en el primer intento). Ruff y mypy limpios (97 ficheros
 fuente). Sin cambio de schema.
+
+## Qualification de gemelo digital completo (2026-09-04)
+
+La preview anterior sigue siendo una foto aislada de dispositivos
+representables. Para cualificar el sistema completo se añadió una capa de
+laboratorio separada:
+
+- `VirtualHomePlant` es la única propietaria de la topología, estado, tiempo
+  virtual, revisiones, faults y digest. Monta los simuladores deterministas de
+  batería, EV, térmico y agua.
+- `VirtualProtocolAdapter` expone la planta a través de `AdapterPort` para
+  `fixture`, Home Assistant, KNX, Modbus, Matter y Zigbee2MQTT. El camino de
+  cualificación usa los servicios reales de discovery, registry, composite,
+  plan, executor, readback, scheduler, automation, optimizer/product,
+  privacy, identity y audit.
+- `DigitalTwinEvidence` (`schemas/v1/digital-twin-evidence.schema.json`) limita
+  el resultado a `scope=digital_twin`, exige digests y coverage completa y no
+  acepta que se presente como commissioning/HIL.
+- La matriz ejercita estados de luz, switch, cover, climate, environment,
+  power, battery, EV, water y solar; los codecs/mappers nativos mantienen sus
+  propios fixtures de integración y el laboratorio de procesos/HIL aporta la
+  evidencia física independiente.
+
+Evidencia: `uv run python -m domoai.lab.cli twin --seed 187 --report
+docs/evidence/digital-twin-latest.md` produce `passed` de forma reproducible,
+con 6 adapters, 10 dominios y 14 checks. La gate se incluye en
+`LabRunner.smoke()` mediante `tests/integration/test_digital_twin_matrix.py`.
 
 ## Verificación HIL de ejecución de comandos (2026-08-19)
 

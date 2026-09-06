@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
+from domoai.domain.coordination import PhysicalIntent, PhysicalIntentStatus
 from domoai.domain.models import (
     AdapterExecutionAck,
     AdapterHealth,
@@ -91,3 +92,15 @@ class PlanRecordPort(Protocol):
 
 class ExecutionOutcomePort(Protocol):
     async def save(self, outcome: ExecutionOutcome) -> None: ...
+
+
+class PhysicalIntentPort(Protocol):
+    async def claim(self, intent: PhysicalIntent) -> PhysicalIntent: ...
+
+    async def settle(
+        self,
+        *,
+        household_id: str,
+        idempotency_key: str,
+        status: PhysicalIntentStatus,
+    ) -> PhysicalIntent: ...

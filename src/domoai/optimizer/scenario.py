@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from domoai.domain.models import CapabilityKind, ErrorDetail, ScalarValue, StrictModel
 from domoai.optimizer.energy import BatteryActuator, EnergyContext, HVACActuator
@@ -20,12 +23,19 @@ __all__ = [
     "Load",
     "Objective",
     "OptimizationScenario",
+    "scenario_definition_digest",
     "TerminalSOCPolicy",
     "validate_scenario",
     "validate_executable_scenario",
 ]
 
 MAX_HORIZON_SLOTS = 7 * 24 * 60
+
+
+def _finite_number(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("numeric scenario values must be finite")
+    return value
 
 
 class Load(StrictModel):
@@ -44,6 +54,10 @@ class Load(StrictModel):
     deadline_slot: int | None = Field(default=None, ge=0)
     end_command: str | None = Field(default=None, min_length=1)
     end_value: ScalarValue | None = None
+
+    _finite_values = field_validator("power", "energy_required_kwh", mode="before")(
+        _finite_number
+    )
 
 
 class EVChargingLoad(StrictModel):
@@ -69,6 +83,16 @@ class EVChargingLoad(StrictModel):
         if self.min_charge_kw > self.max_charge_kw:
             raise ValueError("min_charge_kw must be less than or equal to max_charge_kw")
         return self
+
+    _finite_values = field_validator(
+        "capacity_kwh",
+        "initial_soc_kwh",
+        "target_soc_kwh",
+        "max_charge_kw",
+        "min_charge_kw",
+        "charge_efficiency",
+        mode="before",
+    )(_finite_number)
 
 
 class ComfortLoad(StrictModel):
@@ -96,12 +120,20 @@ class ComfortLoad(StrictModel):
             raise ValueError("min_active_slots cannot exceed the window size")
         return self
 
+    _finite_values = field_validator("power", mode="before")(_finite_number)
+
 
 class Constraint(StrictModel):
     type: str = Field(min_length=1)
     value: float = Field(ge=0)
     unit: str = Field(default="W", min_length=1)
     hard: bool = True
+    # Solver constraints are planning evidence by default. A caller may
+    # request a physical execution guard only when a separate JIT guard
+    # exists; validation rejects that request until such evidence is wired.
+    enforcement: Literal["planning_only", "physical_execution"] = "planning_only"
+
+    _finite_values = field_validator("value", mode="before")(_finite_number)
 
 
 class Objective(StrictModel):
@@ -109,6 +141,8 @@ class Objective(StrictModel):
     direction: str = Field(pattern=r"^(minimize|maximize)$")
     weight: float = Field(default=1, gt=0)
     priority: int = 0
+
+    _finite_values = field_validator("weight", mode="before")(_finite_number)
 
 
 class TerminalSOCPolicy(StrictModel):
@@ -129,6 +163,10 @@ class TerminalSOCPolicy(StrictModel):
         ):
             raise ValueError("terminal SOC target must not be below terminal minimum")
         return self
+
+    _finite_values = field_validator(
+        "minimum_kwh", "target_kwh", "value_eur_per_kwh", mode="before"
+    )(_finite_number)
 
 
 class OptimizationScenario(StrictModel):
@@ -163,6 +201,22 @@ class OptimizationScenario(StrictModel):
         if len(load_ids) != len(set(load_ids)):
             raise ValueError("load ids must be unique")
         return self
+
+    _finite_values = field_validator("solver_time_limit_seconds", mode="before")(
+        _finite_number
+    )
+
+
+def scenario_definition_digest(scenario: OptimizationScenario) -> str:
+    """Return the stable identity of a normalized semantic scenario."""
+
+    canonical = json.dumps(
+        scenario.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def validate_scenario(
@@ -391,6 +445,13 @@ def validate_scenario(
                 )
             )
     for constraint in scenario.constraints:
+        if constraint.enforcement == "physical_execution":
+            errors.append(
+                _diagnostic(
+                    "physical_constraint_unverifiable",
+                    f"Constraint {constraint.type!r} has no verified JIT execution guard",
+                )
+            )
         if constraint.type not in {
             "max_house_power",
             "max_grid_import",

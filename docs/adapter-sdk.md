@@ -1,9 +1,43 @@
-# Adapter SDK
+# Universal Adapter SDK
 
-Los adapters son la frontera entre protocolos/fabricantes y el runtime
-semántico. El agente, las skills y el optimizador no deben importar SDKs de
-Home Assistant, Matter, MQTT u otro proveedor: solo consumen los modelos
-canónicos y `AdapterPort`.
+El producto expone un único adaptador universal semántico hacia el runtime y el
+MCP. Home Assistant, Matter, MQTT, KNX, Modbus y Zigbee2MQTT son conectores
+internos que traducen sus peculiaridades al mismo `AdapterPort`; no generan
+adapters públicos, MCPs nuevos ni tools por fabricante. El agente, las skills y
+el optimizador sólo consumen los modelos canónicos. En la implementación,
+`CompositeAdapter` y `AdapterPort` son la frontera universal; las clases de
+protocolo que hay debajo son detalles sustituibles del runtime.
+
+El conector MQTT genérico del adaptador universal usa `DOMOAI_GENERIC_MQTT_URL` y
+`DOMOAI_GENERIC_MQTT_MAPPING_PATH`; ambas variables son obligatorias juntas.
+El mapping es server-owned, estricto y no permite autodiscovery de escritura ni
+plantillas ejecutables.
+
+Cada capability MQTT declara su semántica canónica (`kind`, `unit`, límites y,
+si es escribible, `commands`). El nombre de la capability se usa como comando
+por defecto; `commands` permite aliases semánticos como `set_temperature` sin
+exponer un endpoint MQTT al agente:
+
+```json
+{
+  "name": "target_temperature",
+  "kind": "number",
+  "unit": "°C",
+  "minimum": 16,
+  "maximum": 30,
+  "state_topic": "home/thermostat/target",
+  "command_topic": "home/thermostat/target/set",
+  "commands": ["set_temperature"]
+}
+```
+
+El codec rechaza antes de publicar valores de tipo incorrecto, valores fuera
+de rango y payloads no escalares. Las lecturas que no cumplen el mapping se
+descartan sin mutar el estado canónico.
+
+El inventario verificable de conectores y fronteras vive en
+[`adapter-coverage.md`](adapter-coverage.md). No debe interpretarse como una
+lista de adapters públicos ni de drivers certificados físicamente.
 
 La misma regla se aplica a las fuentes de optimización. Un proveedor de tarifas,
 previsión solar o batería implementa únicamente su puerto de lectura y entrega
@@ -83,17 +117,17 @@ matching. Si una capacidad tiene más de una ruta escribible, la validación
 devuelve `route_ambiguous` antes de tocar hardware. Si la fuente está caída,
 devuelve `source_unavailable` y no hace failover implícito.
 
-`CompositeAdapter` coordina cero, uno o varios adapters. El modo sin fuentes
-sigue usando el fixture; con una fuente se conserva el adapter directo; con
-varias se agregan discovery, lecturas, eventos, salud y ejecución bajo el
-mismo `AdapterPort`. La composición añade atribución de fuente y diagnósticos,
-no una superficie MCP nueva.
+`CompositeAdapter` coordina cero, uno o varios conectores internos detrás del
+único adaptador universal. El modo sin fuentes sigue usando el fixture; con
+una o varias fuentes se agregan discovery, lecturas, eventos, salud y ejecución
+bajo el mismo `AdapterPort`. La composición añade atribución de fuente y
+diagnósticos, nunca una superficie MCP nueva.
 
 ## Transformación semántica
 
-`discover()` trabaja con datos propios del protocolo. La normalización hacia
-`Device`, `Capability` y `StateSnapshot` pertenece al mapper del adapter y al
-runtime:
+`discover()` trabaja con datos propios del conector. La normalización hacia
+`Device`, `Capability` y `StateSnapshot` pertenece al mapper interno y al
+adaptador universal:
 
 1. conservar el identificador externo y el proveedor en `SourceRef`;
 2. asignar un ID canónico estable (`[a-z0-9_.-]`) en el registry;
@@ -483,12 +517,13 @@ lectura), también requiere una rama de encoding en `adapter.py`'s
 `_encode_command` — mismo patrón mecánico, aplicado ahí por primera vez
 para un segundo dominio con comando además de battery/EV.
 
-## Third-party Adapter SDK v1
+## Universal Connector SDK v1
 
 El SDK [`domoai.adapters.sdk`](../src/domoai/adapters/sdk/__init__.py) permite
-registrar un adapter externo sin modificar `runtime/`, MCP ni OR-Tools. El
-paquete externo publica un `AdapterManifest` y una factory que devuelve el
-`AdapterPort` existente:
+registrar un conector interno externo sin modificar `runtime/`, MCP ni
+OR-Tools. El paquete externo publica un `AdapterManifest` y una factory que
+devuelve el `AdapterPort` existente; el runtime lo integra detrás del único
+adaptador universal:
 
 ```python
 from domoai.adapters.sdk import AdapterRegistration
@@ -508,13 +543,40 @@ capacidades canónicas, comandos, límites y funciones opcionales. El registry
 puede comparar esas declaraciones con un `AdapterSnapshot` y distinguir
 capacidades `supported`, `unsupported` y `optional`.
 
+Este SDK no es un catálogo de adapters públicos por fabricante: un conector
+aceptado sólo amplía la traducción interna al modelo universal y no puede
+registrar tools MCP, cambiar policy ni crear una autoridad de ejecución.
+
 `ConformanceHarness` ejecuta pruebas locales deterministas sobre el mismo
 `AdapterPort`: lifecycle, discovery estable, identidad y `SourceRef`,
 disponibilidad, timestamps, eventos, un comando seguro con readback e
-idempotencia. Nunca ejecuta commissioning, pairing, firmware, comandos
+idempotencia. Antes de considerar el fixture conforme también compara el
+`AdapterManifest` con el `AdapterSnapshot`: una capacidad observada no puede
+ampliar la escritura, el rango, el readback requerido ni la garantía temporal
+declarada. Los diagnósticos solo contienen códigos y campos bounded, no el
+payload del provider. Nunca ejecuta commissioning, pairing, firmware, comandos
 vendor-specific ni acciones restringidas. La guía completa está en esta
 documentación y el contrato serializable en
 [`schemas/v1/adapter-manifest.schema.json`](../schemas/v1/adapter-manifest.schema.json).
+
+### Garantías universales y qualification
+
+`CapabilityDeclaration.guarantees` conserva la semántica que el agente puede
+comparar entre providers: resolución, tolerancia, latencia esperada,
+readback, reversibilidad, confirmación, disponibilidad local/remota y
+commissioning requerido. El campo es aditivo y sus defaults solo mantienen el
+comportamiento legacy; no representan hardware cualificado.
+
+La qualification física vive fuera del SDK. `CommissioningEvidence` debe
+estar ligada al digest del candidato, hogar, operador, timestamps y checks de
+identidad, observación, actuador seguro y readback. El runtime puede verificar
+la evidencia sin llamar al adapter, pero no crea binding, lease, approval ni
+autoridad física. Simulación, KNX/ETS/knxd ausente y HIL no disponible se
+registran como gates externas bloqueadas.
+
+La matriz de contract tests de Fase 4 está en
+[`tests/contract/test_phase4_provider_contract.py`](../tests/contract/test_phase4_provider_contract.py)
+y la conformance completa incluye el check `manifest_compatibility`.
 
 Las implementaciones pueden aceptar el `ExecutionContext` opcional como
 segundo argumento de `execute()`. El runtime siempre lo proporciona y el

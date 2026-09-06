@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from pathlib import Path
 
 import httpx
@@ -14,7 +15,14 @@ from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
 from domoai.mcp.domotics_server import DomoticsMcpContext
-from domoai.mcp.gateway import GatewayApplication, _close_gateway_safely, create_gateway_server
+from domoai.mcp.gateway import (
+    GatewayApplication,
+    _close_gateway_safely,
+    _handle_sigterm,
+    create_gateway_server,
+    main,
+    run_gateway,
+)
 from domoai.mcp.ortools_server import OrtoolsMcpContext
 from domoai.mcp.unified_server import UnifiedMcpContext
 from domoai.optimizer.cp_sat import CpSatOptimizer
@@ -41,6 +49,8 @@ async def test_gateway_uses_one_configured_streamable_http_endpoint(tmp_path: Pa
     assert server.settings.streamable_http_path == "/shared-mcp"
     assert server.settings.json_response is True
     assert server.settings.max_request_body_size == settings.mcp_max_request_body_size
+    assert context.domotics.registry is context.optimizer.registry
+    assert context.domotics.facade.plan_service is context.optimizer.plan_service
 
 
 @pytest.mark.asyncio
@@ -109,6 +119,40 @@ async def test_gateway_rejects_missing_and_invalid_network_credentials(tmp_path:
     assert invalid.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_gateway_validates_origin_before_rejecting_disabled_sse_get(tmp_path: Path) -> None:
+    context = await _build_context()
+    settings = Settings(
+        database_path=tmp_path / "gateway.sqlite3",
+        mcp_public_url="http://127.0.0.1:8124",
+        mcp_server_sent_events=False,
+    )
+    runtime = _RuntimeStub(connected=True, settings=settings)
+    gateway = GatewayApplication(
+        runtime=runtime,
+        server=create_gateway_server(context, settings, runtime=runtime),
+    )
+
+    async with gateway.http_client() as client:
+        invalid_origin = await client.get(
+            settings.mcp_path,
+            headers={"Origin": "https://attacker.example"},
+        )
+        valid_origin = await client.get(
+            settings.mcp_path,
+            headers={"Origin": settings.mcp_public_url},
+        )
+        invalid_host = await client.get(
+            settings.mcp_path,
+            headers={"Host": "attacker.example"},
+        )
+
+    assert invalid_origin.status_code == 403
+    assert valid_origin.status_code == 405
+    assert invalid_host.status_code == 421
+    await gateway.close()
+
+
 class _RuntimeStub:
     def __init__(self, *, connected: bool, settings: Settings) -> None:
         self.connected = connected
@@ -168,6 +212,170 @@ async def test_gateway_close_finishes_before_cancellation_propagates() -> None:
     await interrupter
 
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_gateway_close_survives_repeated_cancellation_during_cleanup() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    main_task = asyncio.current_task()
+    assert main_task is not None
+
+    class _SlowGateway:
+        async def close(self) -> None:
+            started.set()
+            await release.wait()
+            closed.set()
+
+    async def interrupter() -> None:
+        await started.wait()
+        main_task.cancel()
+        main_task.cancel()
+        release.set()
+
+    interruption = asyncio.create_task(interrupter())
+    try:
+        await _close_gateway_safely(_SlowGateway())
+    except asyncio.CancelledError:
+        pass
+    await interruption
+
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_gateway_close_survives_a_late_second_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    main_task = asyncio.current_task()
+    assert main_task is not None
+
+    class _SlowGateway:
+        async def close(self) -> None:
+            started.set()
+            await release.wait()
+            closed.set()
+
+    async def interrupter() -> None:
+        await started.wait()
+        main_task.cancel()
+        await asyncio.sleep(0.05)
+        main_task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+
+    interruption = asyncio.create_task(interrupter())
+    try:
+        await _close_gateway_safely(_SlowGateway())
+    except asyncio.CancelledError:
+        pass
+    await interruption
+
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_gateway_close_does_not_finish_before_cleanup_after_late_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _SlowGateway:
+        async def close(self) -> None:
+            started.set()
+            await release.wait()
+            closed.set()
+
+    close_task = asyncio.create_task(_close_gateway_safely(_SlowGateway()))
+    await started.wait()
+    close_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not close_task.done()
+
+    close_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not close_task.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_gateway_start_cancellation_still_closes_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _StartingGateway:
+        async def start(self) -> None:
+            started.set()
+            await release.wait()
+
+        async def close(self) -> None:
+            closed.set()
+
+        server = object()
+
+    gateway = _StartingGateway()
+
+    async def fake_build_gateway() -> _StartingGateway:
+        return gateway
+
+    monkeypatch.setattr("domoai.mcp.gateway.build_gateway", fake_build_gateway)
+    task = asyncio.create_task(run_gateway())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed.is_set()
+
+
+def test_gateway_entrypoint_converts_sigterm_into_clean_async_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    observed_handlers: list[object] = []
+
+    def fake_run(coroutine: object) -> None:
+        observed_handlers.append(signal.getsignal(signal.SIGTERM))
+        close = getattr(coroutine, "close", None)
+        assert callable(close)
+        close()
+
+    monkeypatch.setattr("domoai.mcp.gateway.asyncio.run", fake_run)
+
+    main()
+
+    assert observed_handlers == [_handle_sigterm]
+    assert signal.getsignal(signal.SIGTERM) is previous_handler
+
+
+def test_gateway_entrypoint_suppresses_controlled_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_keyboard_interrupt(coroutine: object) -> None:
+        close = getattr(coroutine, "close", None)
+        assert callable(close)
+        close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("domoai.mcp.gateway.asyncio.run", raise_keyboard_interrupt)
+
+    main()
+
+
+def test_sigterm_handler_raises_interrupt_for_run_gateway_finally() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        _handle_sigterm(signal.SIGTERM, None)
 
 
 async def _build_context() -> UnifiedMcpContext:

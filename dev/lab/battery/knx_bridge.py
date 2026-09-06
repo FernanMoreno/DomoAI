@@ -39,7 +39,7 @@ class BatteryBridgeConfig:
     mqtt_host: str = "127.0.0.1"
     mqtt_port: int = 1883
     mqtt_topic: str = "domoai/battery"
-    knx_host: str = "172.26.93.253"
+    knx_host: str = "127.0.0.1"
     knx_port: int = 3672
     knx_route_back: bool = False
     timeout_seconds: float = 5.0
@@ -286,7 +286,7 @@ def _parse_args() -> BatteryBridgeConfig:
     parser.add_argument(
         "--mqtt-topic", default=os.getenv("DOMOAI_BATTERY_MQTT_TOPIC", "domoai/battery")
     )
-    parser.add_argument("--knx-host", default=os.getenv("DOMOAI_KNX_GATEWAY_HOST", "172.26.93.253"))
+    parser.add_argument("--knx-host", default=os.getenv("DOMOAI_KNX_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument(
         "--knx-port",
         type=int,

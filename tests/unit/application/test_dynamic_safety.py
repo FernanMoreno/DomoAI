@@ -39,12 +39,13 @@ def _snapshot(
     observed_at: datetime,
     status: StateStatus,
     received_at: datetime | None = None,
+    unit: str = "kWh",
 ) -> StateSnapshot:
     return StateSnapshot(
         device_id="battery.one",
         capability="battery.soc",
         value=value,
-        unit="kWh",
+        unit=unit,
         observed_at=observed_at,
         received_at=received_at or observed_at,
         status=status,
@@ -139,6 +140,21 @@ async def test_dynamic_guard_uses_battery_receipt_age_not_source_observation_age
             received_at=now - timedelta(seconds=1),
             status=StateStatus.CURRENT,
         )
+    )
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
+
+    error = await guard.check(_command("charge", 0.5))
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_converts_percentage_soc_before_applying_kwh_limits() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    await store.save(
+        _snapshot(value=50, observed_at=now, status=StateStatus.CURRENT, unit="%")
     )
     guard = DynamicSafetyGuard(store, _profile(), clock=clock)
 

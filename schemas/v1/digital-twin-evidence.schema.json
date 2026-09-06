@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "DigitalTwinCheck": {
+      "additionalProperties": false,
+      "description": "One deterministic check result with no raw protocol credentials.",
+      "properties": {
+        "check_id": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Check Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/DigitalTwinCheckStatus",
+          "default": "passed"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "check_id"
+      ],
+      "title": "DigitalTwinCheck",
+      "type": "object"
+    },
+    "DigitalTwinCheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "title": "DigitalTwinCheckStatus",
+      "type": "string"
+    },
+    "DigitalTwinCoverage": {
+      "additionalProperties": false,
+      "description": "The adapter, domain and cross-cutting surfaces exercised by a run.",
+      "properties": {
+        "adapters": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Adapters",
+          "type": "array"
+        },
+        "domains": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "checks": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "adapters",
+        "domains",
+        "checks"
+      ],
+      "title": "DigitalTwinCoverage",
+      "type": "object"
+    },
+    "DigitalTwinRunStatus": {
+      "enum": [
+        "passed",
+        "failed"
+      ],
+      "title": "DigitalTwinRunStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Machine-readable proof of the software closed loop on a virtual plant.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "scope": {
+      "const": "digital_twin",
+      "default": "digital_twin",
+      "title": "Scope",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/DigitalTwinRunStatus",
+      "default": "passed"
+    },
+    "seed": {
+      "exclusiveMinimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "plant_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plant Digest",
+      "type": "string"
+    },
+    "trace_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Trace Digest",
+      "type": "string"
+    },
+    "coverage": {
+      "$ref": "#/$defs/DigitalTwinCoverage"
+    },
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/DigitalTwinCheck"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
+    "invariant_violations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Invariant Violations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_id",
+    "seed",
+    "plant_digest",
+    "trace_digest",
+    "coverage"
+  ],
+  "title": "DigitalTwinEvidence",
+  "type": "object"
+}

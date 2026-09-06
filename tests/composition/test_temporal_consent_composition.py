@@ -29,6 +29,10 @@ from domoai.runtime.state_store import StateStore
 
 
 def _structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return cast(dict[str, Any], result[1])
     assert isinstance(result, dict)

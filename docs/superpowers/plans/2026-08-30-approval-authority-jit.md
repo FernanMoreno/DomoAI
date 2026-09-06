@@ -1,5 +1,7 @@
 # Approval Authority JIT Implementation Plan
 
+**Status:** Implemented — verified 2026-09-03
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every persisted confirmation approval verifiable against the server-authoritative grant store immediately before physical execution.
@@ -119,17 +121,30 @@
 
   Update the B02 status and verification text only after the tests prove the acceptance scenarios. Record any remaining limitations instead of claiming production qualification.
 
-- [ ] **Step 4: Run the project composition review**
+- [x] **Step 4: Run the project composition review**
 
-  Pending final project-wide composition gate after the next cross-subsystem
-  block is integrated; the feature tests and full suite are already green.
+  The project-wide composition gate and a manual cross-subsystem review were
+  completed on 2026-09-03 after the subsequent runtime blocks were integrated.
+  `project-composition-check "$(cat .ai/project-name)"` passed with 466 tests,
+  18 skips, 1 known deprecation warning and Import Linter 4 kept/0 broken.
+  The convenience wrapper `project-composition-review domoai codex` currently
+  fails before launching the reviewer because it supplies the Codex sandbox and
+  approval flags twice; that launcher defect is recorded rather than treated as
+  a repository failure.
 
 ## Verification record
 
 - Focused authority/admission/HIL suite: `77 passed`.
-- Full suite: `1374 passed, 15 skipped, 1 warning`.
+- Full suite: **1582 passed, 18 skipped, 1 warning**.
 - The warning is the existing Testcontainers `wait_for_logs` deprecation.
 - No `dev/lab/` fixture or KNX/Home Assistant configuration was modified by
   this plan.
+
+- Latest composition evidence: `project-composition-check "$(cat
+  .ai/project-name)"` — **466 passed, 18 skipped, 1 warning**; Import Linter
+  **4 kept, 0 broken**.
+- The complete regression command was run with temporary uv cache locations:
+  `UV_CACHE_DIR=/tmp/domoai-uv-cache UV_PYTHON_INSTALL_DIR=/tmp/domoai-uv-python
+  uv run pytest -q` — **1582 passed, 18 skipped, 1 warning**.
 
   Run `project-composition-check domoai` and the configured `project-composition-review domoai codex` command, then inspect the final diff and report residual risks.

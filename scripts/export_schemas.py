@@ -14,16 +14,31 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantIdentityClaims,
 )
 from domoai.adapters.sdk import AdapterManifest
-from domoai.config.battery_qualification import BatteryHILEvidence
+from domoai.application.scene import SceneCommitRequest
+from domoai.config.battery_qualification import BatteryHILEvidence, HILIdentityObservation
+from domoai.domain.automation import (
+    AutomationCondition,
+    AutomationConsent,
+    AutomationEvaluation,
+    AutomationEvent,
+    AutomationRule,
+    AutomationTrigger,
+)
 from domoai.domain.commissioning import (
     CommissioningBlocker,
     CommissioningCandidate,
+    CommissioningCheck,
+    CommissioningEvidence,
+    CommissioningQualification,
     CommissioningReport,
     CommissioningRoute,
 )
+from domoai.domain.coordination import FencingToken, LeaseScope, PhysicalIntent
+from domoai.domain.digital_twin import DigitalTwinEvidence
 from domoai.domain.models import (
     Area,
     AuditEvent,
+    AuthorityContext,
     BundleCommit,
     BundleMemberCommit,
     Capability,
@@ -34,9 +49,22 @@ from domoai.domain.models import (
     Plan,
     Policy,
     PolicyDecision,
+    SourceCursor,
     SourceRef,
     StateSnapshot,
     ValidationResult,
+)
+from domoai.domain.multihost_qualification import (
+    GatewayFencingProbeRequest,
+    GatewayFencingProbeResult,
+    MultiHostQualificationEvidence,
+)
+from domoai.domain.privacy import HouseholdDataPolicy, PrivacyDeletion, PrivacyExport
+from domoai.domain.product import (
+    ProductAlternative,
+    ProductSummary,
+    ScenarioComparison,
+    ScenarioComparisonVariation,
 )
 from domoai.domain.provider import (
     DeviceDescriptor,
@@ -81,6 +109,8 @@ OUTPUT = ROOT / "schemas" / "v1"
 MODELS: dict[str, type[BaseModel]] = {
     "area": Area,
     "audit-event": AuditEvent,
+    "authority-context": AuthorityContext,
+    "fencing-token": FencingToken,
     "bundle-commit": BundleCommit,
     "bundle-member-commit": BundleMemberCommit,
     "capability": Capability,
@@ -89,15 +119,36 @@ MODELS: dict[str, type[BaseModel]] = {
     "error-detail": ErrorDetail,
     "execution-outcome": ExecutionOutcome,
     "plan": Plan,
+    "physical-intent": PhysicalIntent,
     "policy": Policy,
     "policy-decision": PolicyDecision,
+    "source-cursor": SourceCursor,
     "source-ref": SourceRef,
     "state-snapshot": StateSnapshot,
+    "lease-scope": LeaseScope,
     "validation-result": ValidationResult,
     "commissioning-blocker": CommissioningBlocker,
+    "commissioning-check": CommissioningCheck,
     "commissioning-candidate": CommissioningCandidate,
+    "commissioning-evidence": CommissioningEvidence,
     "commissioning-report": CommissioningReport,
+    "commissioning-qualification": CommissioningQualification,
     "commissioning-route": CommissioningRoute,
+    "digital-twin-evidence": DigitalTwinEvidence,
+    "household-data-policy": HouseholdDataPolicy,
+    "privacy-deletion": PrivacyDeletion,
+    "privacy-export": PrivacyExport,
+    "product-alternative": ProductAlternative,
+    "product-summary": ProductSummary,
+    "scenario-comparison": ScenarioComparison,
+    "scenario-comparison-variation": ScenarioComparisonVariation,
+    "scene-commit": SceneCommitRequest,
+    "automation-condition": AutomationCondition,
+    "automation-consent": AutomationConsent,
+    "automation-event": AutomationEvent,
+    "automation-evaluation": AutomationEvaluation,
+    "automation-rule": AutomationRule,
+    "automation-trigger": AutomationTrigger,
     "optimization-scenario": OptimizationScenario,
     "optimization-result": OptimizationResult,
     "optimization-explanation": OptimizationExplanation,
@@ -120,6 +171,10 @@ MODELS: dict[str, type[BaseModel]] = {
     "solar-forecast-series": SolarForecastSeries,
     "battery-state": BatteryState,
     "battery-hil-evidence": BatteryHILEvidence,
+    "hil-identity-observation": HILIdentityObservation,
+    "gateway-fencing-probe-request": GatewayFencingProbeRequest,
+    "gateway-fencing-probe-result": GatewayFencingProbeResult,
+    "multihost-qualification-evidence": MultiHostQualificationEvidence,
     "energy-provider-diagnostic": EnergyProviderDiagnostic,
     "open-meteo-solar-config": OpenMeteoSolarConfig,
     "solar-installation-profile": SolarInstallationProfile,

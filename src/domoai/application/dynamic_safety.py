@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 from domoai.domain.energy import EVActuator
@@ -81,7 +82,9 @@ class DynamicSafetyGuard:
         if not isinstance(snapshot.value, (int, float)) or isinstance(snapshot.value, bool):
             return self._blocked("Battery SOC evidence is not numeric")
         value = float(command.value)
-        soc = float(snapshot.value)
+        soc = self._soc_kwh(snapshot)
+        if soc is None:
+            return self._blocked("Battery SOC evidence uses an unsupported or invalid unit")
         power_limit = (
             self.profile.max_charge_kw
             if command.command == self.actuator.charge_command
@@ -93,6 +96,21 @@ class DynamicSafetyGuard:
             return self._blocked("Battery command would exceed the current SOC maximum")
         if command.command == self.actuator.discharge_command and soc <= self.profile.min_soc_kwh:
             return self._blocked("Battery command would cross the current SOC reserve")
+        return None
+
+    def _soc_kwh(self, snapshot: StateSnapshot) -> float | None:
+        """Convert the bound source unit to the profile's canonical kWh unit."""
+
+        assert self.profile is not None
+        if not isinstance(snapshot.value, (int, float)) or isinstance(snapshot.value, bool):
+            return None
+        value = float(snapshot.value)
+        if not math.isfinite(value):
+            return None
+        if snapshot.unit == "kWh":
+            return value
+        if snapshot.unit == "%" and 0 <= value <= 100:
+            return value / 100.0 * self.profile.capacity_kwh
         return None
 
     async def _check_ev(self, command: Command, actuator: EVActuator) -> ErrorDetail | None:

@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "description": "The non-secret decision made by the final physical gateway.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "probe_id": {
+      "format": "uuid",
+      "title": "Probe Id",
+      "type": "string"
+    },
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "observed_epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Observed Epoch",
+      "type": "integer"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    }
+  },
+  "required": [
+    "probe_id",
+    "accepted",
+    "observed_epoch"
+  ],
+  "title": "GatewayFencingProbeResult",
+  "type": "object"
+}

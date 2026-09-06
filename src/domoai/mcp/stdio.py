@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,6 +15,7 @@ from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
+from domoai.config.settings import Settings
 from domoai.mcp.configured import build_configured_server
 from domoai.mcp.domotics_server import DomoticsMcpContext
 from domoai.mcp.ortools_server import OrtoolsMcpContext
@@ -22,6 +24,24 @@ from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
+
+
+def require_live_deployment_source(settings: Settings) -> None:
+    """Reject an unconfigured deployment before any fixture fallback."""
+
+    if not any(
+        (
+            settings.home_assistant_url,
+            settings.zigbee2mqtt_url,
+            settings.matter_server_url,
+            settings.knx_gateway_host,
+            settings.modbus_host,
+        )
+    ):
+        raise ValueError(
+            "no live adapter source configured; set a DOMOAI_* provider or use "
+            "build_fixture_server explicitly"
+        )
 
 
 async def build_fixture_server() -> FastMCP:
@@ -54,7 +74,10 @@ async def build_fixture_server() -> FastMCP:
 
 
 async def run_stdio() -> None:
-    runtime, server = await build_configured_server()
+    settings = Settings.from_environment()
+    if os.getenv("DOMOAI_RUNTIME_MODE", "configured").strip().lower() != "fixture":
+        require_live_deployment_source(settings)
+    runtime, server = await build_configured_server(settings)
     await runtime.start()
     try:
         await server.run_stdio_async()

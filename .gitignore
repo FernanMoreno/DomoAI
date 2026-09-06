@@ -18,6 +18,11 @@ build/
 .env.*
 !.env.example
 
+# Local deployment credentials and host-side mounts.
+deploy/gateway.env
+deploy/clients.json
+deploy/knx-config.json
+
 # Local installation metadata; keep real or lab profile out of Git.
 config/solar-profile.json
 

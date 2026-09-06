@@ -6,6 +6,7 @@ import pytest
 from domoai.config.ev_charging_profile import (
     EVChargingProfileConfigurationError,
     load_ev_charging_binding,
+    load_ev_charging_bindings,
 )
 from domoai.domain.energy import EVChargingBinding
 
@@ -37,6 +38,16 @@ def test_load_ev_charging_binding_round_trips_valid_document(tmp_path: Path) -> 
     assert isinstance(binding, EVChargingBinding)
     assert binding.device_id == "ev.home"
     assert binding.actuator.max_charge_kw == 7.4
+
+
+def test_load_ev_charging_bindings_accepts_server_owned_collection(tmp_path: Path) -> None:
+    path = tmp_path / "ev-charging-bindings.json"
+    path.write_text(json.dumps({"bindings": [_binding_payload()]}), encoding="utf-8")
+
+    bindings = load_ev_charging_bindings(path)
+
+    assert len(bindings) == 1
+    assert bindings[0].device_id == "ev.home"
 
 
 def test_load_ev_charging_binding_rejects_missing_file(tmp_path: Path) -> None:

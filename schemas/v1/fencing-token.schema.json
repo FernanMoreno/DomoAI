@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "LeaseScope": {
+      "additionalProperties": false,
+      "description": "The smallest authority scope that may have one physical owner.",
+      "properties": {
+        "tenant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "deployment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Deployment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "household_id",
+        "deployment_id"
+      ],
+      "title": "LeaseScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Non-secret proof carried to the physical boundary.",
+  "properties": {
+    "scope": {
+      "$ref": "#/$defs/LeaseScope"
+    },
+    "owner_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "lease_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Lease Id",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "scope",
+    "owner_id",
+    "epoch",
+    "lease_id",
+    "issued_at",
+    "expires_at"
+  ],
+  "title": "FencingToken",
+  "type": "object"
+}

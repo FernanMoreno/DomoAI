@@ -36,7 +36,7 @@
       "status": "configured"
     },
     {
-      "endpoint": "udp://172.26.93.253:3672",
+      "endpoint": "udp://127.0.0.1:3672",
       "mapping_path": "dev/lab/configs/knx-virtual.json",
       "operational_paths": [],
       "provider_id": "knx",
@@ -45,7 +45,7 @@
     }
   ],
   "profile": "lab",
-  "resolved_at": "2026-08-31T17:09:33.029989Z",
+  "resolved_at": "2026-09-04T20:02:07.678747Z",
   "schema_version": "v1",
   "warnings": []
 }

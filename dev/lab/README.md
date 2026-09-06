@@ -16,6 +16,23 @@ uv run domoai-lab smoke
 uv run domoai-lab down
 ```
 
+## Gate completa con gemelo digital
+
+Antes de depender de Docker, la prueba determinista recorre todos los perfiles
+de adapter, dominios físicos y servicios transversales sobre una sola planta
+virtual. Usa reloj y semilla reproducibles, por lo que no necesita KNX
+Virtual/ETS/knxd, MQTT, Docker ni hardware:
+
+```bash
+uv run python -m domoai.lab.cli twin --seed 187 \
+  --report docs/evidence/digital-twin-latest.md
+```
+
+La salida no cero significa que falta cobertura, readback, una invariante o un
+servicio. La evidencia se limita a `digital_twin`; no habilita rutas físicas ni
+reemplaza el commissioning real. Los codecs y mappers nativos mantienen sus
+fixtures de integración, y el HIL opcional aporta la evidencia física aparte.
+
 El gateway compartido puede arrancar con el bootstrap operativo del perfil
 `lab`. `deploy/wsl/run-gateway.sh` y `deploy/windows/run-gateway.ps1` cargan el
 `.env` ignorado de `dev/lab` solo con líneas `KEY=VALUE`; no imprimen ni
@@ -86,8 +103,11 @@ uv run pytest -q tests/contract/test_modbus_adapter.py -k battery
 
 Para enlazar la batería con KNX Virtual, que corre fuera de Docker en
 Windows, ejecuta `knxd` en WSL. KNX Virtual conserva su única interfaz en
-`172.26.80.1:3671`; el gateway WSL usa la IP real de WSL y publica `3672/UDP`
-para ETS y DomoAI. Esto evita el NAT de Docker, que cambia el origen de los
+UDP/3671; en la topología WSL mirrored actual se alcanza desde WSL como
+`127.0.0.1:3671`, mientras que en WSL NAT debe configurarse la IP de Windows
+alcanzable desde WSL. `knxd` publica `3672/UDP`. ETS usa la IP actual de WSL en
+ese puerto, mientras que DomoAI y el bridge nativos usan siempre
+`127.0.0.1:3672`. Esto evita el NAT de Docker, que cambia el origen de los
 telegramas KNXnet/IP y rompe los ACK de tunneling de KNX Virtual:
 
 ```bash
@@ -104,7 +124,7 @@ configuración temporal con `src-port=3673`. No requiere instalar paquetes con
 `domoai-lab` supervise el bridge:
 
 ```bash
-DOMOAI_KNX_GATEWAY_HOST="$(ip route get 172.26.80.1 | awk '{for (i=1; i<=NF; i++) if ($i==\"src\") {print $(i+1); exit}}')" \
+DOMOAI_KNX_GATEWAY_HOST=127.0.0.1 \
 DOMOAI_KNX_GATEWAY_PORT=3672 \
 DOMOAI_KNX_ROUTE_BACK=0 \
 DOMOAI_KNX_BRIDGE_MAPPING_PATH=dev/lab/configs/knx-battery-virtual.json \
@@ -121,9 +141,9 @@ uv run domoai-lab status --services mqtt battery knx-bridge
 ```
 
 En ETS modifica la conexión existente para apuntar a la IP actual de WSL en
-`3672/UDP`; conserva la dirección individual `1.0.255`. No conectes ETS ni
-DomoAI directamente a `172.26.80.1:3671`: KV queda reservado para el único
-upstream `knxd`.
+`3672/UDP`; conserva la dirección individual `1.0.255`. El bridge y DomoAI
+usan `127.0.0.1:3672` dentro de WSL. No conectes ETS ni DomoAI directamente al
+upstream UDP/3671: KV queda reservado para el único cliente `knxd`.
 
 El puente publica el estado MQTT en `4/0/1`, `4/0/2` y `4/0/3`, responde a las
 lecturas KNX de esas tres direcciones con el último estado retenido y convierte
@@ -171,6 +191,14 @@ subproceso de Docker para `up`, `status` y `down`. `domoai-lab smoke` no carga
 ese archivo, elimina las variables `DOMOAI_*` del proceso hijo y ejecuta solo
 fixtures locales; por tanto no activa OMIE, Open-Meteo, Home Assistant live,
 Matter commissioning ni KNX/IP.
+
+El broker Mosquitto usa el volumen Docker externo `domoai-lab-mqtt-data` para
+conservar discovery y estados retained entre reinicios. Créalo una vez antes
+de levantar este stack:
+
+```bash
+docker volume create domoai-lab-mqtt-data
+```
 
 Para detener y borrar volúmenes de forma explícita:
 

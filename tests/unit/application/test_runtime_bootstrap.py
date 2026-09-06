@@ -122,6 +122,74 @@ def test_lab_bootstrap_preserves_explicit_operational_assets(tmp_path: Path) -> 
     assert home_assistant.operational_paths == [str(battery_path), str(ev_path)]
 
 
+def test_lab_bootstrap_selects_assets_for_explicit_reachable_local_home_assistant(
+    tmp_path: Path,
+) -> None:
+    """Explicit local HA must not disable the opt-in lab asset defaults."""
+
+    settings = Settings(
+        bootstrap_profile="lab",
+        bootstrap_manifest_path=tmp_path / "bootstrap.json",
+        database_path=tmp_path / "runtime.sqlite3",
+        home_assistant_url="http://127.0.0.1:8123",
+        home_assistant_token=SecretStr("do-not-persist-this-token"),
+    )
+
+    result = RuntimeBootstrap.resolve(
+        settings,
+        probe=lambda host, port: (host, port) == ("127.0.0.1", 8123),
+        now="2026-08-31T12:00:00Z",
+        project_root=Path.cwd(),
+    )
+
+    assert result.settings.home_assistant_mapping_path == Path(
+        "dev/lab/configs/home-assistant-lab.json"
+    )
+    assert result.settings.battery_dispatch_profile_path == Path(
+        "dev/lab/configs/dispatchable-battery-lab.json"
+    )
+    assert result.settings.ev_charging_binding_paths == (
+        Path("dev/lab/configs/ev-charging-lab.json"),
+    )
+    home_assistant = next(
+        item for item in result.manifest.candidates if item.provider_id == "home_assistant"
+    )
+    assert home_assistant.status == "configured"
+    assert home_assistant.mapping_path == "dev/lab/configs/home-assistant-lab.json"
+    assert home_assistant.operational_paths == [
+        "dev/lab/configs/dispatchable-battery-lab.json",
+        "dev/lab/configs/ev-charging-lab.json",
+    ]
+
+
+def test_lab_bootstrap_does_not_select_assets_for_unreachable_explicit_local_home_assistant(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        bootstrap_profile="lab",
+        bootstrap_manifest_path=tmp_path / "bootstrap.json",
+        database_path=tmp_path / "runtime.sqlite3",
+        home_assistant_url="http://127.0.0.1:8123",
+        home_assistant_token=SecretStr("do-not-persist-this-token"),
+    )
+
+    result = RuntimeBootstrap.resolve(
+        settings,
+        probe=lambda _host, _port: False,
+        now="2026-08-31T12:00:00Z",
+        project_root=Path.cwd(),
+    )
+
+    assert result.settings.home_assistant_mapping_path is None
+    assert result.settings.battery_dispatch_profile_path is None
+    assert result.settings.ev_charging_binding_paths == ()
+    home_assistant = next(
+        item for item in result.manifest.candidates if item.provider_id == "home_assistant"
+    )
+    assert home_assistant.mapping_path is None
+    assert home_assistant.operational_paths == []
+
+
 def test_bootstrap_never_replaces_explicit_values(tmp_path: Path) -> None:
     settings = Settings(
         bootstrap_profile="lab",

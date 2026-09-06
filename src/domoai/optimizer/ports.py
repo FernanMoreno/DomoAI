@@ -50,15 +50,25 @@ class SolverEvidence(StrictModel):
     scenario_fingerprint: str
 
 
+class AlternativeEvidence(StrictModel):
+    """Comparable, bounded evidence for one proposal in a result bundle."""
+
+    objective_values: dict[str, float] = Field(default_factory=dict, max_length=32)
+    constraint_effects: dict[str, Any] = Field(default_factory=dict, max_length=16)
+    forecast_assumptions: dict[str, Any] = Field(default_factory=dict, max_length=16)
+
+
 class OptimizationResult(StrictModel):
     schema_version: str = "v1"
     scenario_id: str
+    definition_digest: str | None = None
     status: OptimizationStatus
     solver: str
     plan: Plan | None = None
     plans: list[Plan] = Field(default_factory=list)
     objective_values: dict[str, float] = Field(default_factory=dict)
     constraint_summary: dict[str, Any] = Field(default_factory=dict)
+    alternative_evidence: dict[str, AlternativeEvidence] = Field(default_factory=dict)
     diagnostics: list[ErrorDetail] = Field(default_factory=list)
     solver_evidence: SolverEvidence | None = None
 
@@ -91,10 +101,21 @@ def build_result(
     diagnostics: list[dict[str, Any]] | None = None,
     objective_values: dict[str, float] | None = None,
     constraint_summary: dict[str, Any] | None = None,
+    alternative_evidence: dict[str, AlternativeEvidence | dict[str, Any]] | None = None,
     solver_evidence: SolverEvidence | None = None,
+    definition_digest: str | None = None,
 ) -> OptimizationResult:
+    normalized_alternative_evidence = {
+        plan_id: (
+            evidence
+            if isinstance(evidence, AlternativeEvidence)
+            else AlternativeEvidence.model_validate(evidence)
+        )
+        for plan_id, evidence in (alternative_evidence or {}).items()
+    }
     return OptimizationResult(
         scenario_id=scenario_id,
+        definition_digest=definition_digest,
         status=status,
         solver="cp-sat",
         plan=plan,
@@ -102,5 +123,6 @@ def build_result(
         diagnostics=[ErrorDetail.model_validate(item) for item in (diagnostics or [])],
         objective_values=objective_values or {},
         constraint_summary=constraint_summary or {},
+        alternative_evidence=normalized_alternative_evidence,
         solver_evidence=solver_evidence,
     )

@@ -10,13 +10,23 @@ from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.mcp.ortools_server import OrtoolsMcpContext, create_ortools_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
-from domoai.optimizer.scenario import Constraint, Horizon, Load, OptimizationScenario
+from domoai.optimizer.scenario import (
+    Constraint,
+    Horizon,
+    Load,
+    OptimizationScenario,
+    scenario_definition_digest,
+)
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
 
 def structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return result[1]
     assert isinstance(result, dict)
@@ -76,7 +86,13 @@ async def test_ortools_mcp_exposes_only_proposal_tools() -> None:
     listed_tools = await server.list_tools()
     tools = [tool.name for tool in listed_tools]
 
-    assert tools == ["validate_scenario", "optimize_scenario", "explain_solution"]
+    assert tools == [
+        "validate_scenario",
+        "optimize_scenario",
+        "explain_solution",
+        "summarize_solution",
+        "compare_scenarios",
+    ]
     assert "execute_plan" not in tools
     assert "execute_command" not in tools
     assert all(tool.annotations is not None for tool in listed_tools)
@@ -104,7 +120,9 @@ async def test_ortools_mcp_validates_and_optimizes_without_adapter_calls() -> No
     )
 
     assert validation["valid"] is True
+    assert validation["definition_digest"] == scenario_definition_digest(scenario)
     assert result["status"] in {"optimal", "feasible"}
+    assert result["definition_digest"] == scenario_definition_digest(scenario)
     assert result["plan"]["status"] in {"ready", "validated"}
     assert result["constraint_summary"]["hard_satisfied"] is True
 
@@ -152,6 +170,65 @@ async def test_explain_solution_returns_versioned_proposal_projection() -> None:
     assert explanation["scenario_id"] == scenario.id
     assert explanation["proposal"]["plan_id"] == result["plan"]["id"]
     assert explanation["constraint_summary"]["hard_satisfied"] is True
+    assert explanation["alternatives"]
+    assert all(
+        set(alternative)
+        >= {
+            "plan_id",
+            "status",
+            "objective_values",
+            "constraint_effects",
+            "forecast_assumptions",
+        }
+        for alternative in explanation["alternatives"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_summarize_solution_returns_product_projection_without_commands() -> None:
+    context = await build_context()
+    server = create_ortools_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    scenario = scenario_for(device_id)
+    result = structured(
+        await server.call_tool("optimize_scenario", {"scenario": scenario.model_dump(mode="json")})
+    )
+
+    summary = structured(await server.call_tool("summarize_solution", {"result": result}))
+
+    assert summary["schema_version"] == "v1"
+    assert summary["scenario_id"] == scenario.id
+    assert summary["proposal_id"] == result["plan"]["id"]
+    assert "commands" not in summary
+
+
+@pytest.mark.asyncio
+async def test_compare_scenarios_returns_read_only_product_diffs() -> None:
+    context = await build_context()
+    server = create_ortools_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    baseline = scenario_for(device_id)
+    variation = baseline.model_copy(update={"id": "contract-energy-variation"})
+
+    comparison = structured(
+        await server.call_tool(
+            "compare_scenarios",
+            {
+                "baseline": baseline.model_dump(mode="json"),
+                "variations": {"same_inputs": variation.model_dump(mode="json")},
+            },
+        )
+    )
+
+    assert comparison["schema_version"] == "v1"
+    assert comparison["baseline"]["scenario_id"] == baseline.id
+    assert comparison["variations"]["same_inputs"]["scenario_id"] == variation.id
+    assert comparison["variations"]["same_inputs"]["diff"]["start_slot_sum"] == pytest.approx(0)
+    assert "commands" not in comparison["baseline"]
 
 
 @pytest.mark.asyncio

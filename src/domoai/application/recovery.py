@@ -19,7 +19,7 @@ class PlanRecoveryService:
         self.plan_repository = plan_repository
         self.audit = audit
 
-    async def recover_orphaned_plans(self) -> list[str]:
+    async def reconcile(self, *, reason: str = "periodic_recovery") -> list[str]:
         orphaned = await self.plan_repository.list_by_status(frozenset({PlanStatus.EXECUTING}))
         recovered_ids: list[str] = []
         for plan in orphaned:
@@ -30,9 +30,14 @@ class PlanRecoveryService:
                 actor="runtime",
                 subject_id=plan.id,
                 payload={
-                    "reason": "startup_crash_recovery",
+                    "reason": reason,
                     "previous_status": PlanStatus.EXECUTING.value,
                 },
             )
             recovered_ids.append(plan.id)
         return recovered_ids
+
+    async def recover_orphaned_plans(self) -> list[str]:
+        """Compatibility entry point for the startup reconciliation pass."""
+
+        return await self.reconcile(reason="startup_crash_recovery")

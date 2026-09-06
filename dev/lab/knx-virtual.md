@@ -15,6 +15,12 @@ KNX Virtual/ETS is installed on Windows and the live lab uses `knxd` in WSL as
 the single upstream client. Until those prerequisites are available, the live
 smoke remains intentionally skipped.
 
+The upstream host is topology-dependent. In the current WSL mirrored
+networking mode, KNX Virtual is reachable from WSL at `127.0.0.1:3671`; in
+classic WSL NAT mode, set `DOMOAI_KNX_KV_HOST` to the Windows-side address
+reachable from WSL. DomoAI continues to use the local `knxd` endpoint
+`127.0.0.1:3672`.
+
 ## Network checklist
 
 1. Create the virtual project in ETS and use the group addresses in
@@ -24,8 +30,9 @@ smoke remains intentionally skipped.
 3. Configure KNX Virtual's KNXnet/IP interface for that NIC and the default
    tunnelling port `3671`.
 4. Allow the required UDP/TCP traffic through the Windows and WSL firewalls.
-5. Start the WSL `knxd` launcher, then set `DOMOAI_KNX_GATEWAY_HOST` to the
-   current WSL address and run the opt-in live smoke.
+5. Start the WSL `knxd` launcher. Native DomoAI clients use
+   `DOMOAI_KNX_GATEWAY_HOST=127.0.0.1`; ETS uses the current WSL address on
+   port `3672`.
 
 KNX Virtual's router mode may require a `router.txt` file containing
 `<interface-ip>:3671`, according to the KNX Association support instructions.
@@ -34,7 +41,7 @@ Do not expose KNXnet/IP directly to the public internet.
 ## Run
 
 ```bash
-export DOMOAI_KNX_GATEWAY_HOST="$(ip route get 172.26.80.1 | awk '{for (i=1; i<=NF; i++) if ($i==\"src\") {print $(i+1); exit}}')"
+export DOMOAI_KNX_GATEWAY_HOST="127.0.0.1"
 export DOMOAI_KNX_GATEWAY_PORT="3672"
 export DOMOAI_KNX_ROUTE_BACK="0"
 export DOMOAI_KNX_CONFIG_PATH="dev/lab/configs/knx-virtual.json"
@@ -87,7 +94,8 @@ the required NAT behavior. In this Windows/WSL setup the Docker path was
 observed dropping KNXnet/IP tunnelling acknowledgements, while the native path
 passed the complete live battery composition. WSL addresses can change after a
 restart; always launch `dev/lab/knx-gateway/run-wsl.sh` so it discovers the
-current address, then point ETS and DomoAI to that address on `3672/UDP`.
+current address. Point ETS to that address on `3672/UDP`; native DomoAI and the
+bridge use the stable local endpoint `127.0.0.1:3672`.
 
 ## Virtual battery facade
 
@@ -104,8 +112,10 @@ estado. El proyecto ETS debe enlazar estas direcciones:
 
 El mapping DomoAI correspondiente es `configs/knx-battery-virtual.json`.
 KNX Virtual sigue ejecutándose en Windows y conserva su interfaz upstream en
-`172.26.80.1:3671`. `knxd` en WSL es el único cliente de esa interfaz y
-publica `3672` para ETS y DomoAI. Configura ETS a la IP actual de WSL en
+UDP/3671. En la topología WSL mirrored validada el 2026-09-04, esa interfaz se
+alcanza desde WSL mediante `127.0.0.1:3671`; en WSL NAT debe usarse la IP de
+Windows alcanzable desde WSL. `knxd` en WSL es el único cliente de esa interfaz
+y publica `3672` para ETS y DomoAI. Configura ETS a la IP actual de WSL en
 `3672/UDP`, conserva `1.0.255` como dirección individual y no conectes dos
 clientes directamente a `3671`.
 
@@ -117,7 +127,7 @@ readback son deterministas, sin fingir que ETS ha cualificado un inversor.
 ```bash
 dev/lab/knx-gateway/run-wsl.sh
 
-DOMOAI_KNX_GATEWAY_HOST="$(ip route get 172.26.80.1 | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')" \
+DOMOAI_KNX_GATEWAY_HOST=127.0.0.1 \
 DOMOAI_KNX_GATEWAY_PORT=3672 \
 DOMOAI_KNX_ROUTE_BACK=0 \
 uv run domoai-lab up --services mqtt battery knx-bridge

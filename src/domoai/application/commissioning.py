@@ -9,16 +9,22 @@ import tempfile
 from collections.abc import Sequence
 from datetime import UTC
 from pathlib import Path
+from typing import Protocol
 
 from domoai.domain.commissioning import (
     CommissioningAssetType,
     CommissioningBlocker,
     CommissioningCandidate,
     CommissioningCandidateStatus,
+    CommissioningEvidence,
+    CommissioningEvidenceClass,
+    CommissioningQualification,
+    CommissioningQualificationStatus,
     CommissioningReport,
     CommissioningRoute,
+    commissioning_evidence_digest,
 )
-from domoai.domain.models import Device, DeviceType
+from domoai.domain.models import AuthorityContext, Device, DeviceType
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.source_models import CapabilityRoute
@@ -26,6 +32,12 @@ from domoai.runtime.source_models import CapabilityRoute
 
 class CommissioningPersistenceError(ValueError):
     """Raised when a report cannot be atomically persisted."""
+
+
+class CommissioningQualificationRepository(Protocol):
+    async def save(
+        self, qualification_id: str, qualification: CommissioningQualification
+    ) -> None: ...
 
 
 _BATTERY_TELEMETRY = ("battery.soc", "battery.power", "battery.capacity")
@@ -56,6 +68,7 @@ class CommissioningService:
         *,
         runtime_revision: str,
         asset_types: Sequence[CommissioningAssetType | str] | None = None,
+        authority: AuthorityContext | None = None,
         persist: bool = True,
     ) -> CommissioningReport:
         selected_types = self._asset_types(asset_types)
@@ -71,10 +84,75 @@ class CommissioningService:
                 candidate.canonical_device_id,
             )
         )
-        report = self._build_report(runtime_revision, candidates)
+        report = self._build_report(runtime_revision, candidates, authority or AuthorityContext())
         if persist and self.manifest_path is not None:
             self._persist(report)
         return report
+
+    def verify_evidence(
+        self,
+        report: CommissioningReport,
+        evidence: CommissioningEvidence,
+    ) -> CommissioningQualification:
+        """Verify evidence without invoking adapters or creating authority."""
+
+        blockers: list[str] = []
+        candidate = next(
+            (
+                item
+                for item in report.candidates
+                if item.candidate_digest == evidence.candidate_digest
+            ),
+            None,
+        )
+        if candidate is None:
+            blockers.append("candidate_digest_mismatch")
+        if evidence.authority != report.authority:
+            blockers.append("authority_mismatch")
+        if commissioning_evidence_digest(evidence) != evidence.evidence_digest:
+            blockers.append("evidence_digest_mismatch")
+        now = self.clock.now()
+        if evidence.expires_at <= now:
+            blockers.append("evidence_expired")
+        if candidate is not None and (
+            candidate.status is not CommissioningCandidateStatus.READY_FOR_BINDING
+        ):
+            blockers.append("candidate_not_ready_for_binding")
+
+        required_checks = {"identity", "read_observation", "safe_actuation", "readback"}
+        checks = {check.check_id: check.status.value for check in evidence.checks}
+        missing = sorted(required_checks - checks.keys())
+        if missing:
+            blockers.append("missing_required_checks:" + ",".join(missing))
+        failed = sorted(
+            check_id for check_id in required_checks if checks.get(check_id) != "passed"
+        )
+        if failed and not missing:
+            blockers.append("failed_required_checks:" + ",".join(failed))
+
+        if evidence.evidence_class is not CommissioningEvidenceClass.HARDWARE:
+            blockers.append("physical_evidence_required")
+
+        status = (
+            CommissioningQualificationStatus.QUALIFIED
+            if not blockers
+            else (
+                CommissioningQualificationStatus.BLOCKED_EXTERNAL_DEPENDENCY
+                if blockers == ["physical_evidence_required"]
+                else CommissioningQualificationStatus.REJECTED
+            )
+        )
+        return CommissioningQualification(
+            authority=evidence.authority,
+            candidate_digest=evidence.candidate_digest,
+            evidence_digest=evidence.evidence_digest or "sha256:" + "0" * 64,
+            status=status,
+            verified_checks=sorted(
+                check_id for check_id, value in checks.items() if value == "passed"
+            ),
+            blockers=blockers,
+            checked_at=now,
+        )
 
     @staticmethod
     def _asset_types(
@@ -291,16 +369,19 @@ class CommissioningService:
         self,
         runtime_revision: str,
         candidates: list[CommissioningCandidate],
+        authority: AuthorityContext,
     ) -> CommissioningReport:
         generated_at = self.clock.now().astimezone(UTC)
         report_facts = {
             "schema_version": "v1",
+            "authority": authority.model_dump(mode="json"),
             "runtime_revision": runtime_revision,
             "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
             "warnings": [],
             "authority_created": False,
         }
         return CommissioningReport(
+            authority=authority,
             runtime_revision=runtime_revision,
             generated_at=generated_at,
             report_digest=_digest(report_facts),
@@ -346,4 +427,8 @@ def _digest(payload: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-__all__ = ["CommissioningPersistenceError", "CommissioningService"]
+__all__ = [
+    "CommissioningPersistenceError",
+    "CommissioningQualificationRepository",
+    "CommissioningService",
+]

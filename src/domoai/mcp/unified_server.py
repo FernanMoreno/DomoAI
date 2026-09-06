@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from domoai.config.settings import Settings
 from domoai.mcp.auth import StaticBearerTokenVerifier
@@ -25,6 +25,7 @@ from domoai.mcp.ortools_server import (
     OrtoolsMcpContext,
     register_ortools_tools,
 )
+from domoai.mcp.remote_metrics import MetricsRenderError, render_prometheus_metrics
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ def create_unified_server(
 
     ensure_fastmcp_settings_ready()
     kwargs: dict[str, Any] = {}
+    token_verifier: StaticBearerTokenVerifier | None = None
     if settings is not None:
         kwargs.update(
             host=settings.mcp_host,
@@ -61,10 +63,11 @@ def create_unified_server(
             transport_security=_transport_security(settings),
         )
         if settings.mcp_client_token_file is not None:
-            kwargs["token_verifier"] = StaticBearerTokenVerifier.from_file(
-                settings.mcp_client_token_file
-            )
+            token_verifier = StaticBearerTokenVerifier.from_file(settings.mcp_client_token_file)
+            kwargs["token_verifier"] = token_verifier
             kwargs["auth"] = _auth_settings(settings)
+        if settings.mcp_metrics_enabled and token_verifier is None:
+            raise ValueError("metrics endpoint requires a client token verifier")
     server = FastMCP(
         "DomoAI",
         instructions=(
@@ -83,7 +86,56 @@ def create_unified_server(
             return await readyz(runtime, request)
 
         server.custom_route("/readyz", methods=["GET"], name="readyz")(readiness_route)
+    if settings is not None and settings.mcp_metrics_enabled:
+
+        async def metrics_route(request: Request) -> PlainTextResponse:
+            if token_verifier is None:
+                return _metrics_unavailable_response()
+            # The bearer is read directly because this route is outside the
+            # MCP SDK's protected transport endpoint. It still uses the exact
+            # same hash-only verifier and lifecycle rules.
+            bearer = _bearer_from_request(request)
+            if bearer is None or await token_verifier.verify_token(bearer) is None:
+                return PlainTextResponse(
+                    "unauthorized\n",
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            metrics = context.domotics.metrics
+            if metrics is None:
+                return _metrics_unavailable_response()
+            try:
+                snapshot = await metrics.snapshot()
+                rendered = render_prometheus_metrics(
+                    snapshot,
+                    max_bytes=settings.mcp_metrics_max_bytes,
+                )
+            except MetricsRenderError:
+                return _metrics_unavailable_response()
+            except Exception:  # noqa: BLE001 - fail closed at an edge
+                return _metrics_unavailable_response()
+            return PlainTextResponse(
+                rendered,
+                media_type="text/plain; version=0.0.4",
+            )
+
+        server.custom_route("/metrics", methods=["GET"], name="metrics")(metrics_route)
     return server
+
+
+def _bearer_from_request(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    scheme, separator, value = header.partition(" ")
+    token = value.strip()
+    if scheme.lower() != "bearer" or not separator or not token or any(
+        character.isspace() for character in token
+    ):
+        return None
+    return token
+
+
+def _metrics_unavailable_response() -> PlainTextResponse:
+    return PlainTextResponse("metrics_unavailable\n", status_code=503)
 
 
 def _auth_settings(settings: Settings) -> AuthSettings:

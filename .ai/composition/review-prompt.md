@@ -1,34 +1,11 @@
-Perform a complete system composition review of the current significant change.
+Use the `system-composition-review` skill for the current repository.
 
-Use `system-composition-review`.
+Review the current significant change as a composed system, not as isolated features.
 
-Do not review only the files directly modified. Determine the actual impact
-surface with Graphify and source inspection and review relevant upstream and
-downstream subsystems.
+Use Graphify for the impact surface where useful, inspect source code, run the available architecture checks, contract tests, integration/composition tests and normal regression tests, and use real dependencies via Testcontainers when mocks may hide behavior.
 
-Run the architecture gate, contract tests, integration/composition tests and
-normal regression tests that apply.
+Pay special attention to shared state, transactions, events, ordering, retries, idempotency, timeouts, error propagation, caches, concurrency, resource lifecycle, API/data contracts, configuration propagation, database invariants, migrations and backward compatibility.
 
-Use Testcontainers/real disposable dependencies where mocks could hide
-integration behavior. Use Pact when independently evolving consumers/providers
-have an API/message contract.
+If anything fails, use `systematic-debugging` and find the root cause before proposing a fix.
 
-Exercise partial failure, retry, duplicate/idempotency, timeout/cancellation,
-stale cache/state and concurrency scenarios when relevant.
-
-If a failure appears, use `systematic-debugging` and find the first incorrect
-boundary before proposing a fix.
-
-Use `verification-before-completion`.
-
-Finish with the Composition Review Report required by the skill:
-- changed subsystems
-- neighbors reviewed
-- contracts/invariants checked
-- architecture checks
-- composition/integration scenarios
-- contract tests
-- real dependencies used
-- failures/root causes
-- residual risks
-- PASS / PASS WITH RISKS / FAIL
+Finish with the Composition Review Report required by the skill.

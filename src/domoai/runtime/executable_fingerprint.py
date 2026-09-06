@@ -72,6 +72,7 @@ def _capability_payload(capability: Capability) -> dict[str, Any]:
         "enum_values": sorted(capability.enum_values),
         "commands": sorted(capability.commands),
         "constraints": capability.constraints,
+        "guarantees": capability.guarantees.model_dump(mode="json"),
     }
 
 

@@ -114,6 +114,21 @@ class BatteryControlCoordinator:
         )
 
     @property
+    def authority_blocked(self) -> bool:
+        """Whether an unverified physical stop currently blocks new orders."""
+
+        return any(result.status is ControlLeaseStatus.UNKNOWN for result in self._results.values())
+
+    @property
+    def authority_block_reason(self) -> str | None:
+        """Return the first recorded reason for the current authority block."""
+
+        for result in self._results.values():
+            if result.status is ControlLeaseStatus.UNKNOWN:
+                return result.failure_code
+        return None
+
+    @property
     def startup_reconciled(self) -> bool:
         """Whether this coordinator has passed its startup safety gate."""
 
@@ -158,10 +173,19 @@ class BatteryControlCoordinator:
 
         # A physical battery has one control owner, not one owner per plan.
         # Do not let direct execution or concurrent scheduler paths create a
-        # second lease while the first one is still live.  Expired records are
-        # retired here so a dead lease cannot permanently block recovery.
+        # second lease while the first one is still live. An unverified stop
+        # is different from ordinary expiry: the physical state is unknown,
+        # so no later plan may acquire control until reconciliation clears it.
         for held_key, held in list(self._results.items()):
-            if held_key[:2] != key[:2] or held.status is not ControlLeaseStatus.ACQUIRED:
+            if held_key[:2] != key[:2]:
+                continue
+            if held.status is ControlLeaseStatus.UNKNOWN:
+                return self._rejected(
+                    plan_id=plan_id,
+                    first_command=first,
+                    failure_code="control_authority_unknown",
+                )
+            if held.status is not ControlLeaseStatus.ACQUIRED:
                 continue
             if self.clock.now() >= held.expires_at:
                 self._results[held_key] = held.model_copy(
@@ -372,7 +396,7 @@ class BatteryControlCoordinator:
                     "status": (
                         ControlLeaseStatus.RELEASED
                         if stop_confirmed
-                        else ControlLeaseStatus.EXPIRED
+                        else ControlLeaseStatus.UNKNOWN
                     ),
                     "failure_code": (
                         "lease_supervisor_stop_confirmed"
@@ -411,6 +435,7 @@ class BatteryControlCoordinator:
                 live_snapshot = None
             if self._feedback_is_safe(live_snapshot):
                 self._startup_reconciled = True
+                self._clear_reconciled_unknown_leases()
                 return True
         elif snapshot is None:
             # A first boot or a persistence gap must still reconcile the
@@ -423,6 +448,7 @@ class BatteryControlCoordinator:
                 live_snapshot = None
             if self._feedback_is_safe(live_snapshot):
                 self._startup_reconciled = True
+                self._clear_reconciled_unknown_leases()
                 return True
         command = Command(
             id="startup-reconciliation-stop",
@@ -456,6 +482,8 @@ class BatteryControlCoordinator:
             matching = await self._read_feedback(source_ref)
             confirmed = self._feedback_is_safe(matching)
             self._startup_reconciled = confirmed
+            if confirmed:
+                self._clear_reconciled_unknown_leases()
             return confirmed
         except Exception:
             self._startup_reconciled = False
@@ -525,7 +553,7 @@ class BatteryControlCoordinator:
             if not confirmed:
                 self._results[key] = result.model_copy(
                     update={
-                        "status": ControlLeaseStatus.EXPIRED,
+                        "status": ControlLeaseStatus.UNKNOWN,
                         "failure_code": "shutdown_stop_unconfirmed",
                     }
                 )
@@ -539,8 +567,20 @@ class BatteryControlCoordinator:
         """Revoke authority after any unverified emergency-stop path."""
 
         self._results[key] = result.model_copy(
-            update={"status": ControlLeaseStatus.EXPIRED, "failure_code": failure_code}
+            update={"status": ControlLeaseStatus.UNKNOWN, "failure_code": failure_code}
         )
+
+    def _clear_reconciled_unknown_leases(self) -> None:
+        """Retire latched unknown leases only after a safe live readback."""
+
+        for key, result in list(self._results.items()):
+            if result.status is ControlLeaseStatus.UNKNOWN:
+                self._results[key] = result.model_copy(
+                    update={
+                        "status": ControlLeaseStatus.RELEASED,
+                        "failure_code": "control_reconciled",
+                    }
+                )
 
     def _rejected(
         self, *, plan_id: str, first_command: Command, failure_code: str
@@ -772,27 +812,38 @@ class ControlTakeoverGroup:
         active = self._active.get(plan_id)
         if active is None:
             return True
-        results = [
-            await coordinator.emergency_stop(
-                plan_id=plan_id,
-                execution_attempt_id=execution_attempt_id,
-            )
-            for coordinator in active
-        ]
+        results: list[bool] = []
+        for coordinator in active:
+            try:
+                results.append(
+                    await coordinator.emergency_stop(
+                        plan_id=plan_id,
+                        execution_attempt_id=execution_attempt_id,
+                    )
+                )
+            except BaseException:
+                results.append(False)
         return all(results)
 
     async def release_for_plan(self, *, plan_id: str, execution_attempt_id: str) -> bool:
-        active = self._active.pop(plan_id, None)
+        active = self._active.get(plan_id)
         if active is None:
             return True
-        results = [
-            await coordinator.release_for_plan(
-                plan_id=plan_id,
-                execution_attempt_id=execution_attempt_id,
-            )
-            for coordinator in active
-        ]
-        return all(results)
+        results: list[bool] = []
+        for coordinator in active:
+            try:
+                results.append(
+                    await coordinator.release_for_plan(
+                        plan_id=plan_id,
+                        execution_attempt_id=execution_attempt_id,
+                    )
+                )
+            except BaseException:
+                results.append(False)
+        confirmed = all(results)
+        if confirmed:
+            self._active.pop(plan_id, None)
+        return confirmed
 
     async def supervise_once(self) -> list[str]:
         stopped: set[str] = set()

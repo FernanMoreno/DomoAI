@@ -240,3 +240,100 @@ def test_validator_rejects_reordered_approval(tmp_path: Path) -> None:
 
     with pytest.raises(SkillContractError, match="approval"):
         validate_skill(path)
+
+
+V4_READ_ONLY_SKILL = """---
+name: v4-diagnostics
+description: inspect canonical device state without mutation
+contract_version: v4
+required_context: devices,state
+allowed_tools: mcp.discover_devices,mcp.get_state,mcp.explain_solution
+allowed_resources: domotics://devices,domotics://runtime
+forbidden_tools: direct_adapter_call,direct_vendor_api,direct_solver_call
+state_max_age_seconds: 60
+approval_required_for: none
+failure_mode: stop_and_report
+---
+
+## Declared operations
+
+- `discover_devices`
+- `get_state`
+- `explain_solution`
+
+## Procedure
+
+1. `discover_devices` — read the canonical inventory.
+2. `get_state` — read current state.
+3. `explain_solution` — report bounded diagnostics.
+
+## Operation bindings
+
+- `discover_devices` → `mcp.discover_devices` (`read`)
+- `get_state` → `mcp.get_state` (`read`)
+- `explain_solution` → `mcp.explain_solution` (`read`)
+"""
+
+
+def test_validator_normalizes_v4_safety_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(V4_READ_ONLY_SKILL, encoding="utf-8")
+
+    procedure = validate_skill(path)
+
+    assert procedure.contract_version == "v4"
+    assert procedure.required_context == ("devices", "state")
+    assert procedure.allowed_tools == (
+        "mcp.discover_devices",
+        "mcp.get_state",
+        "mcp.explain_solution",
+    )
+    assert procedure.allowed_resources == ("domotics://devices", "domotics://runtime")
+    assert procedure.forbidden_tools == (
+        "direct_adapter_call",
+        "direct_vendor_api",
+        "direct_solver_call",
+    )
+    assert procedure.state_max_age_seconds == 60
+    assert procedure.approval_required_for == ("none",)
+    assert procedure.failure_mode == "stop_and_report"
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        ("required_context: devices,state\n", "required_context: \n"),
+        ("state_max_age_seconds: 60\n", "state_max_age_seconds: -1\n"),
+        (
+            "forbidden_tools: direct_adapter_call,direct_vendor_api,direct_solver_call\n",
+            "forbidden_tools: direct_vendor_api\n",
+        ),
+        (
+            "allowed_resources: domotics://devices,domotics://runtime\n",
+            "allowed_resources: https://vendor.example/api\n",
+        ),
+    ],
+)
+def test_validator_rejects_incomplete_v4_safety_metadata(
+    tmp_path: Path, replacement: tuple[str, str]
+) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(V4_READ_ONLY_SKILL.replace(*replacement), encoding="utf-8")
+
+    with pytest.raises(SkillContractError):
+        validate_skill(path)
+
+
+def test_validator_rejects_v4_direct_route_even_when_operation_is_semantic(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(
+        V4_READ_ONLY_SKILL.replace(
+            "`mcp.explain_solution` (`read`)", "`vendor.explain_solution` (`read`)"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SkillContractError, match="invalid operation binding"):
+        validate_skill(path)

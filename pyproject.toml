@@ -10,11 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiomqtt>=2.5,<3",
+    "cryptography>=50,<51",
     "httpx>=0.28,<1",
     "jsonschema>=4.23,<5",
     "mcp>=1.27,<2",
     "ortools>=9.12,<10",
     "pebble>=5.1,<6",
+    "psycopg[binary]>=3.2,<4",
     "pydantic>=2.11,<3",
     "pymodbus>=3.9,<4",
     "xknx>=3.16,<4",
@@ -36,12 +38,16 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<1",
     "pytest-cov>=6,<7",
+    "pyyaml>=6.0,<7",
     "ruff>=0.11,<1",
     "testcontainers>=4.15.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/domoai"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills/core" = "domoai/skills/core"
 
 [tool.uv]
 default-groups = ["dev"]

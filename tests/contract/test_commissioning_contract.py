@@ -11,6 +11,11 @@ from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
+from domoai.domain.commissioning import (
+    CommissioningCheck,
+    CommissioningEvidence,
+    CommissioningEvidenceClass,
+)
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
@@ -18,6 +23,10 @@ from domoai.runtime.state_store import StateStore
 
 
 def structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return cast(dict[str, Any], result[1])
     assert isinstance(result, dict)
@@ -56,6 +65,56 @@ async def test_mcp_exposes_read_only_commissioning_report(tmp_path: Path) -> Non
     assert result["schema_version"] == "v1"
     assert result["report_digest"] == report.report_digest
     assert result["authority_created"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_verifies_commissioning_evidence_without_authorizing_hardware(
+    tmp_path: Path,
+) -> None:
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(adapter, registry, state_store, audit)
+    await discovery.refresh()
+    commissioning = CommissioningService(registry, manifest_path=tmp_path / "commissioning.json")
+    report = commissioning.inspect(runtime_revision=state_store.runtime_revision)
+    candidate = report.candidates[0]
+    evidence = CommissioningEvidence(
+        authority=report.authority,
+        evidence_id="evidence-contract-1",
+        candidate_digest=candidate.candidate_digest,
+        observed_at=report.generated_at,
+        expires_at=report.generated_at.replace(year=2027),
+        evidence_class=CommissioningEvidenceClass.SIMULATION,
+        checks=[
+            CommissioningCheck(check_id="identity", status="passed", detail="stable"),
+            CommissioningCheck(check_id="read_observation", status="passed", detail="read"),
+            CommissioningCheck(check_id="safe_actuation", status="passed", detail="bounded"),
+            CommissioningCheck(check_id="readback", status="passed", detail="readback"),
+        ],
+    )
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    context = DomoticsMcpContext(
+        discovery=discovery,
+        state_service=StateService(state_store),
+        facade=DomoticsFacade(plan_service, PlanExecutor(adapter, plan_service, audit)),
+        registry=registry,
+        policies=[],
+        commissioning_service=commissioning,
+        commissioning_report=report,
+    )
+    server = create_domotics_server(context)
+
+    result = structured(
+        await server.call_tool(
+            "verify_commissioning", {"evidence": evidence.model_dump(mode="json")}
+        )
+    )
+
+    assert result["authority_created"] is False
+    assert result["status"] in {"rejected", "blocked_external_dependency"}
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio

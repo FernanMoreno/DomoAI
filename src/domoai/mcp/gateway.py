@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -14,7 +15,11 @@ from starlette.types import Receive, Scope, Send
 
 from domoai.application.runtime_factory import RuntimeComposition
 from domoai.config.settings import Settings
-from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
+from domoai.mcp.unified_server import (
+    UnifiedMcpContext,
+    _transport_security,
+    create_unified_server,
+)
 from domoai.runtime.approval_store import (
     OperatorApprovalAssertionProvider,
     OperatorPrincipalProvider,
@@ -43,9 +48,12 @@ class GatewayApplication:
     def __post_init__(self) -> None:
         app = self.server.streamable_http_app()
         if not self.runtime.settings.mcp_server_sent_events:
+            transport_security = _transport_security(self.runtime.settings)
             app.add_middleware(
                 _RejectServerSentEventsMiddleware,
                 mcp_path=self.runtime.settings.mcp_path,
+                allowed_hosts=transport_security.allowed_hosts,
+                allowed_origins=transport_security.allowed_origins,
             )
         original_lifespan = app.router.lifespan_context
 
@@ -123,12 +131,60 @@ class _RejectServerSentEventsMiddleware:
     qualified.
     """
 
-    def __init__(self, app: Any, *, mcp_path: str) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        mcp_path: str,
+        allowed_hosts: list[str],
+        allowed_origins: list[str],
+    ) -> None:
         self.app = app
         self.mcp_path = mcp_path
+        self.allowed_hosts = allowed_hosts
+        self.allowed_origins = allowed_origins
+
+    @staticmethod
+    def _matches(value: str | None, allowed: list[str], *, wildcard_port: bool = False) -> bool:
+        if not value:
+            return False
+        if value in allowed:
+            return True
+        if wildcard_port:
+            return any(
+                item.endswith(":*") and value.startswith(item[:-2] + ":") for item in allowed
+            )
+        return False
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == self.mcp_path:
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope.get("headers", [])
+            }
+            if not self._matches(headers.get("host"), self.allowed_hosts, wildcard_port=True):
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 421,
+                        "headers": [(b"content-length", b"0")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": b""})
+                return
+            origin = headers.get("origin")
+            if origin is not None and not self._matches(
+                origin, self.allowed_origins, wildcard_port=True
+            ):
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 403,
+                        "headers": [(b"content-length", b"0")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": b""})
+                return
             await send(
                 {
                     "type": "http.response.start",
@@ -145,14 +201,23 @@ async def _close_gateway_safely(gateway: GatewayApplication) -> None:
     """Finish gateway cleanup before propagating an interrupt cancellation."""
 
     close_task = asyncio.create_task(gateway.close(), name="domoai-gateway-close")
-    try:
-        await asyncio.shield(close_task)
-    except asyncio.CancelledError:
-        # ``SIGINT`` cancels the task running ``run_gateway``. The close
-        # operation must live in its own task so lifecycle cancellation cannot
-        # skip ownership release, storage closure, or adapter disconnect.
-        await asyncio.shield(close_task)
-        raise
+    interrupted = False
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            # ``SIGINT`` cancels the task running ``run_gateway``. Repeated
+            # interrupts can arrive while cleanup is still running; keep
+            # waiting for the independent close task so ownership release,
+            # storage closure, and adapter disconnect cannot be skipped.
+            interrupted = True
+
+    # Surface a real cleanup failure, but only after the close task has
+    # finished. ``result()`` is non-blocking here and also observes exceptions
+    # so they are not reported later as an unhandled task failure.
+    close_task.result()
+    if interrupted:
+        raise asyncio.CancelledError
 
 
 async def build_gateway(
@@ -180,12 +245,34 @@ async def run_gateway() -> None:
     # silently expose the deterministic simulator when no real provider is
     # configured. The local stdio entrypoint remains the explicit fixture path.
     gateway = await build_gateway()
-    await gateway.start()
     try:
+        await gateway.start()
         await gateway.server.run_streamable_http_async()
     finally:
         await _close_gateway_safely(gateway)
 
 
+def _handle_sigterm(_signum: int, _frame: Any) -> None:
+    """Make Uvicorn's post-capture SIGTERM unwind ``run_gateway`` cleanup."""
+
+    raise KeyboardInterrupt
+
+
 def main() -> None:
-    asyncio.run(run_gateway())
+    # Uvicorn handles SIGTERM while serving, then re-raises it after restoring
+    # the previous handler.  If that previous handler is the OS default, the
+    # process exits before ``run_gateway`` reaches its async ``finally`` and
+    # the durable runtime owner remains falsely active.  Keeping this handler
+    # installed as the previous handler makes the re-raised signal unwind the
+    # gateway cleanup path instead.
+    previous_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        try:
+            asyncio.run(run_gateway())
+        except KeyboardInterrupt:
+            # SIGINT/SIGTERM are an expected operator shutdown after the
+            # async gateway has released its resources. Do not turn that
+            # controlled lifecycle event into a traceback from the launcher.
+            return
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)

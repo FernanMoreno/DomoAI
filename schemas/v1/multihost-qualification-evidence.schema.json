@@ -1,0 +1,153 @@
+{
+  "$defs": {
+    "LeaseScope": {
+      "additionalProperties": false,
+      "description": "The smallest authority scope that may have one physical owner.",
+      "properties": {
+        "tenant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "deployment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Deployment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "household_id",
+        "deployment_id"
+      ],
+      "title": "LeaseScope",
+      "type": "object"
+    },
+    "MultiHostQualificationCheck": {
+      "additionalProperties": false,
+      "description": "One bounded observation from an external multi-host qualification run.",
+      "properties": {
+        "check_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Check Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/MultiHostQualificationCheckStatus"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "check_id",
+        "status"
+      ],
+      "title": "MultiHostQualificationCheck",
+      "type": "object"
+    },
+    "MultiHostQualificationCheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked"
+      ],
+      "title": "MultiHostQualificationCheckStatus",
+      "type": "string"
+    },
+    "MultiHostQualificationStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked"
+      ],
+      "title": "MultiHostQualificationStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A scope-bound proof that active-passive multi-host gates passed.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "qualification_environment": {
+      "default": "production",
+      "enum": [
+        "production",
+        "lab"
+      ],
+      "title": "Qualification Environment",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/LeaseScope"
+    },
+    "gateway_identity": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Gateway Identity",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/MultiHostQualificationCheck"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Checks",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/MultiHostQualificationStatus",
+      "default": "blocked"
+    },
+    "evidence_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Digest"
+    }
+  },
+  "required": [
+    "scope",
+    "gateway_identity",
+    "completed_at",
+    "expires_at",
+    "checks"
+  ],
+  "title": "MultiHostQualificationEvidence",
+  "type": "object"
+}

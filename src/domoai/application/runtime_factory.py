@@ -27,19 +27,25 @@ from domoai.adapters.matter.transport import MatterServerWebSocketTransport
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.modbus.config import load_mapping as load_modbus_mapping
 from domoai.adapters.modbus.transport import PyModbusTcpTransport
+from domoai.adapters.mqtt.adapter import GenericMqttAdapter
+from domoai.adapters.mqtt.config import load_mapping as load_mqtt_mapping
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
-from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
 from domoai.application.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.application.commissioning import (
     CommissioningPersistenceError,
+    CommissioningQualificationRepository,
     CommissioningService,
 )
+from domoai.application.coordination import FencingGuard
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.dynamic_safety import DynamicSafetyGuard
+from domoai.application.etcd_coordination import build_external_lease_coordinator
 from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
+from domoai.application.household_queue import HouseholdWorkQueues
+from domoai.application.local_automation import LocalAutomationEngine
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.recovery import PlanRecoveryService
@@ -60,8 +66,10 @@ from domoai.config.safety_kernel_loader import load_safety_limits_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
 from domoai.domain.commissioning import CommissioningReport
+from domoai.domain.coordination import FencingToken, LeaseCoordinator, LeaseScope
 from domoai.domain.energy import DispatchableBatteryBinding, EVActuator, EVChargingBinding
-from domoai.domain.models import Plan
+from domoai.domain.models import AuthorityContext, Plan, PrincipalRole
+from domoai.domain.multihost_qualification import load_multihost_qualification_evidence
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
     OpenMeteoHttpClient,
@@ -76,10 +84,19 @@ from domoai.optimizer.providers import (
     StateStoreBatteryProvider,
     StateStoreEVProvider,
 )
-from domoai.persistence.backup import BackupManifest, BackupService, BackupSource
+from domoai.persistence.backup import (
+    BackupManifest,
+    BackupService,
+    BackupSource,
+    load_backup_encryption_key,
+)
+from domoai.persistence.coordination import MetricHistoryRepository, PhysicalIntentRepository
+from domoai.persistence.postgres import PostgresDatabase
+from domoai.persistence.qualification import SQLiteCommissioningQualificationRepository
 from domoai.persistence.repositories import (
     ApprovalGrantRepository,
     AuditEventRepository,
+    AutomationRuleRepository,
     BundleCommitRepository,
     DeviceRepository,
     ExecutionOutcomeRepository,
@@ -89,6 +106,7 @@ from domoai.persistence.repositories import (
     RuntimeStateMetadataRepository,
     RuntimeStatePersistenceRepository,
     ScheduledPlanRepository,
+    StateHistoryRepository,
     StateSnapshotRepository,
 )
 from domoai.persistence.serialized import SerializedRepositoryProxy, SerializedStorageExecutor
@@ -108,6 +126,9 @@ from domoai.runtime.control_takeover import (
     EVControlCoordinator,
 )
 from domoai.runtime.events import AuditLog
+from domoai.runtime.instance import InstanceIdentity
+from domoai.runtime.mqtt_transport import AiomqttTransport
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 from domoai.runtime.ports import AdapterPort
 from domoai.runtime.provider_sdk import ProviderRegistry
 from domoai.runtime.registry import DeviceRegistry
@@ -154,9 +175,7 @@ def _select_control_adapter(adapter: AdapterPort, provider_id: str) -> ControlTa
 
     candidate = _select_provider_adapter(adapter, provider_id)
     if not callable(getattr(candidate, "acquire_control", None)):
-        raise ValueError(
-            f"Battery provider {provider_id!r} does not expose the takeover contract"
-        )
+        raise ValueError(f"Battery provider {provider_id!r} does not expose the takeover contract")
     return cast(ControlTakeoverAdapter, candidate)
 
 
@@ -178,6 +197,106 @@ def _select_provider_adapter(adapter: AdapterPort, provider_id: str) -> AdapterP
     return cast(AdapterPort, candidate)
 
 
+async def _close_partial_runtime_build(
+    *,
+    adapter: AdapterPort | None,
+    ownership: RuntimeOwnership | None,
+    energy_closers: tuple[Callable[[], None], ...],
+    storage: SerializedStorageExecutor | None,
+    audit_storage: SerializedStorageExecutor | None,
+    database: SQLiteDatabase | None,
+    approval_database: SQLiteDatabase | None,
+    audit_database: SQLiteDatabase | None,
+    lease_coordinator: LeaseCoordinator | None = None,
+    coordination_token: FencingToken | None = None,
+    household_work_queues: HouseholdWorkQueues | None = None,
+) -> None:
+    """Release resources acquired before a runtime build was interrupted."""
+
+    async def attempt(action: Callable[[], object]) -> None:
+        try:
+            result = action()
+            if asyncio.iscoroutine(result):
+                await result
+        except BaseException:
+            # Preserve the original startup failure. Cleanup is best effort
+            # here, while each normal RuntimeComposition.close() path still
+            # reports its own failure to the caller.
+            return
+
+    if adapter is not None:
+        await attempt(adapter.disconnect)
+    if ownership is not None:
+        await attempt(ownership.release)
+    if lease_coordinator is not None and coordination_token is not None:
+        await attempt(lambda: lease_coordinator.release(coordination_token))
+    close_coordinator = getattr(lease_coordinator, "aclose", None)
+    if callable(close_coordinator):
+        await attempt(close_coordinator)
+    if household_work_queues is not None:
+        await attempt(household_work_queues.close)
+    for close in energy_closers:
+        await attempt(close)
+    if storage is not None:
+        await attempt(storage.close)
+    if audit_storage is not None:
+        await attempt(audit_storage.close)
+    if database is not None:
+        await attempt(database.close)
+    if approval_database is not None:
+        await attempt(approval_database.close)
+    if audit_database is not None:
+        await attempt(audit_database.close)
+
+
+@dataclass
+class _PartialRuntimeBuild:
+    """Track every resource acquired before RuntimeComposition takes ownership."""
+
+    adapter: AdapterPort | None = None
+    ownership: RuntimeOwnership | None = None
+    energy_closers: tuple[Callable[[], None], ...] = ()
+    storage: SerializedStorageExecutor | None = None
+    audit_storage: SerializedStorageExecutor | None = None
+    database: SQLiteDatabase | None = None
+    approval_database: SQLiteDatabase | None = None
+    audit_database: SQLiteDatabase | None = None
+    lease_coordinator: LeaseCoordinator | None = None
+    coordination_token: FencingToken | None = None
+    household_work_queues: HouseholdWorkQueues | None = None
+    active: bool = True
+
+    async def close(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        await _close_partial_runtime_build(
+            adapter=self.adapter,
+            ownership=self.ownership,
+            energy_closers=self.energy_closers,
+            storage=self.storage,
+            audit_storage=self.audit_storage,
+            database=self.database,
+            approval_database=self.approval_database,
+            audit_database=self.audit_database,
+            lease_coordinator=self.lease_coordinator,
+            coordination_token=self.coordination_token,
+            household_work_queues=self.household_work_queues,
+        )
+
+
+async def _close_partial_runtime_build_safely(cleanup: _PartialRuntimeBuild) -> None:
+    """Drain startup cleanup even when cancellation is delivered repeatedly."""
+
+    cleanup_task = asyncio.create_task(cleanup.close())
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    cleanup_task.result()
+
+
 def _matching_home_assistant_ev_mappings(
     mapping_document: HomeAssistantMappingDocument,
     bindings: tuple[EVChargingBinding, ...],
@@ -186,9 +305,7 @@ def _matching_home_assistant_ev_mappings(
 
     mapping_bindings = getattr(mapping_document, "ev_charging_bindings", {})
     active_device_ids = {
-        binding.device_id
-        for binding in bindings
-        if binding.provider_id == "home_assistant"
+        binding.device_id for binding in bindings if binding.provider_id == "home_assistant"
     }
     return {
         str(binding_id): binding
@@ -232,12 +349,12 @@ def _create_configured_adapters(
                 mapping_document.battery_capacity_bindings if mapping_document else None
             ),
             battery_dispatch_bindings=(
-                    mapping_document.battery_dispatch_bindings
-                    if mapping_document is not None
-                    and dispatchable_battery_binding is not None
-                    and dispatchable_battery_binding.provider_id == "home_assistant"
-                    else None
-                ),
+                mapping_document.battery_dispatch_bindings
+                if mapping_document is not None
+                and dispatchable_battery_binding is not None
+                and dispatchable_battery_binding.provider_id == "home_assistant"
+                else None
+            ),
             ev_charging_bindings=(
                 _matching_home_assistant_ev_mappings(mapping_document, ev_charging_bindings)
                 if mapping_document is not None
@@ -292,6 +409,39 @@ def _create_configured_adapters(
                 base_topic=settings.zigbee2mqtt_base_topic,
                 discovery_timeout=settings.mqtt_timeout_seconds,
                 clock=clock,
+            )
+        )
+    if settings.generic_mqtt_url is not None or settings.generic_mqtt_mapping_path is not None:
+        if settings.generic_mqtt_url is None or settings.generic_mqtt_mapping_path is None:
+            raise ValueError(
+                "DOMOAI_GENERIC_MQTT_URL and DOMOAI_GENERIC_MQTT_MAPPING_PATH "
+                "must be configured together"
+            )
+        parsed = urlparse(settings.generic_mqtt_url)
+        if parsed.scheme not in {"mqtt", "mqtts"} or parsed.hostname is None:
+            raise ValueError("DOMOAI_GENERIC_MQTT_URL must be a valid mqtt:// or mqtts:// URL")
+        use_tls = parsed.scheme == "mqtts"
+        adapters.append(
+            GenericMqttAdapter(
+                AiomqttTransport(
+                    parsed.hostname,
+                    port=parsed.port or (8883 if use_tls else 1883),
+                    username=settings.mqtt_username,
+                    password=(
+                        settings.mqtt_password.get_secret_value()
+                        if settings.mqtt_password
+                        else None
+                    ),
+                    timeout=settings.mqtt_timeout_seconds,
+                    tls=use_tls,
+                    ca_cert_path=settings.mqtt_ca_cert_path,
+                    client_cert_path=settings.mqtt_client_cert_path,
+                    client_key_path=settings.mqtt_client_key_path,
+                    tls_insecure=settings.mqtt_tls_insecure,
+                ),
+                load_mqtt_mapping(settings.generic_mqtt_mapping_path),
+                clock=clock,
+                discovery_timeout=settings.mqtt_timeout_seconds,
             )
         )
     if settings.matter_server_url is not None:
@@ -421,6 +571,7 @@ class RuntimeComposition:
     plan_repository: PlanRepository
     outcome_repository: ExecutionOutcomeRepository
     device_repository: DeviceRepository
+    state_history_repository: StateHistoryRepository
     state_snapshot_repository: StateSnapshotRepository
     runtime_state_metadata_repository: RuntimeStateMetadataRepository
     scheduled_plan_repository: ScheduledPlanRepository
@@ -432,12 +583,18 @@ class RuntimeComposition:
     registry: DeviceRegistry
     provider_registry: ProviderRegistry
     state_store: StateStore
+    operational_metrics: RuntimeOperationalMetrics
     audit: AuditLog
     discovery: DiscoveryService
     plan_service: PlanService
     facade: DomoticsFacade
     event_consumer: RuntimeEventConsumer
     scheduler: Scheduler
+    physical_intent_repository: PhysicalIntentRepository | None = None
+    metric_history_repository: MetricHistoryRepository | None = None
+    household_work_queues: HouseholdWorkQueues | None = None
+    automation_rule_repository: AutomationRuleRepository | None = None
+    local_automation: LocalAutomationEngine | None = None
     state_refresher: RuntimeStateRefresher | None = None
     energy_context_provider: EnergyContextProvider | None = None
     battery_provider: BatteryProvider | None = None
@@ -450,11 +607,15 @@ class RuntimeComposition:
     bootstrap_manifest: RuntimeBootstrapManifest | None = None
     commissioning_service: CommissioningService | None = None
     commissioning_report: CommissioningReport | None = None
+    qualification_repository: CommissioningQualificationRepository | None = None
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None
     ev_actuators: tuple[EVActuator, ...] = ()
     battery_control_coordinator: BatteryControlCoordinator | None = None
     ev_control_coordinators: tuple[EVControlCoordinator, ...] = ()
     control_supervisor: ControlSupervisorPort | None = None
+    lease_coordinator: LeaseCoordinator | None = None
+    coordination_token: FencingToken | None = None
+    fencing_guard: FencingGuard | None = None
     blocking_workers: list[ClosableWorker] = field(default_factory=list)
     ownership: RuntimeOwnership | None = None
     lifecycle: RuntimeLifecycle = field(init=False, repr=False)
@@ -467,8 +628,11 @@ class RuntimeComposition:
                 self.state_refresher.run if self.state_refresher is not None else None
             ),
             supervisor_runner=(
-                self.run_control_supervisor
-                if self.control_supervisor is not None
+                self.run_control_supervisor if self.control_supervisor is not None else None
+            ),
+            coordination_runner=(
+                self.run_coordination_supervisor
+                if self.lease_coordinator is not None and self.fencing_guard is not None
                 else None
             ),
         )
@@ -490,7 +654,12 @@ class RuntimeComposition:
         an agent.
         """
 
-        return await BackupService(clock=self.clock).create(
+        encryption_key = (
+            load_backup_encryption_key(self.settings.backup_encryption_key_file)
+            if self.settings.backup_encryption_key_file is not None
+            else None
+        )
+        return await BackupService(clock=self.clock, encryption_key=encryption_key).create(
             sources=(
                 BackupSource("operational", self.database, self.storage),
                 BackupSource("audit", self.audit_database, self.audit_storage),
@@ -542,11 +711,7 @@ class RuntimeComposition:
             getattr(coordinator, "policy", None)
             for coordinator in getattr(supervisor, "coordinators", (supervisor,))
         ]
-        lease_seconds = [
-            float(policy.lease_seconds)
-            for policy in policies
-            if policy is not None
-        ]
+        lease_seconds = [float(policy.lease_seconds) for policy in policies if policy is not None]
         interval = min(max(min(lease_seconds, default=300.0) / 4, 0.25), 30.0)
         while True:
             stopped = await supervisor.supervise_once()
@@ -558,6 +723,25 @@ class RuntimeComposition:
                     payload={"reason": "lease_renewal_unavailable_or_failed"},
                 )
             await asyncio.sleep(interval)
+
+    async def run_coordination_supervisor(self) -> None:
+        coordinator = self.lease_coordinator
+        guard = self.fencing_guard
+        token = self.coordination_token
+        if coordinator is None or guard is None or token is None:
+            return
+        interval = min(max(self.settings.coordination_lease_seconds / 3, 0.25), 30.0)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                token = await coordinator.renew(token)
+                guard.replace_token(token)
+                self.coordination_token = token
+                self.operational_metrics.record_fencing("renewed")
+            except BaseException:
+                guard.mark_lost()
+                self.operational_metrics.record_fencing("renewal_failed")
+                return
 
     async def close(self) -> None:
         await self.lifecycle.close()
@@ -572,6 +756,16 @@ class RuntimeComposition:
             # never leave a false active owner that blocks the next bootstrap.
             if self.ownership is not None:
                 await self.ownership.release()
+            if self.lease_coordinator is not None and self.coordination_token is not None:
+                try:
+                    await self.lease_coordinator.release(self.coordination_token)
+                except BaseException:
+                    self.operational_metrics.record_fencing("lease_lost")
+            close_coordinator = getattr(self.lease_coordinator, "aclose", None)
+            if callable(close_coordinator):
+                await close_coordinator()
+            if self.household_work_queues is not None:
+                await self.household_work_queues.close()
             for worker in self.blocking_workers:
                 await asyncio.to_thread(worker.close)
             for close in self.energy_closers:
@@ -598,10 +792,15 @@ def _battery_operational_status(
         if not any(capability.name == "battery.soc" for capability in device.capabilities):
             continue
         snapshot = state_store.peek(device.id, "battery.soc")
-        if snapshot is not None and snapshot.value is not None and snapshot.status.value in {
-            "current",
-            "stale",
-        }:
+        if (
+            snapshot is not None
+            and snapshot.value is not None
+            and snapshot.status.value
+            in {
+                "current",
+                "stale",
+            }
+        ):
             return "observed-only"
     return "unconfigured"
 
@@ -618,10 +817,85 @@ async def build_runtime(
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     clock: Clock | None = None,
     require_configured_adapter: bool = False,
+    lease_coordinator: LeaseCoordinator | None = None,
+) -> RuntimeComposition:
+    """Build a runtime and release every partial resource on failure."""
+
+    cleanup = _PartialRuntimeBuild()
+    try:
+        return await _build_runtime(
+            settings,
+            adapter=adapter,
+            energy_context_provider=energy_context_provider,
+            dispatchable_battery_binding=dispatchable_battery_binding,
+            ev_actuators=ev_actuators,
+            ev_charging_bindings=ev_charging_bindings,
+            operator_principal_provider=operator_principal_provider,
+            operator_approval_assertion_provider=operator_approval_assertion_provider,
+            clock=clock,
+            require_configured_adapter=require_configured_adapter,
+            lease_coordinator=lease_coordinator,
+            _cleanup=cleanup,
+        )
+    except BaseException:
+        await _close_partial_runtime_build_safely(cleanup)
+        raise
+    else:
+        cleanup.active = False
+
+
+async def _build_runtime(
+    settings: Settings | None = None,
+    *,
+    adapter: AdapterPort | None = None,
+    energy_context_provider: EnergyContextProvider | None = None,
+    dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
+    ev_actuators: tuple[EVActuator, ...] = (),
+    ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
+    operator_principal_provider: OperatorPrincipalProvider | None = None,
+    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
+    clock: Clock | None = None,
+    require_configured_adapter: bool = False,
+    lease_coordinator: LeaseCoordinator | None = None,
+    _cleanup: _PartialRuntimeBuild,
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
-    bootstrap = RuntimeBootstrap.resolve(resolved_settings)
+    bootstrap = RuntimeBootstrap.resolve(
+        resolved_settings,
+        explicit_battery_binding=dispatchable_battery_binding is not None,
+    )
     resolved_settings = bootstrap.settings
+    injected_lease_coordinator = lease_coordinator is not None
+    if resolved_settings.multi_host_production_enabled:
+        assert resolved_settings.multi_host_qualification_evidence_path is not None
+        assert resolved_settings.multi_host_gateway_identity is not None
+        qualification_scope = LeaseScope(
+            tenant_id=resolved_settings.mcp_tenant_id,
+            household_id=resolved_settings.mcp_household_id,
+            deployment_id=resolved_settings.mcp_deployment_id,
+        )
+        qualification_evidence = load_multihost_qualification_evidence(
+            resolved_settings.multi_host_qualification_evidence_path
+        )
+        qualification_clock = clock or SystemClock()
+        if not qualification_evidence.qualifies(
+            qualification_scope,
+            gateway_identity=resolved_settings.multi_host_gateway_identity,
+            now=qualification_clock.now(),
+        ):
+            raise ValueError(
+                "multi-host production requires matching passed qualification evidence"
+            )
+    if resolved_settings.multi_host_enabled and lease_coordinator is None:
+        try:
+            lease_coordinator = build_external_lease_coordinator(resolved_settings)
+        except ValueError as error:
+            raise ValueError(
+                f"multi-host runtime requires an external lease coordinator: {error}"
+            ) from error
+    if resolved_settings.multi_host_enabled and lease_coordinator is None:
+        raise ValueError("multi-host runtime requires an external lease coordinator")
+    _cleanup.lease_coordinator = lease_coordinator
     if energy_context_provider is not None:
         # Spec 161: fail closed before any other startup side effect (no
         # SQLite file, no adapter connection) rather than accepting a
@@ -658,9 +932,7 @@ async def build_runtime(
     # JIT write guard and command allowlist.  Derive the actuator view from
     # every binding so settings-driven MCP/stdio deployments cannot lose that
     # boundary between configuration and execution.
-    ev_actuators = tuple(ev_actuators) + tuple(
-        binding.actuator for binding in ev_charging_bindings
-    )
+    ev_actuators = tuple(ev_actuators) + tuple(binding.actuator for binding in ev_charging_bindings)
     ev_device_ids = [actuator.device_id for actuator in ev_actuators]
     if len(ev_device_ids) != len(set(ev_device_ids)):
         raise ValueError("EV actuator bindings must target distinct devices")
@@ -691,6 +963,13 @@ async def build_runtime(
     if dispatchable_battery_binding is not None and not resolved_settings.energy_live:
         raise ValueError("dispatchable_battery_binding requires energy_live to be enabled")
     clock = clock or SystemClock()
+    instance_identity = InstanceIdentity.create(resolved_settings.instance_id, clock=clock)
+    operational_metrics = RuntimeOperationalMetrics(instance_identity=instance_identity)
+    household_work_queues = HouseholdWorkQueues(
+        max_per_household=resolved_settings.household_queue_max_per_household,
+        max_total=resolved_settings.household_queue_max_total,
+    )
+    _cleanup.household_work_queues = household_work_queues
     # Resolve the physical takeover owner before opening any runtime storage.
     # A provider identity in a binding must resolve to one concrete adapter;
     # falling back to the composite would turn a routing container into an
@@ -706,6 +985,11 @@ async def build_runtime(
         ev_charging_bindings=ev_charging_bindings,
         require_configured_adapter=require_configured_adapter,
     )
+    _cleanup.adapter = selected_adapter
+    if resolved_settings.multi_host_enabled and not bool(
+        getattr(selected_adapter, "supports_fencing", False)
+    ):
+        raise ValueError("multi-host runtime requires a fencing-aware adapter")
     selected_control_adapter: ControlTakeoverAdapter | None = None
     if dispatchable_battery_binding is not None and dispatchable_battery_binding.profile.actuator:
         selected_control_adapter = _select_control_adapter(
@@ -719,6 +1003,7 @@ async def build_runtime(
     state_store = StateStore(
         stale_after=timedelta(seconds=resolved_settings.state_stale_after_seconds),
         clock=clock,
+        operational_metrics=operational_metrics,
     )
     battery_provider = (
         StateStoreBatteryProvider.from_binding(
@@ -750,16 +1035,48 @@ async def build_runtime(
             ev_providers=ev_providers,
             clock=clock,
         )
-    database = SQLiteDatabase(
-        resolved_settings.database_path,
-        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-        clock=clock,
+    _cleanup.energy_closers = energy_closers
+    postgres_dsn = (
+        resolved_settings.postgres_dsn.get_secret_value()
+        if resolved_settings.postgres_dsn is not None
+        else None
     )
+    use_postgres_control_plane = resolved_settings.multi_host_enabled and postgres_dsn is not None
+    if resolved_settings.multi_host_enabled and not injected_lease_coordinator:
+        if postgres_dsn is None:
+            raise ValueError("multi-host runtime requires a PostgreSQL DSN")
+        postgres_sslrootcert = resolved_settings.postgres_sslrootcert
+        postgres_sslcert = resolved_settings.postgres_sslcert
+        postgres_sslkey = resolved_settings.postgres_sslkey
+        if any(path is None for path in (postgres_sslrootcert, postgres_sslcert, postgres_sslkey)):
+            raise ValueError("multi-host runtime requires PostgreSQL mTLS certificates")
+        assert postgres_sslrootcert is not None
+        assert postgres_sslcert is not None
+        assert postgres_sslkey is not None
+        postgres_dsn = PostgresDatabase.build_dsn(
+            postgres_dsn,
+            sslmode=resolved_settings.postgres_sslmode,
+            sslrootcert=postgres_sslrootcert,
+            sslcert=postgres_sslcert,
+            sslkey=postgres_sslkey,
+        )
+        use_postgres_control_plane = True
+    database: SQLiteDatabase = (
+        PostgresDatabase(postgres_dsn, clock=clock)
+        if use_postgres_control_plane and postgres_dsn is not None
+        else SQLiteDatabase(
+            resolved_settings.database_path,
+            busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+            clock=clock,
+        )
+    )
+    _cleanup.database = database
     storage = SerializedStorageExecutor(
         queue_capacity=resolved_settings.sqlite_worker_queue_capacity,
         queue_wait_seconds=resolved_settings.sqlite_worker_queue_wait_seconds,
         operation_timeout_seconds=resolved_settings.sqlite_operation_timeout_seconds,
     )
+    _cleanup.storage = storage
     # Audit gets its own admission queue/worker thread and its own SQLite
     # connection. Separate queues prevent admission starvation; separate
     # connections preserve the single-owner transaction invariant of each
@@ -770,21 +1087,33 @@ async def build_runtime(
         queue_wait_seconds=resolved_settings.sqlite_worker_queue_wait_seconds,
         operation_timeout_seconds=resolved_settings.sqlite_operation_timeout_seconds,
     )
+    _cleanup.audit_storage = audit_storage
     await storage.run_async(database.initialize)
-    audit_path = resolved_settings.audit_database_path or resolved_settings.database_path.with_name(
-        f"{resolved_settings.database_path.stem}-audit{resolved_settings.database_path.suffix}"
-    )
-    audit_database = SQLiteDatabase(
-        audit_path,
-        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-        clock=clock,
-    )
+    if use_postgres_control_plane and postgres_dsn is not None:
+        audit_database: SQLiteDatabase = PostgresDatabase(postgres_dsn, clock=clock)
+    else:
+        audit_path = resolved_settings.audit_database_path or (
+            resolved_settings.database_path.with_name(
+                f"{resolved_settings.database_path.stem}-audit{resolved_settings.database_path.suffix}"
+            )
+        )
+        audit_database = SQLiteDatabase(
+            audit_path,
+            busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+            clock=clock,
+        )
+    _cleanup.audit_database = audit_database
     await audit_storage.run_async(audit_database.initialize)
-    approval_database = SQLiteDatabase(
-        resolved_settings.database_path,
-        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-        clock=clock,
+    approval_database: SQLiteDatabase = (
+        PostgresDatabase(postgres_dsn, clock=clock)
+        if use_postgres_control_plane and postgres_dsn is not None
+        else SQLiteDatabase(
+            resolved_settings.database_path,
+            busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+            clock=clock,
+        )
     )
+    _cleanup.approval_database = approval_database
     await approval_database.initialize()
     raw_audit_repository = AuditEventRepository(audit_database)
     raw_approval_repository = ApprovalGrantRepository(approval_database)
@@ -797,11 +1126,26 @@ async def build_runtime(
         allow_legacy_token=resolved_settings.allow_legacy_operator_token,
         clock=clock,
         persistence=raw_approval_repository,
+        operational_metrics=operational_metrics,
     )
     raw_device_repository = DeviceRepository(database, clock=clock)
-    raw_state_snapshot_repository = StateSnapshotRepository(database)
+    raw_state_history_repository = StateHistoryRepository(
+        database,
+        household_id=resolved_settings.mcp_household_id,
+        retention_days=resolved_settings.privacy_retention_days,
+        clock=clock,
+    )
+    raw_state_snapshot_repository = StateSnapshotRepository(
+        database,
+        history_repository=raw_state_history_repository,
+    )
     raw_runtime_state_metadata_repository = RuntimeStateMetadataRepository(database, clock=clock)
-    raw_state_persistence_repository = RuntimeStatePersistenceRepository(database, clock=clock)
+    raw_state_persistence_repository = RuntimeStatePersistenceRepository(
+        database,
+        clock=clock,
+        history_repository=raw_state_history_repository,
+    )
+    raw_qualification_repository = SQLiteCommissioningQualificationRepository(database)
     audit_repository = cast(
         AuditEventRepository, SerializedRepositoryProxy(raw_audit_repository, audit_storage)
     )
@@ -811,9 +1155,17 @@ async def build_runtime(
     state_snapshot_repository = cast(
         StateSnapshotRepository, SerializedRepositoryProxy(raw_state_snapshot_repository, storage)
     )
+    state_history_repository = cast(
+        StateHistoryRepository,
+        SerializedRepositoryProxy(raw_state_history_repository, storage),
+    )
     runtime_state_metadata_repository = cast(
         RuntimeStateMetadataRepository,
         SerializedRepositoryProxy(raw_runtime_state_metadata_repository, storage),
+    )
+    qualification_repository = cast(
+        CommissioningQualificationRepository,
+        SerializedRepositoryProxy(raw_qualification_repository, storage),
     )
     state_persistence_repository = SerializedRepositoryProxy(
         raw_state_persistence_repository, storage
@@ -822,19 +1174,29 @@ async def build_runtime(
     state_store.bind_persistence(state_persistence_repository)
     registry.load_persisted(await device_repository.list_all())
     ownership_repository = RuntimeOwnershipRepository(database, clock=clock)
-    try:
-        ownership = await RuntimeOwnership.acquire(
-            ownership_repository,
-            resolved_settings,
-            adapter_id=selected_adapter.adapter_id,
+    ownership = await RuntimeOwnership.acquire(
+        ownership_repository,
+        resolved_settings,
+        adapter_id=selected_adapter.adapter_id,
+    )
+    _cleanup.ownership = ownership
+    coordination_token: FencingToken | None = None
+    fencing_guard: FencingGuard | None = None
+    active_lease_coordinator = lease_coordinator if resolved_settings.multi_host_enabled else None
+    if active_lease_coordinator is not None:
+        coordination_token = await active_lease_coordinator.acquire(
+            LeaseScope(
+                tenant_id=resolved_settings.mcp_tenant_id,
+                household_id=resolved_settings.mcp_household_id,
+                deployment_id=resolved_settings.mcp_deployment_id,
+            ),
+            owner_id=ownership.owner_id,
+            ttl_seconds=resolved_settings.coordination_lease_seconds,
         )
-    except Exception:
-        await storage.close()
-        await audit_storage.close()
-        await database.close()
-        await approval_database.close()
-        await audit_database.close()
-        raise
+        _cleanup.lease_coordinator = active_lease_coordinator
+        _cleanup.coordination_token = coordination_token
+        fencing_guard = FencingGuard(active_lease_coordinator, coordination_token)
+        operational_metrics.record_fencing("acquire")
     if isinstance(selected_adapter, CompositeAdapter):
         selected_adapter.bind_registry(registry)
     runtime_state_metadata = await runtime_state_metadata_repository.get()
@@ -869,9 +1231,17 @@ async def build_runtime(
             or resolved_settings.database_path.with_name("commissioning-manifest.json")
         ),
     )
+    runtime_authority = AuthorityContext(
+        tenant_id=resolved_settings.mcp_tenant_id,
+        household_id=resolved_settings.mcp_household_id,
+        household_ids=[resolved_settings.mcp_household_id],
+        principal_id="runtime",
+        roles=[PrincipalRole.SERVICE],
+    )
     try:
         commissioning_report = commissioning_service.inspect(
-            runtime_revision=state_store.runtime_revision
+            runtime_revision=state_store.runtime_revision,
+            authority=runtime_authority,
         )
     except CommissioningPersistenceError as error:
         # A diagnostic report must not prevent a safe runtime from starting or
@@ -879,6 +1249,7 @@ async def build_runtime(
         # memory and leave the bounded persistence failure in the audit lane.
         commissioning_report = commissioning_service.inspect(
             runtime_revision=state_store.runtime_revision,
+            authority=runtime_authority,
             persist=False,
         )
         audit.append(
@@ -937,11 +1308,21 @@ async def build_runtime(
     plan_repository = cast(
         PlanRepository, SerializedRepositoryProxy(PlanRepository(database, clock=clock), storage)
     )
-    await PlanRecoveryService(plan_repository, audit).recover_orphaned_plans()
+    plan_recovery = PlanRecoveryService(plan_repository, audit)
+    await plan_recovery.recover_orphaned_plans()
     outcome_repository = cast(
         ExecutionOutcomeRepository,
         SerializedRepositoryProxy(ExecutionOutcomeRepository(database), storage),
     )
+    physical_intent_repository = cast(
+        PhysicalIntentRepository,
+        SerializedRepositoryProxy(PhysicalIntentRepository(database, clock=clock), storage),
+    )
+    metric_history_repository = cast(
+        MetricHistoryRepository,
+        SerializedRepositoryProxy(MetricHistoryRepository(database, clock=clock), storage),
+    )
+    await physical_intent_repository.recover_inflight()
     if resolved_settings.safety_limits_path is not None:
         safety_limits = load_safety_limits_file(resolved_settings.safety_limits_path)
     else:
@@ -961,6 +1342,19 @@ async def build_runtime(
         BundleCommitRepository,
         SerializedRepositoryProxy(BundleCommitRepository(database, clock=clock), storage),
     )
+    bundle_recovery = BundleRecoveryService(
+        bundle_repository=bundle_commit_repository,
+        plan_repository=plan_repository,
+        scheduled_repository=scheduled_plan_repository,
+        audit=audit,
+        approval_store=approval_store,
+        operational_metrics=operational_metrics,
+    )
+
+    async def reconcile_runtime() -> None:
+        await plan_recovery.reconcile(reason="periodic_recovery")
+        await bundle_recovery.recover_orphaned_bundles()
+
     battery_control_coordinator = None
     if dispatchable_battery_binding is not None:
         actuator = dispatchable_battery_binding.profile.actuator
@@ -988,8 +1382,7 @@ async def build_runtime(
                 power_feedback_capability=actuator.power_feedback_capability,
                 power_feedback_source_ref=(
                     feedback_routes[0].source_ref
-                    if len(feedback_routes) == 1
-                    and feedback_routes[0].available
+                    if len(feedback_routes) == 1 and feedback_routes[0].available
                     else None
                 ),
                 power_feedback_tolerance_kw=actuator.power_feedback_tolerance_kw,
@@ -1031,9 +1424,7 @@ async def build_runtime(
             ev_adapter,
             binding.control_policy,
             device_id=binding.device_id,
-            command_names=frozenset(
-                {ev_actuator.charge_command, ev_actuator.stop_command}
-            ),
+            command_names=frozenset({ev_actuator.charge_command, ev_actuator.stop_command}),
             stop_command=ev_actuator.stop_command,
             stop_unit=ev_actuator.power_unit,
             state_store=state_store,
@@ -1063,6 +1454,9 @@ async def build_runtime(
         bundle_repository=bundle_commit_repository,
         approval_store=approval_store,
         audit=audit,
+        clock=clock,
+        fencing_guard=fencing_guard,
+        operational_metrics=operational_metrics,
     )
     executor = PlanExecutor(
         selected_adapter,
@@ -1093,11 +1487,14 @@ async def build_runtime(
             else None
         ),
         execution_admission=execution_admission,
+        operational_metrics=operational_metrics,
+        fencing_guard=fencing_guard,
+        physical_intent_repository=(
+            physical_intent_repository if fencing_guard is not None else None
+        ),
+        household_work_queues=household_work_queues,
     )
     facade = DomoticsFacade(plan_service, executor)
-    event_consumer = RuntimeEventConsumer(
-        selected_adapter, discovery, state_store, audit, clock=clock
-    )
     state_refresher = RuntimeStateRefresher(
         discovery,
         state_store,
@@ -1106,10 +1503,32 @@ async def build_runtime(
         inventory_refresh_interval_seconds=resolved_settings.inventory_refresh_interval_seconds,
         adapter=selected_adapter,
         clock=clock,
+        retention_maintenance=state_history_repository.purge_expired,
     )
     recurring_schedule_repository = cast(
         RecurringScheduleRepository,
         SerializedRepositoryProxy(RecurringScheduleRepository(database, clock=clock), storage),
+    )
+    automation_rule_repository = cast(
+        AutomationRuleRepository,
+        SerializedRepositoryProxy(AutomationRuleRepository(database, clock=clock), storage),
+    )
+    local_automation = LocalAutomationEngine(
+        automation_rule_repository,
+        plan_service,
+        executor,
+        audit,
+        plan_repository=plan_repository,
+        state_store=state_store,
+        clock=clock,
+    )
+    event_consumer = RuntimeEventConsumer(
+        selected_adapter,
+        discovery,
+        state_store,
+        audit,
+        clock=clock,
+        automation_handler=local_automation.handle_state_event,
     )
     scheduler = Scheduler(
         executor,
@@ -1120,6 +1539,8 @@ async def build_runtime(
         recurring_repository=recurring_schedule_repository,
         bundle_repository=bundle_commit_repository,
         execution_admission=execution_admission,
+        recovery_runner=reconcile_runtime,
+        local_automation_runner=local_automation.evaluate_time,
         clock=clock,
     )
     plans: dict[str, Plan] = {}
@@ -1132,13 +1553,9 @@ async def build_runtime(
         audit=audit,
         plan_repository=plan_repository,
         clock=clock,
+        operational_metrics=operational_metrics,
     )
-    await BundleRecoveryService(
-        bundle_repository=bundle_commit_repository,
-        plan_repository=plan_repository,
-        scheduled_repository=scheduled_plan_repository,
-        audit=audit,
-    ).recover_orphaned_bundles()
+    await bundle_recovery.recover_orphaned_bundles()
     battery_operational_status = _battery_operational_status(
         registry,
         state_store,
@@ -1157,6 +1574,7 @@ async def build_runtime(
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
         device_repository=device_repository,
+        state_history_repository=state_history_repository,
         state_snapshot_repository=state_snapshot_repository,
         runtime_state_metadata_repository=runtime_state_metadata_repository,
         scheduled_plan_repository=scheduled_plan_repository,
@@ -1165,15 +1583,21 @@ async def build_runtime(
         approval_store=approval_store,
         plans=plans,
         recurring_schedule_repository=recurring_schedule_repository,
+        automation_rule_repository=automation_rule_repository,
         registry=registry,
         provider_registry=provider_registry,
         state_store=state_store,
+        operational_metrics=operational_metrics,
+        physical_intent_repository=physical_intent_repository,
+        metric_history_repository=metric_history_repository,
+        household_work_queues=household_work_queues,
         audit=audit,
         discovery=discovery,
         plan_service=plan_service,
         facade=facade,
         event_consumer=event_consumer,
         scheduler=scheduler,
+        local_automation=local_automation,
         state_refresher=state_refresher,
         energy_context_provider=energy_context_provider,
         battery_provider=battery_provider,
@@ -1186,11 +1610,15 @@ async def build_runtime(
         bootstrap_manifest=bootstrap.manifest,
         commissioning_service=commissioning_service,
         commissioning_report=commissioning_report,
+        qualification_repository=qualification_repository,
         dispatchable_battery_binding=dispatchable_battery_binding,
         ev_actuators=ev_actuators,
         battery_control_coordinator=battery_control_coordinator,
         ev_control_coordinators=tuple(ev_control_coordinators),
         control_supervisor=control_supervisor,
+        lease_coordinator=active_lease_coordinator,
+        coordination_token=coordination_token,
+        fencing_guard=fencing_guard,
         ownership=ownership,
     )
     return runtime

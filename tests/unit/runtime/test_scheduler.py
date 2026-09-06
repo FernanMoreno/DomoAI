@@ -12,6 +12,7 @@ from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
+from domoai.application.recurrence import recurrence_digest, recurring_template_digest
 from domoai.application.scheduler import Scheduler
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
@@ -175,11 +176,10 @@ class _FailingExecutorWrapper:
         self._failing_plan_prefix = failing_plan_prefix
         self.plan_service = real_executor.plan_service
 
-    async def execute(self, plan: Plan, *, aggregate_owner: bool = False):
-        assert aggregate_owner is True
+    async def execute(self, plan: Plan, *, aggregate_capability=None):
         if plan.id.startswith(self._failing_plan_prefix):
             raise RuntimeError("simulated unexpected execution failure")
-        return await self._real.execute(plan)
+        return await self._real.execute(plan, aggregate_capability=aggregate_capability)
 
 
 @pytest.mark.asyncio
@@ -706,6 +706,173 @@ async def test_due_recurring_schedule_executes_and_advances(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recurring_repository_is_idempotent_only_for_same_authority(tmp_path) -> None:
+    _adapter, plan_service, scheduler, _repository, _audit = await _build_scheduler(tmp_path)
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    command = _command(device_id, plan_id="recurring-authority")
+    first_time = datetime.now(UTC) + timedelta(hours=1)
+    second_time = first_time + timedelta(hours=1)
+    authority = {"schema": "standing-automation-authority-v1", "template_digest": "sha256:a"}
+    repository = scheduler.recurring_repository
+    assert repository is not None
+
+    await repository.create("recurring-authority", [command], rule, first_time, authority)
+    await repository.create("recurring-authority", [command], rule, second_time, authority)
+
+    stored = await repository.get("recurring-authority")
+    assert stored is not None and stored[2] == first_time
+    assert await repository.get_authority("recurring-authority") == authority
+
+    with pytest.raises(ValueError, match="conflicts"):
+        await repository.create(
+            "recurring-authority",
+            [command],
+            rule,
+            second_time,
+            {**authority, "template_digest": "sha256:changed"},
+        )
+
+    assert await repository.cancel("recurring-authority") is True
+    await repository.create("recurring-authority", [command], rule, second_time, authority)
+    reactivated = await repository.get("recurring-authority")
+    assert reactivated is not None and reactivated[3] == "active"
+    assert reactivated[2] == second_time
+
+
+@pytest.mark.asyncio
+async def test_expired_standing_authority_never_dispatches_an_occurrence(tmp_path) -> None:
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(
+        tmp_path, clock=clock
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    schedule_id = "recurring-expired-authority"
+    command = _command(device_id, plan_id=schedule_id)
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    template_digest = recurring_template_digest([command])
+    authority = {
+        "schema": "standing-automation-authority-v1",
+        "plan_id": schedule_id,
+        "template_digest": template_digest,
+        "recurrence_digest": recurrence_digest(
+            schedule_id, rule, template_digest=template_digest
+        ),
+        "validation_digest": "sha256:validation",
+        "owner": "operator",
+        "approval_id": "approval-expired-authority",
+        "expires_at": (now - timedelta(seconds=1)).isoformat(),
+    }
+    repository = scheduler.recurring_repository
+    assert repository is not None
+    await repository.create(
+        schedule_id,
+        [command],
+        rule,
+        now - timedelta(minutes=1),
+        authority,
+    )
+
+    results = await scheduler.run_due()
+
+    assert results == []
+    recurring_results = await scheduler.run_due_recurring()
+    assert recurring_results == [{"schedule_id": schedule_id, "outcome": "authority_expired"}]
+    assert adapter.calls == []
+    assert any(event.event_type == "recurring_authority_expired" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_malformed_standing_authority_expiry_fails_closed(tmp_path) -> None:
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter, plan_service, scheduler, _repository, audit = await _build_scheduler(
+        tmp_path, clock=clock
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    schedule_id = "recurring-malformed-authority"
+    command = _command(device_id, plan_id=schedule_id)
+    rule = RecurrenceRule(time_of_day=time(0, 0), timezone="UTC")
+    template_digest = recurring_template_digest([command])
+    authority = {
+        "schema": "standing-automation-authority-v1",
+        "plan_id": schedule_id,
+        "template_digest": template_digest,
+        "recurrence_digest": recurrence_digest(
+            schedule_id, rule, template_digest=template_digest
+        ),
+        "validation_digest": "sha256:validation",
+        "owner": "operator",
+        "approval_id": "approval-malformed-authority",
+        "expires_at": "2026-08-24T11:59:59",
+    }
+    repository = scheduler.recurring_repository
+    assert repository is not None
+    await repository.create(
+        schedule_id,
+        [command],
+        rule,
+        now - timedelta(minutes=1),
+        authority,
+    )
+
+    results = await scheduler.run_due_recurring()
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "authority_expired"}]
+    assert adapter.calls == []
+    assert any(event.event_type == "recurring_authority_expired" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_standing_authority_without_rule_expiry_survives_grant_ttl(tmp_path) -> None:
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter, plan_service, scheduler, _repository, _audit = await _build_scheduler(
+        tmp_path, clock=clock
+    )
+    device_id = next(
+        device.id for device in plan_service.registry.devices if device.type.value == "light"
+    )
+    schedule_id = "recurring-standing-without-expiry"
+    command = _command(device_id, plan_id=schedule_id)
+    rule = RecurrenceRule(time_of_day=time(12, 1), timezone="UTC")
+    template_digest = recurring_template_digest([command])
+    authority = {
+        "schema": "standing-automation-authority-v1",
+        "plan_id": schedule_id,
+        "template_digest": template_digest,
+        "recurrence_digest": recurrence_digest(
+            schedule_id, rule, template_digest=template_digest
+        ),
+        "validation_digest": "sha256:validation",
+        "owner": "operator",
+        "approval_id": "approval-standing-authority",
+        "expires_at": None,
+    }
+    repository = scheduler.recurring_repository
+    assert repository is not None
+    await repository.create(
+        schedule_id,
+        [command],
+        rule,
+        now + timedelta(minutes=1),
+        authority,
+    )
+
+    results = await scheduler.run_due_recurring(now=now + timedelta(minutes=10))
+
+    assert results == [{"schedule_id": schedule_id, "outcome": "executed"}]
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_due_recurring_does_not_double_execute_before_next_occurrence(
     tmp_path,
 ) -> None:
@@ -1093,4 +1260,25 @@ async def test_alive_is_false_before_run_true_while_running_false_after_cancel(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert scheduler.alive is False
+
+
+@pytest.mark.asyncio
+async def test_run_loop_invokes_periodic_recovery_runner(tmp_path) -> None:
+    _adapter, _plan_service, scheduler, _repository, _audit = await _build_scheduler(tmp_path)
+    scheduler.poll_interval = timedelta(seconds=0)
+    calls = 0
+
+    async def recovery_runner() -> None:
+        nonlocal calls
+        calls += 1
+        raise _StopTest
+
+    scheduler.recovery_runner = recovery_runner
+    task = asyncio.create_task(scheduler.run())
+
+    with pytest.raises(_StopTest):
+        await task
+
+    assert calls == 1
     assert scheduler.alive is False

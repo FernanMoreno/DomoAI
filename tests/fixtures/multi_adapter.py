@@ -202,7 +202,7 @@ class RecordingAdapter:
             StateSnapshot(
                 device_id=state["entity_id"],
                 capability=state["capability"],
-                value=state.get("value"),
+                value=state.get("value") if self.available else None,
                 unit=state.get("unit"),
                 observed_at=state.get("observed_at", now),
                 received_at=now,

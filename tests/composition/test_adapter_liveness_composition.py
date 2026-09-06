@@ -63,6 +63,11 @@ async def test_dead_child_reconnects_without_hiding_partial_health() -> None:
     remaining = [event async for event in stream]
 
     assert any(event.payload.get("recovered") for event in remaining)
+    assert any(
+        getattr(event, "code", None) == "source_reconnected"
+        and event.source_adapter_id == "matter"
+        for event in remaining
+    )
     assert failing.stream_attempts == 2
     assert any(
         item.get("event_type") == "adapter_event_stream_failed"

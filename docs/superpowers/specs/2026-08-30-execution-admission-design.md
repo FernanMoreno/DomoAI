@@ -2,7 +2,13 @@
 
 **Feature:** B01 — Execution Admission y Ownership de Bundles  
 **Spec:** `specs/158-physical-authority-program/blocks/01-execution-admission.md`  
-**Status:** Design approved in chat on 2026-08-30; implementation pending
+**Status:** Implemented — verified 2026-09-03
+
+The design is implemented in the current `HEAD` (`d6c19e0`). The shared
+admission instance is wired through the configured facade, executor, scheduler
+and bundle service; MCP and direct scheduler mutations use the same operation-
+aware boundary. No KNX, ETS, Home Assistant or `dev/lab/` asset was changed by
+B01.
 
 ## Problem
 
@@ -202,3 +208,12 @@ This design closes bundle ownership and execution-path consistency. It does
 not make a bundle approval permanent, bypass freshness or dynamic safety, or
 qualify physical hardware. Those controls remain independent admission and
 execution gates.
+
+## Verification record — 2026-09-03
+
+- Focused B01 regression: **101 passed** across admission, scheduler, MCP
+  contract and physical-authority composition tests.
+- Complete regression suite: **1582 passed, 18 skipped, 1 warning**.
+- `project-composition-check "$(cat .ai/project-name)"`: **466 passed, 18
+  skipped, 1 warning**; Import Linter **4 kept, 0 broken**.
+- The warning is the existing Testcontainers `wait_for_logs` deprecation.

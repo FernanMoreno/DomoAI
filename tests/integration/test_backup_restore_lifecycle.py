@@ -76,6 +76,49 @@ async def test_online_backup_uses_both_serialized_storage_lanes(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_encrypted_backup_requires_key_and_restores_only_after_authenticated_verify(
+    tmp_path: Path,
+) -> None:
+    source = await _database(tmp_path / "encrypted-source" / "domoai.sqlite3")
+    audit = await _database(tmp_path / "encrypted-source" / "domoai-audit.sqlite3")
+    _marker(source, "encrypted_probe", "secret-state")
+    key = b"k" * 32
+    service = BackupService(encryption_key=key)
+    try:
+        manifest = await service.create(
+            sources=(BackupSource("operational", source), BackupSource("audit", audit)),
+            output_dir=tmp_path / "encrypted-backups",
+            deployment_id="home-lab",
+        )
+        assert all(member.encryption == "aes-256-gcm" for member in manifest.members)
+        assert b"SQLite format 3" not in (
+            tmp_path / "encrypted-backups" / manifest.backup_id / "domoai.sqlite3"
+        ).read_bytes()[:64]
+
+        with pytest.raises(BackupError) as missing_key:
+            BackupService().verify(tmp_path / "encrypted-backups" / manifest.backup_id)
+        assert missing_key.value.code == "backup_encryption_key_required"
+        with pytest.raises(BackupError) as wrong_key:
+            BackupService(encryption_key=b"w" * 32).verify(
+                tmp_path / "encrypted-backups" / manifest.backup_id
+            )
+        assert wrong_key.value.code == "backup_decryption_failed"
+
+        result = await service.restore(
+            backup_dir=tmp_path / "encrypted-backups" / manifest.backup_id,
+            target_data_dir=tmp_path / "encrypted-restored",
+            deployment_id="home-lab",
+        )
+        assert result.backup_id == manifest.backup_id
+        assert _read_marker(
+            tmp_path / "encrypted-restored" / "domoai.sqlite3", "encrypted_probe"
+        ) == "secret-state"
+    finally:
+        await source.close()
+        await audit.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_composition_creates_backup_through_owned_lanes(tmp_path: Path) -> None:
     data_dir = tmp_path / "runtime-data"
     runtime = await build_runtime(

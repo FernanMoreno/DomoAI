@@ -26,6 +26,19 @@ class HomeAssistantClient:
         self.token = token
         self.timeout = timeout
         self.transport = transport
+        self._http_client = httpx.AsyncClient(timeout=timeout, transport=transport)
+
+    @property
+    def http_client(self) -> httpx.AsyncClient:
+        """Return the client owned by this adapter lifecycle."""
+
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close the shared HTTP resources; safe to call more than once."""
+
+        if not self._http_client.is_closed:
+            await self._http_client.aclose()
 
     @property
     def websocket_url(self) -> str:
@@ -37,10 +50,8 @@ class HomeAssistantClient:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                async with httpx.AsyncClient(
-                    timeout=self.timeout, transport=self.transport
-                ) as client:
-                    response = await client.get(
+                async with asyncio.timeout(self.timeout):
+                    response = await self.http_client.get(
                         f"{self.base_url}/api/states",
                         headers={"Authorization": f"Bearer {self.token}"},
                     )
@@ -49,7 +60,7 @@ class HomeAssistantClient:
                     if not isinstance(payload, list):
                         raise ValueError("Home Assistant /api/states returned a non-list payload")
                     return [dict(item) for item in payload]
-            except (httpx.HTTPError, ValueError) as error:
+            except (httpx.HTTPError, TimeoutError, ValueError) as error:
                 last_error = error
                 if attempt == 0:
                     await asyncio.sleep(0)
@@ -73,8 +84,8 @@ class HomeAssistantClient:
                     "X-DomoAI-Adapter-Request-ID": execution_context.adapter_request_id,
                 }
             )
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
-            response = await client.post(
+        async with asyncio.timeout(self.timeout):
+            response = await self.http_client.post(
                 f"{self.base_url}/api/services/{domain}/{service}",
                 headers=headers,
                 json=data,
@@ -106,16 +117,17 @@ class HomeAssistantClient:
 
         async with websockets.connect(self.websocket_url, open_timeout=self.timeout) as socket:
             await self._authenticate_socket(socket)
-            await socket.send(
+            await self._send_socket(
+                socket,
                 json.dumps(
                     {
                         "id": 1,
                         "type": command,
                     }
-                )
+                ),
             )
             while True:
-                payload = json.loads(await socket.recv())
+                payload = json.loads(await self._recv_socket(socket))
                 if payload.get("id") != 1:
                     continue
                 if not payload.get("success"):
@@ -125,7 +137,7 @@ class HomeAssistantClient:
     async def health(self) -> bool:
         try:
             await self.fetch_states()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, TimeoutError, ValueError):
             return False
         return True
 
@@ -139,34 +151,58 @@ class HomeAssistantClient:
                     self.websocket_url, open_timeout=self.timeout
                 ) as socket:
                     await self._authenticate_socket(socket)
-                    await socket.send(
+                    await self._send_socket(
+                        socket,
                         json.dumps(
                             {
                                 "id": 1,
                                 "type": "subscribe_events",
                                 "event_type": "state_changed",
                             }
-                        )
+                        ),
                     )
-                    async for raw_message in socket:
+                    while True:
+                        # Once the subscription is established, an idle
+                        # Home Assistant installation is healthy. The
+                        # WebSocket protocol's ping/pong watchdog detects a
+                        # dead peer; applying the request timeout to every
+                        # event receive would turn a quiet house into a
+                        # reconnect loop.
+                        raw_message = await socket.recv()
                         message = json.loads(raw_message)
                         if message.get("type") == "event":
                             yield message
                 return
-            except (OSError, ValueError, PermissionError, websockets.WebSocketException):
+            except (
+                OSError,
+                TimeoutError,
+                ValueError,
+                PermissionError,
+                websockets.WebSocketException,
+            ):
                 if reconnects >= 1:
                     raise
                 reconnects += 1
                 await asyncio.sleep(0)
 
     async def _authenticate_socket(self, socket: Any) -> None:
-        auth_required = json.loads(await socket.recv())
+        auth_required = json.loads(await self._recv_socket(socket))
         if auth_required.get("type") != "auth_required":
             raise ValueError("Home Assistant WebSocket did not request authentication")
-        await socket.send(json.dumps({"type": "auth", "access_token": self.token}))
-        auth_result = json.loads(await socket.recv())
+        await self._send_socket(
+            socket, json.dumps({"type": "auth", "access_token": self.token})
+        )
+        auth_result = json.loads(await self._recv_socket(socket))
         if auth_result.get("type") != "auth_ok":
             raise PermissionError("Home Assistant WebSocket authentication failed")
+
+    async def _recv_socket(self, socket: Any) -> Any:
+        async with asyncio.timeout(self.timeout):
+            return await socket.recv()
+
+    async def _send_socket(self, socket: Any, message: str) -> None:
+        async with asyncio.timeout(self.timeout):
+            await socket.send(message)
 
     @staticmethod
     def _decode_entity_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:

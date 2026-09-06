@@ -15,6 +15,7 @@ from domoai.domain.provider import (
     ProviderManifest,
     ProviderRole,
 )
+from domoai.runtime.provider_sdk import ProviderRegistry
 from tests.fixtures.provider_sdk import (
     OBSERVED_AT,
     RECEIVED_AT,
@@ -195,3 +196,27 @@ def test_provider_capability_declarations_reject_writable_without_commands() -> 
                 )
             ],
         )
+
+
+def test_provider_registry_rejects_synchronous_protocol_methods_at_registration() -> None:
+    class SyncTelemetryProvider:
+        manifest = telemetry_manifest("sync_telemetry")
+
+        def connect(self) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def discover(self) -> list[DeviceDescriptor]:
+            return []
+
+        def get_measurements(self, device_ids: list[str] | None = None) -> list[Measurement]:
+            del device_ids
+            return []
+
+        def subscribe(self) -> object:
+            return object()
+
+    with pytest.raises(TypeError, match="coroutine"):
+        ProviderRegistry().register(SyncTelemetryProvider())

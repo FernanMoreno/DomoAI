@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 
 from domoai.application.discovery_service import DiscoveryService
-from domoai.domain.models import AdapterDiagnosticEvent, SourceEvent, SourceRef, StateChangedEvent
+from domoai.domain.models import (
+    AdapterDiagnosticEvent,
+    AdapterHealth,
+    AvailabilityChangedEvent,
+    DeviceMembershipChangedEvent,
+    MetadataChangedEvent,
+    SourceEvent,
+    SourceRef,
+    StateChangedEvent,
+    StateSnapshot,
+    StateStatus,
+)
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.ports import AdapterPort
@@ -24,12 +36,14 @@ class RuntimeEventConsumer:
         audit: AuditLog,
         *,
         clock: Clock | None = None,
+        automation_handler: Callable[[StateChangedEvent], Awaitable[object]] | None = None,
     ) -> None:
         self.adapter = adapter
         self.discovery = discovery
         self.state_store = state_store
         self.audit = audit
         self.clock = clock or SystemClock()
+        self.automation_handler = automation_handler
         self.alive = False
         self.events_applied = 0
         self.last_event_at: datetime | None = None
@@ -43,7 +57,9 @@ class RuntimeEventConsumer:
         except StopAsyncIteration:
             return None
         except (ConnectionError, OSError) as error:
-            stale = await self.state_store.mark_source_unavailable(self.adapter.adapter_id)
+            stale = await self.discovery.apply_source_availability(
+                self.adapter.adapter_id, available=False
+            )
             self.audit.append(
                 event_type="source_event_stream_unavailable",
                 actor="runtime",
@@ -55,7 +71,9 @@ class RuntimeEventConsumer:
         try:
             await self._apply_event(event)
         except (ConnectionError, OSError) as error:
-            stale = await self.state_store.mark_source_unavailable(self.adapter.adapter_id)
+            stale = await self.discovery.apply_source_availability(
+                self.adapter.adapter_id, available=False
+            )
             self.audit.append(
                 event_type="source_event_stream_unavailable",
                 actor="runtime",
@@ -92,6 +110,7 @@ class RuntimeEventConsumer:
                     continue
 
                 if degraded:
+                    await self._mark_degraded_components(health)
                     try:
                         await self.adapter.connect()
                         await self.discovery.refresh()
@@ -121,7 +140,7 @@ class RuntimeEventConsumer:
             self.alive = False
 
     async def _apply_event(self, event: SourceEvent) -> None:
-        """Apply state-only events cheaply; fall back to full discovery otherwise."""
+        """Apply events at the narrowest safe state/inventory boundary."""
 
         self.events_applied += 1
         occurred_at = getattr(event, "occurred_at", None)
@@ -133,17 +152,96 @@ class RuntimeEventConsumer:
         )
 
         if isinstance(event, StateChangedEvent):
-            await self._apply_state_only(event)
+            snapshots = await self._apply_state_only(event)
+            if self.automation_handler is not None:
+                for automation_event in self._automation_events(event, snapshots):
+                    await self.automation_handler(automation_event)
+        elif isinstance(event, AvailabilityChangedEvent):
+            await self._apply_availability(event)
+        elif isinstance(event, (DeviceMembershipChangedEvent, MetadataChangedEvent)):
+            # These events change the executable inventory or its semantic
+            # metadata.  They are the only event kinds that justify a full
+            # discovery; state/transport diagnostics must not turn into a
+            # repeated read of every device.
+            await self.discovery.refresh()
         elif isinstance(event, AdapterDiagnosticEvent) and event.code == "source_unavailable":
             source_adapter_id = event.source_adapter_id or self.adapter.adapter_id
-            await self.state_store.mark_source_unavailable(source_adapter_id)
+            await self.discovery.apply_source_availability(
+                str(source_adapter_id), external_id=event.external_id, available=False
+            )
+        elif isinstance(event, AdapterDiagnosticEvent) and event.code == "source_reconnected":
+            source_adapter_id = event.source_adapter_id or self.adapter.adapter_id
+            try:
+                await self.discovery.apply_source_availability(
+                    str(source_adapter_id), external_id=event.external_id, available=True
+                )
+            except (ConnectionError, OSError, TimeoutError) as error:
+                self.audit.append(
+                    event_type="source_reconnect_failed",
+                    actor="runtime",
+                    subject_id=str(source_adapter_id),
+                    payload={"error": str(error)[:200]},
+                )
+        elif isinstance(event, AdapterDiagnosticEvent):
+            # Diagnostics describe an observation problem, not a topology
+            # change.  Keep the last canonical evidence and let the source
+            # health/refresh paths mark it unavailable when appropriate.
+            return
         else:
-            await self.discovery.refresh()
+            # SourceEvent is a closed union, so this is defensive only for a
+            # future model extension.  Do not make an unknown event a broad
+            # physical read by default.
+            return
 
-    async def _apply_state_only(self, event: StateChangedEvent) -> None:
+    async def _apply_availability(self, event: AvailabilityChangedEvent) -> None:
+        """Apply transport/entity availability without rebuilding inventory."""
+
         source_adapter_id = event.source_adapter_id or event.payload.get(
             "source_adapter_id", self.adapter.adapter_id
         )
+        await self.discovery.apply_source_availability(
+            str(source_adapter_id),
+            external_id=event.external_id,
+            available=event.available is True,
+        )
+
+    async def _apply_state_only(self, event: StateChangedEvent) -> tuple[StateSnapshot, ...]:
+        source_adapter_id = event.source_adapter_id or event.payload.get(
+            "source_adapter_id", self.adapter.adapter_id
+        )
+        try:
+            embedded_snapshots = self._event_snapshots(event, str(source_adapter_id))
+        except (TypeError, ValueError) as error:
+            # Invalid source evidence must not be repaired by asking the same
+            # physical source to answer another read. Mark that source
+            # unavailable and keep the runtime fail-closed.
+            await self.discovery.apply_source_availability(
+                str(source_adapter_id), available=False
+            )
+            self.audit.append(
+                event_type="source_event_state_invalid",
+                actor="runtime",
+                subject_id=str(source_adapter_id),
+                payload={"error": str(error)[:200]},
+            )
+            return ()
+        if embedded_snapshots is not None:
+            return await self.discovery.save_state_snapshots(embedded_snapshots)
+
+        # An authoritative event stream already contains the source's
+        # observation. Never turn a missing/legacy event payload into a
+        # physical read: for KNX that would create GroupValueRead -> response
+        # -> StateChangedEvent recursion. A malformed event is handled as
+        # missing evidence and remains fail-closed.
+        if str(source_adapter_id) in self._event_driven_source_ids():
+            self.audit.append(
+                event_type="source_event_state_missing",
+                actor="runtime",
+                subject_id=str(source_adapter_id),
+                payload={"reason": "authoritative event did not carry state evidence"},
+            )
+            return ()
+
         source_refs = self._known_source_refs(source_adapter_id)
         if event.external_id is not None:
             source_refs = [
@@ -152,13 +250,84 @@ class RuntimeEventConsumer:
                 if source_ref.external_id == event.external_id
             ]
         if not source_refs:
-            return
+            return ()
         snapshots = await self.adapter.read_state(source_refs)
         if event.capability is not None:
             snapshots = [
                 snapshot for snapshot in snapshots if snapshot.capability == event.capability
             ]
-        await self.discovery.save_state_snapshots(snapshots)
+        return await self.discovery.save_state_snapshots(snapshots)
+
+    @staticmethod
+    def _automation_events(
+        event: StateChangedEvent, snapshots: tuple[StateSnapshot, ...]
+    ) -> tuple[StateChangedEvent, ...]:
+        """Expose canonical state evidence to downstream local automation.
+
+        Provider events are intentionally transport-shaped.  The state
+        boundary has already resolved each source reference to a canonical
+        device, so automation must consume that result instead of guessing
+        from friendly names, node IDs, or adapter-specific payloads.
+        """
+
+        if event.device_id is not None and event.capability is not None:
+            return (event,)
+        return tuple(
+            event.model_copy(
+                update={
+                    "source_adapter_id": snapshot.source_ref.adapter_id,
+                    "occurred_at": event.occurred_at or snapshot.observed_at,
+                    "external_id": snapshot.source_ref.external_id,
+                    "device_id": snapshot.device_id,
+                    "capability": snapshot.capability,
+                    "value": snapshot.value,
+                    "unit": snapshot.unit,
+                }
+            )
+            for snapshot in snapshots
+            if snapshot.status is StateStatus.CURRENT
+        )
+
+    def _event_driven_source_ids(self) -> frozenset[str]:
+        declared = getattr(self.adapter, "event_driven_state_adapter_ids", None)
+        if declared is None and getattr(self.adapter, "state_events_are_authoritative", False):
+            declared = {self.adapter.adapter_id}
+        return frozenset(str(adapter_id) for adapter_id in (declared or ()))
+
+    def _event_snapshots(
+        self, event: StateChangedEvent, source_adapter_id: str
+    ) -> list[StateSnapshot] | None:
+        """Decode source-owned state evidence without performing adapter I/O.
+
+        ``None`` means this is a legacy event with no embedded evidence. An
+        empty list is a valid event with no known canonical routes; in both
+        cases the caller must not manufacture a read for an authoritative
+        source.
+        """
+
+        raw_states = event.payload.get("states")
+        if raw_states is None:
+            return None
+        if not isinstance(raw_states, list):
+            raise ValueError("state event evidence must be a list")
+
+        snapshots: list[StateSnapshot] = []
+        for raw_state in raw_states:
+            if not isinstance(raw_state, Mapping):
+                raise ValueError("state event evidence entries must be objects")
+            state_payload = dict(raw_state)
+            if event.source_cursor is not None and state_payload.get("source_cursor") is None:
+                state_payload["source_cursor"] = event.source_cursor
+            snapshot = StateSnapshot.model_validate(state_payload)
+            if snapshot.source_ref.adapter_id != source_adapter_id:
+                raise ValueError("state event source adapter does not match evidence")
+            canonical_id = self.discovery.registry.canonical_id_for_source(
+                source_adapter_id, snapshot.source_ref.external_id
+            )
+            if canonical_id is None:
+                continue
+            snapshots.append(snapshot.model_copy(update={"device_id": canonical_id}))
+        return snapshots
 
     def _known_source_refs(self, adapter_id: str) -> list[SourceRef]:
         return [
@@ -179,6 +348,15 @@ class RuntimeEventConsumer:
             error=ConnectionError("Adapter event stream ended normally"),
         )
 
+    async def _mark_degraded_components(self, health: AdapterHealth) -> None:
+        """Project composite health failures into source-owned state."""
+
+        for component in health.components or []:
+            if not component.connected:
+                await self.discovery.apply_source_availability(
+                    component.adapter_id, available=False
+                )
+
     async def _mark_source_unavailable(self, *, event_type: str, error: Exception) -> None:
         try:
             source_ids = [self.adapter.adapter_id]
@@ -187,9 +365,13 @@ class RuntimeEventConsumer:
                 for child in getattr(self.adapter, "adapters", ())
                 if str(child.adapter_id) not in source_ids
             )
-            stale = []
+            stale: list[StateSnapshot] = []
             for source_id in source_ids:
-                stale.extend(await self.state_store.mark_source_unavailable(source_id))
+                stale.extend(
+                    await self.discovery.apply_source_availability(
+                        source_id, available=False
+                    )
+                )
         except Exception as stale_error:
             stale = []
             error = RuntimeError(f"{error}; stale-state marking failed: {stale_error}")

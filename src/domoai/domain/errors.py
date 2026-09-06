@@ -42,6 +42,8 @@ class ErrorCode(StrEnum):
     CONTROL_TAKEOVER_FAILED = "control_takeover_failed"
     ACTUATOR_AUTHORIZATION_REQUIRED = "actuator_authorization_required"
     INSUFFICIENT_SCOPE = "insufficient_scope"
+    AGGREGATE_CAPABILITY_INVALID = "aggregate_capability_invalid"
+    FENCING_VIOLATION = "fencing_violation"
 
 
 class DomainError(ValueError):

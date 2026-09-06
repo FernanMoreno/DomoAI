@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from domoai.domain.models import Command
+from domoai.domain.models import Command, SourceRef, StateSnapshot, StateStatus
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.registry import DeviceRegistry
@@ -28,6 +28,24 @@ async def test_all_healthy_components_are_listed_as_connected() -> None:
     assert health.components is not None
     component_ids = {component.adapter_id: component.connected for component in health.components}
     assert component_ids == {"home_assistant": True, "modbus": True}
+
+
+def test_event_driven_state_polling_is_scoped_to_declared_children() -> None:
+    event_driven = _adapter("knx")
+    event_driven.state_events_are_authoritative = True
+    polled = _adapter("modbus")
+    composite = CompositeAdapter([event_driven, polled])
+
+    assert composite.event_driven_state_adapter_ids == frozenset({"knx"})
+
+
+def test_static_inventory_sources_are_scoped_to_declared_children() -> None:
+    static = _adapter("knx")
+    static.inventory_is_static = True
+    dynamic = _adapter("modbus")
+    composite = CompositeAdapter([static, dynamic])
+
+    assert composite.static_inventory_adapter_ids == frozenset({"knx"})
 
 
 @pytest.mark.asyncio
@@ -107,3 +125,64 @@ async def test_composite_forwards_the_same_execution_context_to_child() -> None:
     )
 
     assert child.execution_contexts == [context]
+
+
+@pytest.mark.asyncio
+async def test_composite_read_state_reports_missing_reference_as_unavailable() -> None:
+    child = _adapter("fixture")
+    composite = CompositeAdapter([child])
+    await composite.connect()
+
+    results = await composite.read_state_detailed(
+        [
+            SourceRef(adapter_id="fixture", external_id="sensor.fixture.temperature"),
+            SourceRef(adapter_id="fixture", external_id="sensor.fixture.missing"),
+        ]
+    )
+
+    assert [result.status for result in results] == ["success", "unavailable"]
+    assert results[0].snapshot is not None
+    assert results[1].snapshot is None
+    assert results[1].error_code == "state_missing"
+
+
+@pytest.mark.asyncio
+async def test_composite_read_state_preserves_multiple_capabilities_per_reference() -> None:
+    child = _adapter("fixture")
+    source_ref = SourceRef(adapter_id="fixture", external_id="light.main")
+    now = source_snapshot(adapter_id="fixture").source_states[0]["observed_at"]
+
+    async def read_state(_source_refs):
+        return [
+            StateSnapshot(
+                device_id="light.main",
+                capability="power",
+                value=True,
+                unit=None,
+                observed_at=now,
+                received_at=now,
+                status=StateStatus.CURRENT,
+                source_ref=source_ref,
+            ),
+            StateSnapshot(
+                device_id="light.main",
+                capability="brightness",
+                value=75,
+                unit="%",
+                observed_at=now,
+                received_at=now,
+                status=StateStatus.CURRENT,
+                source_ref=source_ref,
+            ),
+        ]
+
+    child.read_state = read_state
+    composite = CompositeAdapter([child])
+    await composite.connect()
+
+    results = await composite.read_state([source_ref])
+
+    assert [(result.capability, result.value) for result in results] == [
+        ("power", True),
+        ("brightness", 75),
+    ]

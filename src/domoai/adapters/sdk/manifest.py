@@ -7,7 +7,12 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from domoai.domain.models import CapabilityKind, DeviceType, StrictModel
+from domoai.domain.models import (
+    CapabilityGuarantees,
+    CapabilityKind,
+    DeviceType,
+    StrictModel,
+)
 
 ADAPTER_SDK_SCHEMA_VERSION: Literal["v1"] = "v1"
 ADAPTER_CONTRACT_VERSION: Literal["v1"] = "v1"
@@ -49,6 +54,7 @@ class CapabilityDeclaration(StrictModel):
     commands: list[str] = Field(default_factory=list)
     optional: bool = False
     constraints: dict[str, MetadataValue] = Field(default_factory=dict)
+    guarantees: CapabilityGuarantees = Field(default_factory=CapabilityGuarantees)
 
     @model_validator(mode="after")
     def validate_domain(self) -> CapabilityDeclaration:
@@ -67,6 +73,20 @@ class CapabilityDeclaration(StrictModel):
             raise ValueError("writable capabilities require commands")
         if not self.writable and self.commands:
             raise ValueError("read-only capabilities cannot declare commands")
+        if self.guarantees.resolution is not None and self.kind not in {
+            CapabilityKind.INTEGER,
+            CapabilityKind.NUMBER,
+        }:
+            raise ValueError("resolution is only valid for numeric capabilities")
+        if self.guarantees.tolerance is not None and self.kind not in {
+            CapabilityKind.INTEGER,
+            CapabilityKind.NUMBER,
+        }:
+            raise ValueError("tolerance is only valid for numeric capabilities")
+        if self.guarantees.readback_required and not self.readable:
+            raise ValueError("readback guarantee requires a readable capability")
+        if self.guarantees.confirmation_required and not self.writable:
+            raise ValueError("confirmation guarantee requires a writable capability")
         return self
 
 

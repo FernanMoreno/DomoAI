@@ -20,6 +20,7 @@ from domoai.runtime.approval_store import (
     OperatorPrincipal,
 )
 from domoai.runtime.clock import FixedClock
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 
 OPERATOR_TOKEN = "test-operator-secret"
 
@@ -78,6 +79,82 @@ def test_consume_succeeds_for_matching_plan_and_digest() -> None:
 
     assert consumed.approved_by == "operator"
     assert consumed.plan_id == "plan-1"
+
+
+def test_reservation_holds_grant_until_commit_or_release() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(plan, approved_by="operator", operator_token=OPERATOR_TOKEN)
+
+    reserved = store.reserve(
+        grant.approval_id,
+        plan,
+        reservation_id="bundle-commit-1",
+    )
+
+    assert reserved == grant
+    with pytest.raises(DomainError, match="reserved"):
+        store.consume(grant.approval_id, plan)
+
+    store.release_reservation("bundle-commit-1")
+    assert store.consume(grant.approval_id, plan) == grant
+
+
+def test_approval_transitions_are_projected_to_operational_metrics() -> None:
+    metrics = RuntimeOperationalMetrics()
+    store = ApprovalStore(
+        operator_token=OPERATOR_TOKEN,
+        allow_legacy_token=True,
+        operational_metrics=metrics,
+    )
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(plan, approved_by="operator", operator_token=OPERATOR_TOKEN)
+
+    store.reserve(grant.approval_id, plan, reservation_id="reservation-1")
+    store.release_reservation("reservation-1")
+    store.reserve(grant.approval_id, plan, reservation_id="reservation-2")
+    store.commit_reservation("reservation-2")
+
+    with pytest.raises(DomainError):
+        store.reserve("missing", plan, reservation_id="reservation-rejected")
+
+    assert metrics.snapshot()["approvals"] == {
+        "reserved_total": 2,
+        "consumed_total": 1,
+        "released_total": 1,
+        "rejected_total": 1,
+    }
+
+
+def test_released_reservation_can_be_reused_by_a_retry() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(plan, approved_by="operator", operator_token=OPERATOR_TOKEN)
+
+    store.reserve(grant.approval_id, plan, reservation_id="bundle-commit-failed")
+    store.release_reservation("bundle-commit-failed")
+    retried = store.reserve(
+        grant.approval_id,
+        plan,
+        reservation_id="bundle-commit-retry",
+    )
+
+    assert retried == grant
+    store.commit_reservation("bundle-commit-retry")
+    with pytest.raises(DomainError, match="consumed"):
+        store.consume(grant.approval_id, plan)
+
+
+def test_committed_reservation_consumes_all_reserved_grants() -> None:
+    store = _legacy_store()
+    plan = _plan_requiring_confirmation()
+    grant = store.issue(plan, approved_by="operator", operator_token=OPERATOR_TOKEN)
+    store.reserve(grant.approval_id, plan, reservation_id="bundle-commit-2")
+
+    store.commit_reservation("bundle-commit-2")
+
+    with pytest.raises(DomainError, match="consumed"):
+        store.consume(grant.approval_id, plan)
 
 
 def test_verify_consumed_accepts_only_the_authoritative_approval_projection() -> None:

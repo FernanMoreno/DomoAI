@@ -217,6 +217,7 @@ async def run_battery_hil(
     ]
     outcomes_by_step: dict[str, ExecutionStatus] = {}
     command_attempted = False
+    controlled_failure = False
 
     async def _execute_step(
         index: int,
@@ -226,8 +227,7 @@ async def run_battery_hil(
         charge_kw: float,
         discharge_kw: float,
     ) -> None:
-        nonlocal command_attempted
-        command_attempted = command_attempted or charge_kw > 0 or discharge_kw > 0
+        nonlocal command_attempted, controlled_failure
         command = Command(
             id=f"{run_id}:{step_name}",
             device_id=actuator.device_id,
@@ -256,10 +256,29 @@ async def run_battery_hil(
             )
             grant = runtime.approval_store.consume(grant.approval_id, validated)
             validated = runtime.facade.approve_plan(validated, grant=grant)
-        summary = await runtime.facade.execute_plan(validated)
-        outcome = summary.outcomes[0]
-        outcomes_by_step[step_name] = outcome.status
-        observations[step_name] = {
+            summary = await runtime.facade.execute_plan(validated)
+            outcome = summary.outcomes[0]
+            outcomes_by_step[step_name] = outcome.status
+            if (
+                (charge_kw > 0 or discharge_kw > 0)
+                and outcome.adapter_request_id is not None
+            ):
+                command_attempted = True
+            if outcome.status is not ExecutionStatus.CONFIRMED_SUCCESS:
+                controlled_failure = True
+            if step_name == "baseline_stop":
+                release_event = next(
+                    (
+                        event
+                        for event in reversed(runtime.audit.events)
+                        if event.event_type == "control_lease_released"
+                        and event.subject_id == validated.id
+                    ),
+                    None,
+                )
+                if release_event is not None and release_event.payload.get("confirmed") is False:
+                    controlled_failure = True
+            observations[step_name] = {
             "command": command_name,
             "status": outcome.status.value,
             "adapter_ref": (
@@ -277,6 +296,8 @@ async def run_battery_hil(
             await _execute_step(
                 index, step_name, command_name, value, charge_kw, discharge_kw
             )
+            if controlled_failure:
+                break
     except Exception as error:
         sequence_error = error
     finally:
@@ -299,7 +320,7 @@ async def run_battery_hil(
                     raise BatteryHILRunError("emergency stop did not confirm zero power")
             except Exception as error:
                 cleanup_error = error
-    if sequence_error is not None:
+    if sequence_error is not None and not controlled_failure:
         if cleanup_error is not None:
             raise BatteryHILRunError(
                 f"HIL sequence failed and emergency stop was not confirmed: {cleanup_error}"
@@ -311,7 +332,7 @@ async def run_battery_hil(
         ) from cleanup_error
 
     def _confirmed(step: str) -> bool:
-        return outcomes_by_step[step] is ExecutionStatus.CONFIRMED_SUCCESS
+        return outcomes_by_step.get(step) is ExecutionStatus.CONFIRMED_SUCCESS
 
     takeover_payload = next(
         (
@@ -328,6 +349,26 @@ async def run_battery_hil(
             takeover_result = TakeoverResult.model_validate(takeover_payload)
         except (TypeError, ValueError):
             takeover_result = None
+    first_command_result = next(
+        (
+            event.payload
+            for event in reversed(runtime.audit.events)
+            if event.event_type == "control_takeover_first_command_result"
+            and event.payload.get("plan_id") == f"{run_id}-baseline_stop"
+        ),
+        None,
+    )
+    # The adapter's acquisition response is emitted before the executor sends
+    # the first command, so ``TakeoverResult.first_command_confirmed`` may
+    # legitimately still be false.  The authoritative confirmation is the
+    # executor outcome tied to the exact takeover command and plan.
+    first_command_confirmed = bool(
+        takeover_result is not None
+        and isinstance(first_command_result, dict)
+        and first_command_result.get("plan_id") == takeover_result.plan_id
+        and first_command_result.get("command_id") == takeover_result.first_command_id
+        and first_command_result.get("confirmed") is True
+    )
     baseline = takeover_result.baseline if takeover_result is not None else None
     lease_is_live = bool(
         takeover_result is not None
@@ -348,7 +389,7 @@ async def run_battery_hil(
         and takeover_result.owner == binding.control_policy.owner
         and takeover_result.device_id == binding.device_id
         and takeover_result.plan_id == f"{run_id}-baseline_stop"
-        and takeover_result.first_command_confirmed
+        and first_command_confirmed
         and lease_is_live
         and baseline_is_observed
         and _confirmed("baseline_stop")

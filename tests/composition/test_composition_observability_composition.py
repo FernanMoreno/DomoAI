@@ -25,6 +25,7 @@ async def test_runtime_metrics_correlate_storage_state_event_and_scheduler_healt
             database=runtime.database,
             storage=runtime.storage,
             battery_qualification=runtime.battery_qualification,
+            operational_metrics=runtime.operational_metrics,
             clock=runtime.clock,
         )
         snapshot = await metrics.snapshot()
@@ -35,5 +36,6 @@ async def test_runtime_metrics_correlate_storage_state_event_and_scheduler_healt
         assert snapshot["battery_qualification"] == "unsupported"
         assert snapshot["storage"]["operation_count"] > 0
         assert "timeout_count" in snapshot["storage"]
+        assert snapshot["operational"]["telemetry_failure_total"] == 0
     finally:
         await runtime.close()

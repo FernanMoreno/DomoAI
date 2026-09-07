@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from domoai.domain.coordination import LeaseScope
+
 _execution_principal: ContextVar[str] = ContextVar(
     "domoai_execution_principal", default="local"
 )
@@ -39,6 +41,9 @@ class ExecutionContext:
     adapter_request_id: str
     agent_request_id: str | None = None
     client_principal_id: str = "local"
+    fencing_scope: LeaseScope | None = None
+    fencing_epoch: int | None = None
+    lease_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("plan_id", "execution_attempt_id", "adapter_request_id"):
@@ -49,3 +54,13 @@ class ExecutionContext:
             not isinstance(self.agent_request_id, str) or not self.agent_request_id.strip()
         ):
             raise ValueError("agent_request_id must be non-empty when provided")
+        if self.fencing_scope is None and (
+            self.fencing_epoch is not None or self.lease_id is not None
+        ):
+            raise ValueError("fencing epoch and lease_id require a fencing scope")
+        if self.fencing_scope is not None and (
+            self.fencing_epoch is None or self.lease_id is None
+        ):
+            raise ValueError("fencing scope requires epoch and lease_id")
+        if self.fencing_epoch is not None and self.fencing_epoch <= 0:
+            raise ValueError("fencing_epoch must be positive")

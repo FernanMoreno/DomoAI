@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from uuid import uuid4
 
+from domoai.application.coordination import FencingGuard
 from domoai.application.dynamic_safety import DynamicSafetyGuard
 from domoai.application.execution_admission import ExecutionAdmission
+from domoai.application.household_queue import HouseholdWorkQueues
 from domoai.application.plan_service import PlanService
+from domoai.domain.coordination import FencingViolation, PhysicalIntent, PhysicalIntentStatus
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    AdapterExecutionAck,
+    AggregateExecutionCapability,
     Capability,
     Command,
     ErrorDetail,
@@ -31,9 +38,11 @@ from domoai.runtime.control_takeover import ControlTakeoverPort
 from domoai.runtime.events import AuditLog
 from domoai.runtime.execution_context import ExecutionContext, current_execution_principal
 from domoai.runtime.freshness import FreshnessDecision, FreshnessEvaluator
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 from domoai.runtime.ports import (
     AdapterPort,
     ExecutionOutcomePort,
+    PhysicalIntentPort,
     PlanRecordPort,
     StateSnapshotSinkPort,
 )
@@ -59,12 +68,23 @@ class _PreconditionFailure:
         }
 
 
+@dataclass
+class _ExecutionAttempt:
+    """Track whether this invocation, rather than a concurrent peer, claimed the plan."""
+
+    claimed: bool = False
+
+
 class _ReadbackPersistenceError(Exception):
     """Internal marker for a readback that could not become durable."""
 
 
 class _ControlLeaseExpired(Exception):
     """Internal marker for a lost latched-actuator lease."""
+
+
+class _PhysicalIntentUnknown(Exception):
+    """A previous host left a physical intent uncertain."""
 
 
 class PlanExecutor:
@@ -83,6 +103,10 @@ class PlanExecutor:
         control_takeover: ControlTakeoverPort | None = None,
         execution_admission: ExecutionAdmission | None = None,
         dynamic_safety_guard: DynamicSafetyGuard | None = None,
+        operational_metrics: RuntimeOperationalMetrics | None = None,
+        fencing_guard: FencingGuard | None = None,
+        physical_intent_repository: PhysicalIntentPort | None = None,
+        household_work_queues: HouseholdWorkQueues | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
@@ -99,6 +123,10 @@ class PlanExecutor:
         self.control_takeover = control_takeover
         self.execution_admission = execution_admission
         self.dynamic_safety_guard = dynamic_safety_guard
+        self.operational_metrics = operational_metrics
+        self.fencing_guard = fencing_guard or getattr(execution_admission, "fencing_guard", None)
+        self.physical_intent_repository = physical_intent_repository
+        self.household_work_queues = household_work_queues
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -116,10 +144,39 @@ class PlanExecutor:
         plan: Plan,
         *,
         state_version_overrides: dict[str, int] | None = None,
-        aggregate_owner: bool = False,
+        aggregate_capability: AggregateExecutionCapability | None = None,
+    ) -> ExecutionSummary:
+        """Execute a plan and close any acquired physical authority on failure."""
+
+        attempt = _ExecutionAttempt()
+        try:
+            return await self._execute_impl(
+                plan,
+                state_version_overrides=state_version_overrides,
+                aggregate_capability=aggregate_capability,
+                attempt=attempt,
+            )
+        except BaseException:
+            # A concurrent caller that lost the durable claim must not mark
+            # the winner's executing plan UNKNOWN or release its authority.
+            if attempt.claimed:
+                await self._mark_unknown_after_exception(plan.id)
+                await self._release_after_exception(plan.id)
+            raise
+
+    async def _execute_impl(
+        self,
+        plan: Plan,
+        *,
+        state_version_overrides: dict[str, int] | None = None,
+        aggregate_capability: AggregateExecutionCapability | None = None,
+        attempt: _ExecutionAttempt | None = None,
     ) -> ExecutionSummary:
         if self.execution_admission is not None:
-            await self.execution_admission.admit(plan, aggregate_owner=aggregate_owner)
+            await self.execution_admission.admit(
+                plan,
+                aggregate_capability=aggregate_capability,
+            )
         if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
                 ErrorCode.NOT_YET_DUE,
@@ -145,6 +202,13 @@ class PlanExecutor:
                     ErrorCode.INVALID_TRANSITION,
                     "Plan is already executing or has reached a terminal status",
                 )
+            if attempt is not None:
+                attempt.claimed = True
+        elif attempt is not None:
+            # Without a durable plan repository this invocation is the sole
+            # execution owner, so failure cleanup still has to release any
+            # physical takeover lease it acquired.
+            attempt.claimed = True
         execution_attempt_id = str(uuid4())
         self.audit.append(
             event_type="plan_execution_started",
@@ -223,9 +287,17 @@ class PlanExecutor:
                     subject_id=plan.id,
                     payload=takeover.model_dump(mode="json"),
                 )
+                if self.operational_metrics is not None:
+                    if takeover.status.value == "acquired":
+                        self.operational_metrics.record_lease("acquire")
+                    elif takeover.status.value == "expired":
+                        self.operational_metrics.record_lease("expired")
+                    elif takeover.status.value == "unknown":
+                        self.operational_metrics.record_lease("unknown")
                 if takeover.status.value != "acquired":
                     takeover_outcomes = [
                         ExecutionOutcome(
+                            authority=plan.authority,
                             plan_id=plan.id,
                             command_id=command.id,
                             execution_attempt_id=execution_attempt_id,
@@ -278,6 +350,7 @@ class PlanExecutor:
             capability = semantic.capability
             if semantic.errors:
                 outcome = ExecutionOutcome(
+                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=command.id,
                     execution_attempt_id=execution_attempt_id,
@@ -328,6 +401,7 @@ class PlanExecutor:
             )
             if failed_preconditions:
                 outcome = ExecutionOutcome(
+                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=command.id,
                     execution_attempt_id=execution_attempt_id,
@@ -347,6 +421,7 @@ class PlanExecutor:
                 )
             elif (safety_error := self._safety_violation(command, capability)) is not None:
                 outcome = ExecutionOutcome(
+                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=command.id,
                     execution_attempt_id=execution_attempt_id,
@@ -361,6 +436,7 @@ class PlanExecutor:
                 is not None
             ):
                 outcome = ExecutionOutcome(
+                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=command.id,
                     execution_attempt_id=execution_attempt_id,
@@ -371,14 +447,45 @@ class PlanExecutor:
                 )
             else:
                 adapter_request_id = str(uuid4())
-                execution_context = ExecutionContext(
-                    agent_request_id=plan.agent_request_id,
-                    plan_id=plan.id,
-                    execution_attempt_id=execution_attempt_id,
-                    adapter_request_id=adapter_request_id,
-                    client_principal_id=current_execution_principal(),
-                )
+                dispatch_started: float | None = None
+                dispatch_attempted = False
+                physical_intent: PhysicalIntent | None = None
                 try:
+                    fencing_token = None
+                    if self.fencing_guard is not None:
+                        fencing_token = await self.fencing_guard.assert_writable_for_authority(
+                            plan.authority
+                        )
+                    execution_context = ExecutionContext(
+                        agent_request_id=plan.agent_request_id,
+                        plan_id=plan.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
+                        client_principal_id=current_execution_principal(),
+                        fencing_scope=fencing_token.scope if fencing_token is not None else None,
+                        fencing_epoch=fencing_token.epoch if fencing_token is not None else None,
+                        lease_id=fencing_token.lease_id if fencing_token is not None else None,
+                    )
+                    if self.physical_intent_repository is not None:
+                        if fencing_token is None:
+                            raise FencingViolation(
+                                "physical intent ledger requires a current fencing token"
+                            )
+                        physical_intent = await self.physical_intent_repository.claim(
+                            PhysicalIntent(
+                                tenant_id=plan.authority.tenant_id,
+                                household_id=plan.authority.household_id,
+                                deployment_id=fencing_token.scope.deployment_id,
+                                idempotency_key=command.idempotency_key,
+                                plan_id=plan.id,
+                                command_id=command.id,
+                                fencing_epoch=fencing_token.epoch,
+                                created_at=self.clock.now(),
+                                updated_at=self.clock.now(),
+                            )
+                        )
+                        if physical_intent.status is PhysicalIntentStatus.UNKNOWN:
+                            raise _PhysicalIntentUnknown
                     assert_ownership = getattr(self.control_takeover, "assert_still_owned", None)
                     if (
                         takeover_first_command_id is not None
@@ -386,7 +493,43 @@ class PlanExecutor:
                         and not await assert_ownership(plan_id=plan.id)
                     ):
                         raise _ControlLeaseExpired
-                    acknowledgement = await self.adapter.execute(command, execution_context)
+                    dispatch_started = time.perf_counter()
+                    dispatch_attempted = True
+                    if physical_intent is not None and physical_intent.status in {
+                        PhysicalIntentStatus.ACKNOWLEDGED,
+                        PhysicalIntentStatus.CONFIRMED,
+                    }:
+                        acknowledgement = AdapterExecutionAck(
+                            accepted=True,
+                            message="physical intent replay served from durable ledger",
+                        )
+                    elif (
+                        physical_intent is not None
+                        and physical_intent.status is PhysicalIntentStatus.REJECTED
+                    ):
+                        acknowledgement = AdapterExecutionAck(
+                            accepted=False,
+                            message="physical intent was already rejected",
+                        )
+                    else:
+                        if self.household_work_queues is not None:
+                            acknowledgement = await self.household_work_queues.submit(
+                                plan.authority.household_id,
+                                partial(self.adapter.execute, command, execution_context),
+                            )
+                        else:
+                            acknowledgement = await self.adapter.execute(command, execution_context)
+                        if physical_intent is not None:
+                            assert self.physical_intent_repository is not None
+                            await self.physical_intent_repository.settle(
+                                household_id=physical_intent.household_id,
+                                idempotency_key=physical_intent.idempotency_key,
+                                status=(
+                                    PhysicalIntentStatus.ACKNOWLEDGED
+                                    if acknowledgement.accepted
+                                    else PhysicalIntentStatus.REJECTED
+                                ),
+                            )
                     after_state = None
                     status = ExecutionStatus.REJECTED
                     error: ErrorDetail | None = None
@@ -446,6 +589,12 @@ class PlanExecutor:
                                 status = ExecutionStatus.CONFIRMED_SUCCESS
                         else:
                             status = ExecutionStatus.UNKNOWN
+                            if (
+                                self.operational_metrics is not None
+                                and after_state is not None
+                                and after_state.status is StateStatus.CURRENT
+                            ):
+                                self.operational_metrics.record_readback_mismatch()
                             error = ErrorDetail(
                                 code=ErrorCode.EXECUTION_FAILED,
                                 message=(
@@ -461,6 +610,7 @@ class PlanExecutor:
                             retryable=False,
                         )
                     outcome = ExecutionOutcome(
+                        authority=plan.authority,
                         plan_id=plan.id,
                         command_id=command.id,
                         execution_attempt_id=execution_attempt_id,
@@ -472,7 +622,48 @@ class PlanExecutor:
                         completed_at=self.clock.now(),
                         error=error,
                     )
+                except _PhysicalIntentUnknown:
+                    outcome = ExecutionOutcome(
+                        authority=plan.authority,
+                        plan_id=plan.id,
+                        command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
+                        status=ExecutionStatus.UNKNOWN,
+                        before_state=before_state,
+                        completed_at=self.clock.now(),
+                        error=ErrorDetail(
+                            code=ErrorCode.EXECUTION_FAILED,
+                            message=(
+                                "Physical intent has an unknown outcome and needs reconciliation"
+                            ),
+                            retryable=False,
+                        ),
+                    )
+                except FencingViolation as error:
+                    if self.operational_metrics is not None:
+                        self.operational_metrics.record_fencing(
+                            "stale_rejected" if "stale" in str(error) else "lease_lost"
+                        )
+                    outcome = ExecutionOutcome(
+                        authority=plan.authority,
+                        plan_id=plan.id,
+                        command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
+                        status=ExecutionStatus.REJECTED,
+                        before_state=before_state,
+                        completed_at=self.clock.now(),
+                        error=ErrorDetail(
+                            code=ErrorCode.FENCING_VIOLATION,
+                            message="Physical write blocked by stale or missing fencing",
+                            retryable=True,
+                            details={"reason": str(error)},
+                        ),
+                    )
                 except _ControlLeaseExpired:
+                    if self.operational_metrics is not None:
+                        self.operational_metrics.record_lease("expired")
                     emergency_stop = getattr(self.control_takeover, "emergency_stop", None)
                     stop_confirmed = False
                     if callable(emergency_stop):
@@ -487,6 +678,7 @@ class PlanExecutor:
                             payload={"confirmed": stop_confirmed, "reason": "lease_expired"},
                         )
                     outcome = ExecutionOutcome(
+                        authority=plan.authority,
                         plan_id=plan.id,
                         command_id=command.id,
                         execution_attempt_id=execution_attempt_id,
@@ -503,6 +695,7 @@ class PlanExecutor:
                     )
                 except (ConnectionError, OSError, TimeoutError) as error:
                     outcome = ExecutionOutcome(
+                        authority=plan.authority,
                         plan_id=plan.id,
                         command_id=command.id,
                         execution_attempt_id=execution_attempt_id,
@@ -515,6 +708,34 @@ class PlanExecutor:
                             message=str(error),
                             retryable=True,
                         ),
+                    )
+                if physical_intent is not None:
+                    assert self.physical_intent_repository is not None
+                    final_status = {
+                        ExecutionStatus.CONFIRMED_SUCCESS: PhysicalIntentStatus.CONFIRMED,
+                        ExecutionStatus.REJECTED: PhysicalIntentStatus.REJECTED,
+                        ExecutionStatus.FAILED: PhysicalIntentStatus.REJECTED,
+                    }.get(outcome.status, PhysicalIntentStatus.UNKNOWN)
+                    await self.physical_intent_repository.settle(
+                        household_id=physical_intent.household_id,
+                        idempotency_key=physical_intent.idempotency_key,
+                        status=final_status,
+                    )
+                if (
+                    self.operational_metrics is not None
+                    and dispatch_attempted
+                    and dispatch_started is not None
+                ):
+                    adapter_id = (
+                        outcome.adapter_ref.adapter_id
+                        if outcome.adapter_ref is not None
+                        else self.adapter.adapter_id
+                    )
+                    self.operational_metrics.record_command(
+                        adapter_id,
+                        capability.name if capability is not None else "unknown",
+                        (time.perf_counter() - dispatch_started) * 1000,
+                        outcome.status.value,
                     )
             outcomes.append(outcome)
             if self.outcome_repository is not None:
@@ -545,6 +766,7 @@ class PlanExecutor:
                 if outcome.status is not ExecutionStatus.CONFIRMED_SUCCESS:
                     for remaining in plan.commands[command_index + 1 :]:
                         blocked = ExecutionOutcome(
+                            authority=plan.authority,
                             plan_id=plan.id,
                             command_id=remaining.id,
                             execution_attempt_id=execution_attempt_id,
@@ -565,33 +787,28 @@ class PlanExecutor:
                         if self.outcome_repository is not None:
                             await self.outcome_repository.save(blocked)
                     break
+        release_confirmed = True
         if takeover_first_command_id is not None:
-            release_for_plan = getattr(self.control_takeover, "release_for_plan", None)
-            if callable(release_for_plan):
-                try:
-                    release_confirmed = await release_for_plan(
-                        plan_id=plan.id,
-                        execution_attempt_id=f"{execution_attempt_id}:release",
-                    )
-                except Exception as error:
-                    release_confirmed = False
-                    self.audit.append(
-                        event_type="control_lease_release_failed",
-                        actor="runtime",
-                        subject_id=plan.id,
-                        payload={"error": str(error)[:200]},
-                    )
-                self.audit.append(
-                    event_type="control_lease_released",
-                    actor="runtime",
-                    subject_id=plan.id,
-                    payload={"confirmed": release_confirmed},
-                )
+            release_confirmed = await self._release_control_lease(
+                plan.id, execution_attempt_id=f"{execution_attempt_id}:release"
+            )
         summary = ExecutionSummary(outcomes=outcomes)
+        terminal_status = self._terminal_plan_status(outcomes)
         if self.plan_repository is not None:
-            terminal_status = self._terminal_plan_status(outcomes)
+            if not release_confirmed:
+                terminal_status = PlanStatus.UNKNOWN
             await self.plan_repository.settle_execution(
                 plan.model_copy(update={"status": terminal_status, "execution": summary})
+            )
+        if not release_confirmed:
+            self.audit.append(
+                event_type="unknown_authority",
+                actor="runtime",
+                subject_id=plan.id,
+                payload={
+                    "plan_id": plan.id,
+                    "reason": "control_lease_release_unconfirmed",
+                },
             )
         self.audit.append(
             event_type="plan_execution_completed",
@@ -599,13 +816,83 @@ class PlanExecutor:
             subject_id=plan.id,
             payload={
                 "plan_id": plan.id,
-                "status": self._terminal_plan_status(outcomes).value,
+                "status": terminal_status.value,
                 "client_principal_id": current_execution_principal(),
                 "outcome_count": len(outcomes),
                 "execution_attempt_id": execution_attempt_id,
             },
         )
         return summary
+
+    async def _release_control_lease(self, plan_id: str, *, execution_attempt_id: str) -> bool:
+        release_for_plan = getattr(self.control_takeover, "release_for_plan", None)
+        if not callable(release_for_plan):
+            return True
+        try:
+            release_confirmed = bool(
+                await release_for_plan(
+                    plan_id=plan_id,
+                    execution_attempt_id=execution_attempt_id,
+                )
+            )
+        except BaseException as error:
+            release_confirmed = False
+            self.audit.append(
+                event_type="control_lease_release_failed",
+                actor="runtime",
+                subject_id=plan_id,
+                payload={"error": str(error)[:200]},
+            )
+        self.audit.append(
+            event_type="control_lease_released",
+            actor="runtime",
+            subject_id=plan_id,
+            payload={"confirmed": release_confirmed},
+        )
+        if self.operational_metrics is not None and release_confirmed:
+            self.operational_metrics.record_lease("released")
+        elif self.operational_metrics is not None:
+            self.operational_metrics.record_lease("release_failed")
+            self.operational_metrics.record_lease("unknown")
+        return release_confirmed
+
+    async def _mark_unknown_after_exception(self, plan_id: str) -> None:
+        if self.plan_repository is None:
+            return
+        try:
+            marked = await self.plan_repository.mark_unknown_if_executing(plan_id)
+        except BaseException as error:
+            self.audit.append(
+                event_type="unknown_authority_persistence_failed",
+                actor="runtime",
+                subject_id=plan_id,
+                payload={"error": str(error)[:200]},
+            )
+            return
+        if marked:
+            self.audit.append(
+                event_type="unknown_authority",
+                actor="runtime",
+                subject_id=plan_id,
+                payload={"plan_id": plan_id, "reason": "execution_exception"},
+            )
+
+    async def _release_after_exception(self, plan_id: str) -> None:
+        if self.control_takeover is None:
+            return
+        confirmed = await self._release_control_lease(
+            plan_id, execution_attempt_id=f"{plan_id}:exception-release"
+        )
+        if not confirmed:
+            self.audit.append(
+                event_type="unknown_authority",
+                actor="runtime",
+                subject_id=plan_id,
+                payload={
+                    "plan_id": plan_id,
+                    "reason": "exception_release_unconfirmed",
+                },
+            )
 
     def _safety_violation(
         self, command: Command, capability: Capability | None
@@ -709,6 +996,7 @@ class PlanExecutor:
             )
             outcomes.append(
                 ExecutionOutcome(
+                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=result.command.id,
                     execution_attempt_id=execution_attempt_id,

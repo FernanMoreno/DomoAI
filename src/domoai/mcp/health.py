@@ -105,6 +105,11 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
     ownership = getattr(runtime, "ownership", None)
     ownership_ready = ownership is None or not bool(getattr(ownership, "released", True))
     physical = _physical_readiness(runtime)
+    multi_host_enabled = bool(getattr(runtime.settings, "multi_host_enabled", False))
+    fencing_guard = getattr(runtime, "fencing_guard", None)
+    coordination_ready = not multi_host_enabled or (
+        fencing_guard is not None and not bool(getattr(fencing_guard, "lost", True))
+    )
     freshness = await _freshness_report(runtime)
     has_state_store = getattr(runtime, "state_store", None) is not None
     freshness_ready = not has_state_store or freshness.get("status") == "current"
@@ -114,6 +119,7 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         and ownership_ready
         and physical["status"] == "ready"
         and freshness_ready
+        and coordination_ready
     )
     reason_codes: list[str] = []
     if not lifecycle_ready:
@@ -134,6 +140,8 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         reason_codes.append("physical_actuator_not_qualified")
     if physical.get("battery_operational_status") == "observed-only":
         reason_codes.append("battery_dispatch_binding_missing")
+    if not coordination_ready:
+        reason_codes.append("fencing_lease_inactive")
     if has_state_store and freshness.get("status") != "current":
         reason_codes.extend(
             code for code in freshness.get("reason_codes", []) if code not in reason_codes
@@ -150,6 +158,10 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         },
         "adapter": adapter,
         "ownership": {"active": ownership_ready},
+        "coordination": {
+            "mode": "external_fenced" if multi_host_enabled else "single_writer",
+            "status": "ready" if coordination_ready else "not_ready",
+        },
         "authorization": {
             "status": (
                 "configured"

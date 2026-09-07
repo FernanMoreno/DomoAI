@@ -31,6 +31,8 @@ def test_explanation_contains_proposal_and_hard_constraint_evidence() -> None:
     assert explanation.proposal["plan_id"] == "proposal-energy-001"
     assert explanation.constraint_summary["hard_satisfied"] is True
     assert "feasible" in explanation.summary.lower()
+    assert explanation.next_step == "validate_and_request_approval_before_execution"
+    assert explanation.proposal_count == 1
 
 
 def test_explanation_preserves_diagnostics_without_inventing_a_proposal() -> None:
@@ -45,6 +47,68 @@ def test_explanation_preserves_diagnostics_without_inventing_a_proposal() -> Non
     assert explanation.proposal is None
     assert explanation.diagnostics[0].code == "infeasible"
     assert "infeasible" in explanation.summary.lower()
+    assert explanation.next_step == "revise_scenario_or_inputs"
+    assert explanation.proposal_count == 0
+
+
+def test_explanation_projects_bounded_forecast_and_alternative_evidence() -> None:
+    primary = Plan(
+        id="proposal-primary",
+        commands=[
+            Command(
+                id="command-primary",
+                device_id="living_room.main_light",
+                command="turn_on",
+                idempotency_key="intent-primary",
+            )
+        ],
+    )
+    alternative = primary.model_copy(update={"id": "proposal-alternative"})
+    result = build_result(
+        scenario_id="energy-explainable",
+        status=OptimizationStatus.FEASIBLE,
+        plan=primary,
+        plans=[primary, alternative],
+        alternative_evidence={
+            "proposal-primary": {
+                "objective_values": {"energy_cost": 1.2, "comfort_score": 0.9},
+                "constraint_effects": {"hard_satisfied": True, "comfort_penalty": 0.0},
+                "forecast_assumptions": {"confidence": "medium", "conservative": False},
+            },
+            "proposal-alternative": {
+                "objective_values": {"energy_cost": 1.6, "comfort_score": 1.0},
+                "constraint_effects": {"hard_satisfied": True, "comfort_penalty": 0.2},
+                "forecast_assumptions": {"confidence": "medium", "conservative": False},
+            },
+        },
+        constraint_summary={
+            "hard_satisfied": True,
+            "soft_violations": [{"type": "comfort", "amount": 0.1}],
+            "forecast_confidence": "medium",
+        },
+    )
+
+    explanation = explain_result(result)
+
+    assert explanation.forecast_confidence == "medium"
+    assert explanation.alternatives == [
+        {
+            "plan_id": "proposal-primary",
+            "status": "draft",
+            "objective_values": {"energy_cost": 1.2, "comfort_score": 0.9},
+            "constraint_effects": {"hard_satisfied": True, "comfort_penalty": 0.0},
+            "forecast_assumptions": {"confidence": "medium", "conservative": False},
+        },
+        {
+            "plan_id": "proposal-alternative",
+            "status": "draft",
+            "objective_values": {"energy_cost": 1.6, "comfort_score": 1.0},
+            "constraint_effects": {"hard_satisfied": True, "comfort_penalty": 0.2},
+            "forecast_assumptions": {"confidence": "medium", "conservative": False},
+        },
+    ]
+    assert explanation.hard_constraints_satisfied is True
+    assert explanation.soft_violations == [{"type": "comfort", "amount": 0.1}]
 
 
 @pytest.mark.parametrize(

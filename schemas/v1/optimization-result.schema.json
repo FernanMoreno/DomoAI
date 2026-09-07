@@ -1,8 +1,39 @@
 {
   "$defs": {
+    "AlternativeEvidence": {
+      "additionalProperties": false,
+      "description": "Comparable, bounded evidence for one proposal in a result bundle.",
+      "properties": {
+        "objective_values": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "maxProperties": 32,
+          "title": "Objective Values",
+          "type": "object"
+        },
+        "constraint_effects": {
+          "additionalProperties": true,
+          "maxProperties": 16,
+          "title": "Constraint Effects",
+          "type": "object"
+        },
+        "forecast_assumptions": {
+          "additionalProperties": true,
+          "maxProperties": 16,
+          "title": "Forecast Assumptions",
+          "type": "object"
+        }
+      },
+      "title": "AlternativeEvidence",
+      "type": "object"
+    },
     "Approval": {
       "additionalProperties": false,
       "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityContext"
+        },
         "status": {
           "pattern": "^(approved|denied|expired)$",
           "title": "Status",
@@ -17,6 +48,18 @@
           "format": "date-time",
           "title": "Approved At",
           "type": "string"
+        },
+        "approval_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Id"
         },
         "validation_digest": {
           "minLength": 1,
@@ -119,18 +162,6 @@
           "minimum": 0,
           "title": "Schedule Revision",
           "type": "integer"
-        },
-        "approval_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Approval Id"
         }
       },
       "required": [
@@ -140,6 +171,83 @@
         "validation_digest"
       ],
       "title": "Approval",
+      "type": "object"
+    },
+    "AuthorityContext": {
+      "additionalProperties": false,
+      "description": "Non-secret identity and resource scope attached to authority records.\n\nThe defaults are the legacy single-home local runtime. They let v1 rows be\nread during an additive migration while every new authority record still\ncarries an explicit principal and household.",
+      "properties": {
+        "tenant_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "household_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Household Ids",
+          "type": "array"
+        },
+        "principal_id": {
+          "default": "system",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/PrincipalRole"
+          },
+          "maxItems": 5,
+          "title": "Roles",
+          "type": "array"
+        },
+        "area_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Area Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "title": "AuthorityContext",
       "type": "object"
     },
     "Command": {
@@ -389,6 +497,9 @@
     "ExecutionOutcome": {
       "additionalProperties": false,
       "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityContext"
+        },
         "plan_id": {
           "minLength": 1,
           "title": "Plan Id",
@@ -563,6 +674,9 @@
     "Plan": {
       "additionalProperties": false,
       "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityContext"
+        },
         "id": {
           "minLength": 1,
           "title": "Id",
@@ -847,6 +961,18 @@
       "title": "Precondition",
       "type": "object"
     },
+    "PrincipalRole": {
+      "description": "Role granted by a trusted identity provider for one deployment.",
+      "enum": [
+        "viewer",
+        "planner",
+        "operator",
+        "owner",
+        "service"
+      ],
+      "title": "PrincipalRole",
+      "type": "string"
+    },
     "RiskClass": {
       "enum": [
         "safe",
@@ -955,6 +1081,44 @@
       "title": "SolverEvidence",
       "type": "object"
     },
+    "SourceCursor": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "stream_id": {
+          "minLength": 1,
+          "title": "Stream Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minLength": 1,
+          "title": "Epoch",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "resync": {
+          "default": false,
+          "title": "Resync",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_id",
+        "stream_id",
+        "epoch",
+        "sequence"
+      ],
+      "title": "SourceCursor",
+      "type": "object"
+    },
     "SourceRef": {
       "additionalProperties": false,
       "properties": {
@@ -1016,6 +1180,9 @@
     "StateSnapshot": {
       "additionalProperties": false,
       "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityContext"
+        },
         "device_id": {
           "minLength": 1,
           "title": "Device Id",
@@ -1063,6 +1230,17 @@
         },
         "source_ref": {
           "$ref": "#/$defs/SourceRef"
+        },
+        "source_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1171,6 +1349,18 @@
       "title": "Scenario Id",
       "type": "string"
     },
+    "definition_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Digest"
+    },
     "status": {
       "$ref": "#/$defs/OptimizationStatus"
     },
@@ -1206,6 +1396,13 @@
     "constraint_summary": {
       "additionalProperties": true,
       "title": "Constraint Summary",
+      "type": "object"
+    },
+    "alternative_evidence": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AlternativeEvidence"
+      },
+      "title": "Alternative Evidence",
       "type": "object"
     },
     "diagnostics": {

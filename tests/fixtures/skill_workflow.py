@@ -37,10 +37,15 @@ from domoai.skills.workflow import ApprovalDecision
 from tests.fixtures.energy import energy_context_for
 
 FIXTURE_OPERATOR_TOKEN = "fixture-operator-secret"
+_DEFAULT_HORIZON_START = datetime.now(UTC).replace(second=0, microsecond=0)
 
 
 def structured(result: object) -> dict[str, Any]:
     """Normalize FastMCP's in-process result shape for the router."""
+
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
 
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return result[1]
@@ -137,9 +142,11 @@ async def build_workflow_fixture(
 
 
 def default_horizon() -> Horizon:
-    # Keep independently-created fixture requests identical within a clock
-    # minute while remaining due and inside their execution window.
-    start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(hours=1)
+    # Keep independently-created fixture requests identical for the process
+    # lifetime while remaining due and inside their execution window. Using
+    # datetime.now() for each call made this helper cross a minute boundary
+    # during a slow suite and caused the strict provider horizon check to fail.
+    start = _DEFAULT_HORIZON_START - timedelta(hours=1)
     return Horizon(
         start=start,
         end=start + timedelta(hours=2),

@@ -23,6 +23,7 @@ def test_preflight_understands_the_checked_in_deployment_boundary() -> None:
 
     assert _validate_compose(compose)
     assert _validate_proxy(caddy, {"DOMOAI_CADDY_HOSTNAME": "mcp.example.test"})
+    assert "path /healthz /readyz /metrics" in caddy
 
 
 def test_preflight_rejects_gateway_port_mismatch(tmp_path: Path) -> None:

@@ -17,6 +17,10 @@ from tests.fixtures.simulated_home import simulated_home_entities
 
 
 def structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return cast(dict[str, Any], result[1])
     assert isinstance(result, dict)
@@ -60,7 +64,12 @@ async def test_provider_runtime_feeds_registry_state_store_and_semantic_mcp(
         assert [tool.name for tool in await server.list_tools()] == [
             "discover_devices",
             "get_state",
+            "get_history",
             "get_energy_context",
+            "preview_command",
+            "prepare_command",
+            "preview_plan",
+            "prepare_plan",
             "validate_command",
             "validate_plan",
             "request_approval",
@@ -72,6 +81,10 @@ async def test_provider_runtime_feeds_registry_state_store_and_semantic_mcp(
             "schedule_recurring_plan",
             "cancel_recurring_schedule",
             "list_recurring_schedules",
+            "create_local_automation_rule",
+            "update_local_automation_rule",
+            "list_local_automation_rules",
+            "set_local_automation_status",
             "list_audit_events",
         ]
         inventory = structured(await server.call_tool("discover_devices", {"refresh": False}))

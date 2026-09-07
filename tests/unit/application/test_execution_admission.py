@@ -5,6 +5,7 @@ import pytest
 from domoai.application.execution_admission import AdmissionOperation, ExecutionAdmission
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    AggregateExecutionCapability,
     Approval,
     BundleCommit,
     BundleMemberCommit,
@@ -132,16 +133,16 @@ async def test_admission_default_operation_remains_execute() -> None:
     admission = ExecutionAdmission(bundle_repository=_BundleRepository(bundle))
 
     with pytest.raises(DomainError) as default_excinfo:
-        await admission.admit(plan, aggregate_owner=False)
+        await admission.admit(plan)
     with pytest.raises(DomainError) as execute_excinfo:
-        await admission.admit(plan, operation=AdmissionOperation.EXECUTE, aggregate_owner=False)
+        await admission.admit(plan, operation=AdmissionOperation.EXECUTE)
 
     assert default_excinfo.value.code is execute_excinfo.value.code
     assert default_excinfo.value.code is ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN
 
 
 @pytest.mark.asyncio
-async def test_bundle_aggregate_owner_uses_owner_checks_not_generic_membership_error() -> None:
+async def test_bundle_member_requires_an_opaque_capability() -> None:
     approved, store = _approved_confirmation_plan()
     bundle = BundleCommit(
         id="bundle-admission-authority-1",
@@ -158,10 +159,53 @@ async def test_bundle_aggregate_owner_uses_owner_checks_not_generic_membership_e
     with pytest.raises(DomainError) as excinfo:
         await ExecutionAdmission(
             bundle_repository=_BundleRepository(bundle), approval_store=store
-        ).admit(approved, aggregate_owner=True)
+        ).admit(approved)
 
-    assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
-    assert excinfo.value.code is not ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN
+    assert excinfo.value.code is ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_fabricated_aggregate_capability_is_rejected() -> None:
+    plan, bundle = _bundle_member_plan_and_bundle()
+    capability = AggregateExecutionCapability(
+        bundle_id=bundle.id,
+        member_plan_id=plan.id,
+        bundle_digest=bundle.bundle_digest,
+        nonce="caller-fabricated-nonce",
+        expires_at=datetime(2026, 8, 24, 13, tzinfo=UTC),
+    )
+
+    with pytest.raises(DomainError, match="aggregate execution capability"):
+        await ExecutionAdmission(bundle_repository=_BundleRepository(bundle)).admit(
+            plan, aggregate_capability=capability
+        )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_execution_capability_is_single_use() -> None:
+    plan, bundle = _bundle_member_plan_and_bundle()
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    plan = plan.model_copy(
+        update={
+            "status": PlanStatus.READY,
+            "validation": ValidationResult(
+                status=ValidationStatus.VALID,
+                validated_at=now,
+                runtime_revision="runtime-1",
+                digest="sha256:member-validation",
+            ),
+        }
+    )
+    admission = ExecutionAdmission(
+        bundle_repository=_BundleRepository(bundle), clock=FixedClock(now)
+    )
+    capability = await admission.issue_aggregate_capability(bundle.id, plan.id)
+
+    decision = await admission.admit(plan, aggregate_capability=capability)
+    assert decision.bundle_id == bundle.id
+
+    with pytest.raises(DomainError, match="aggregate execution capability"):
+        await admission.admit(plan, aggregate_capability=capability)
 
 
 @pytest.mark.asyncio
@@ -221,10 +265,13 @@ async def test_bundle_admission_rejects_approval_scoped_to_another_bundle() -> N
         members=[BundleMemberCommit(plan_id=plan_id, validation_digest="sha256:validation")],
     )
 
+    admission = ExecutionAdmission(
+        bundle_repository=_BundleRepository(bundle), clock=FixedClock(now)
+    )
+    capability = await admission.issue_aggregate_capability(bundle.id, plan.id)
+
     with pytest.raises(DomainError) as excinfo:
-        await ExecutionAdmission(bundle_repository=_BundleRepository(bundle)).admit(
-            plan, aggregate_owner=True
-        )
+        await admission.admit(plan, aggregate_capability=capability)
 
     assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
 

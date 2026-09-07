@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 
-kv_host=${DOMOAI_KNX_KV_HOST:-172.26.80.1}
+kv_host=${DOMOAI_KNX_KV_HOST:-127.0.0.1}
 kv_port=${DOMOAI_KNX_KV_PORT:-3671}
 gateway_port=${DOMOAI_KNX_GATEWAY_PORT:-3672}
 upstream_source_port=${DOMOAI_KNX_UPSTREAM_SOURCE_PORT:-3673}

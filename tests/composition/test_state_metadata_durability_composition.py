@@ -11,6 +11,7 @@ from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import (
     Command,
     Plan,
+    SourceCursor,
     SourceRef,
     StateChangedEvent,
     StateSnapshot,
@@ -49,6 +50,17 @@ class _CountingLegacySink:
     async def save(self, snapshot) -> None:
         del snapshot
         self.save_calls += 1
+
+
+class _FailingRuntimePersistence(RuntimeStatePersistenceRepository):
+    def __init__(self, database, *, clock=None) -> None:
+        super().__init__(database, clock=clock)
+        self.fail = False
+
+    async def persist(self, snapshots, metadata) -> None:
+        if self.fail:
+            raise RuntimeError("sqlite persistence failed")
+        await super().persist(snapshots, metadata)
 
 
 @pytest.mark.composition
@@ -170,3 +182,65 @@ async def test_executor_uses_one_authoritative_readback_persistence_path() -> No
 
     assert persistence.persist_calls == 1
     assert legacy_sink.save_calls == 0
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_sqlite_restart_restores_last_committed_state_after_failed_replacement(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "state-integrity.sqlite3"
+    clock = FixedClock(datetime(2026, 9, 3, 12, tzinfo=UTC))
+    database = SQLiteDatabase(database_path, clock=clock)
+    await database.initialize()
+    persistence = _FailingRuntimePersistence(database, clock=clock)
+    state_store = StateStore(clock=clock)
+    state_store.bind_persistence(persistence)
+    initial = StateSnapshot(
+        device_id="light.main",
+        capability="power",
+        value=False,
+        observed_at=clock.now(),
+        received_at=clock.now(),
+        status=StateStatus.CURRENT,
+        source_ref=SourceRef(adapter_id="fixture", external_id="light.main"),
+        source_cursor=SourceCursor(
+            source_id="fixture", stream_id="events", epoch="boot-1", sequence=1
+        ),
+    )
+    await state_store.save(initial)
+    persistence.fail = True
+
+    replacement = initial.model_copy(
+        update={
+            "value": True,
+            "source_cursor": SourceCursor(
+                source_id="fixture", stream_id="events", epoch="boot-1", sequence=2
+            ),
+        }
+    )
+    with pytest.raises(RuntimeError, match="sqlite persistence failed"):
+        await state_store.save(replacement)
+
+    live = state_store.peek("light.main", "power")
+    assert live is not None
+    assert live.value is False
+    assert state_store.export_metadata().source_cursors[("fixture", "events")].sequence == 1
+    assert state_store.durability_status == "degraded"
+    await database.close()
+
+    restarted_database = SQLiteDatabase(database_path, clock=clock)
+    await restarted_database.initialize()
+    persisted_metadata = await RuntimeStateMetadataRepository(restarted_database).get()
+    persisted_snapshots = await StateSnapshotRepository(restarted_database).list_all()
+    assert persisted_metadata is not None
+    restarted = StateStore(clock=clock)
+    restarted.restore_metadata(persisted_metadata)
+    restarted.load_persisted(persisted_snapshots)
+
+    restored = restarted.peek("light.main", "power")
+    assert restored is not None
+    assert restored.value is False
+    assert restored.status is StateStatus.STALE
+    assert restarted.export_metadata().source_cursors[("fixture", "events")].sequence == 1
+    await restarted_database.close()

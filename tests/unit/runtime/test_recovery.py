@@ -125,3 +125,20 @@ async def test_second_call_after_recovery_is_idempotent(tmp_path) -> None:
         event for event in audit.events if event.event_type == "plan_execution_recovered"
     ]
     assert len(recovery_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconciliation_reuses_unknown_transition_and_is_idempotent(
+    tmp_path,
+) -> None:
+    plan_repository, audit, service = await _build(tmp_path)
+    await plan_repository.save(_plan("plan-periodic", PlanStatus.EXECUTING))
+
+    first = await service.reconcile(reason="periodic_recovery")
+    second = await service.reconcile(reason="periodic_recovery")
+
+    assert first == ["plan-periodic"]
+    assert second == []
+    event = audit.events[-1]
+    assert event.event_type == "plan_execution_recovered"
+    assert event.payload["reason"] == "periodic_recovery"

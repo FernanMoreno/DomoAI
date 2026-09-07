@@ -1,0 +1,38 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "stream_id": {
+      "minLength": 1,
+      "title": "Stream Id",
+      "type": "string"
+    },
+    "epoch": {
+      "minLength": 1,
+      "title": "Epoch",
+      "type": "string"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "resync": {
+      "default": false,
+      "title": "Resync",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "source_id",
+    "stream_id",
+    "epoch",
+    "sequence"
+  ],
+  "title": "SourceCursor",
+  "type": "object"
+}

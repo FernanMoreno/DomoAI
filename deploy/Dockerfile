@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY skills/core ./skills/core
 COPY config ./config
 
 RUN python -m pip install --no-cache-dir --upgrade pip \

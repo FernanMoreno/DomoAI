@@ -103,7 +103,7 @@ class HomeAssistantProviderAdapter:
                 StateSnapshot(
                     device_id=str(state["entity_id"]),
                     capability=str(state["capability"]),
-                    value=state.get("value"),
+                    value=state.get("value") if state.get("available", True) else None,
                     unit=state.get("unit"),
                     observed_at=observed_at,
                     received_at=received_at,

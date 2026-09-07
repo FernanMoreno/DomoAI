@@ -67,6 +67,7 @@ async def _build_collector(
     )
     collector = RuntimeMetricsCollector(
         adapter=adapter,
+        registry=registry,
         event_consumer=event_consumer,
         scheduler=scheduler,
         state_store=state_store,
@@ -97,6 +98,25 @@ async def test_snapshot_has_every_key_with_defaults_on_a_fresh_runtime(tmp_path:
     assert snapshot["optimizer_last_wall_time_seconds"] is None
     assert snapshot["db_operation_count"] >= 0
     assert snapshot["db_busy_count"] == 0
+    assert snapshot["operational"]["command_outcomes"]["confirmed_success"] == 0
+    assert snapshot["operational"]["state_quality_by_source"]["fixture"]["current"] > 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_publishes_active_providers_writable_routes_and_authority(
+    tmp_path: Path,
+) -> None:
+    collector, registry, *_ = await _build_collector(tmp_path)
+
+    snapshot = await collector.snapshot()
+
+    assert snapshot["active_providers"] == ["fixture"]
+    writable = {
+        (item["device_id"], item["capability"]): item for item in snapshot["writable_capabilities"]
+    }
+    assert any(capability == "power" for _device, capability in writable)
+    assert snapshot["authority"]["semantic_mcp"] is True
+    assert snapshot["authority"]["battery_dispatch"] == "unsupported"
 
 
 @pytest.mark.asyncio

@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from domoai.application.capability_assurance import validate_command_assurance
 from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     Approval,
+    AuthorityContext,
     Capability,
     CapabilityKind,
     Command,
@@ -80,6 +82,7 @@ class PlanService:
         commands: Sequence[Command],
         *,
         expires_at: datetime | None = None,
+        authority: AuthorityContext | None = None,
     ) -> Plan:
         normalized = [self.normalize_command(command) for command in commands]
         return Plan(
@@ -87,6 +90,7 @@ class PlanService:
             commands=normalized,
             created_at=self.clock.now(),
             expires_at=expires_at or self.clock.now() + self.DEFAULT_PLAN_TTL,
+            authority=authority or AuthorityContext(),
         )
 
     def normalize_command(self, command: Command) -> Command:
@@ -253,6 +257,7 @@ class PlanService:
             capability = semantic.capability
             if capability is None:
                 continue
+            errors.extend(validate_command_assurance(command, capability))
             for precondition in command.preconditions:
                 state_key = f"{precondition.device_id}::{precondition.capability}"
                 state_versions[state_key] = self.state_store.state_version(
@@ -451,6 +456,7 @@ class PlanService:
             window_digest=expected_window_digest,
             schedule_revision=plan.schedule_revision,
             approval_id=grant.approval_id,
+            authority=grant.authority,
         )
         approved = plan.model_copy(update={"status": PlanStatus.APPROVED, "approval": approval})
         self.audit.append(
@@ -902,6 +908,7 @@ class PlanService:
         payload: dict[str, Any] = {
             "plan_id": plan.id,
             "schema_version": plan.schema_version,
+            "authority": plan.authority.model_dump(mode="json"),
             "execute_at": plan.execute_at.isoformat() if plan.execute_at else None,
             "execution_window": (
                 plan.execution_window.canonical_payload() if plan.execution_window else None
@@ -923,6 +930,7 @@ class PlanService:
     ) -> str:
         payload: dict[str, Any] = {
             "plan_id": plan.id,
+            "authority": plan.authority.model_dump(mode="json"),
             # Validation lifetime is a runtime admission-control field, not
             # the semantic command intent. Keeping it outside the digest
             # makes a plan validated by optimizer preview and then by MCP

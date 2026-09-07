@@ -9,10 +9,33 @@ from copy import deepcopy
 from typing import Any, Protocol
 from uuid import uuid4
 
-from domoai.domain.models import AuditEvent
+from domoai.domain.models import AuditEvent, AuthorityContext, PrincipalRole
 from domoai.runtime.clock import Clock, SystemClock
 
 DEFAULT_MAX_EVENTS = 1000
+
+CRITICAL_AUDIT_EVENT_TYPES = frozenset(
+    {
+        "plan_approved",
+        "plan_execution_started",
+        "plan_execution_completed",
+        "command_execution_outcome",
+        "unknown_authority",
+        "control_lease_released",
+        "control_lease_release_failed",
+        "control_supervisor_emergency_stop",
+        "control_supervisor_lease_stop",
+        "control_supervisor_startup_reconciliation",
+        "plan_execution_recovered",
+        "bundle_commit_started",
+        "bundle_commit_completed",
+        "bundle_commit_recovered",
+        "recurring_schedule_created",
+        "recurring_authority_expired",
+        "recurring_authority_rejected",
+        "policy_default_applied",
+    }
+)
 
 _REDACTED = "[REDACTED]"
 _SECRET_KEYS = {
@@ -37,7 +60,7 @@ _SECRET_TEXT_PATTERNS = (
 
 
 class AuditEventSink(Protocol):
-    def append_event(self, event: AuditEvent) -> None: ...
+    def append_event(self, event: AuditEvent) -> Any: ...
 
 
 def redact_payload(value: Any, *, key: str | None = None) -> Any:
@@ -110,11 +133,20 @@ class AuditLog:
         *,
         max_events: int = DEFAULT_MAX_EVENTS,
         clock: Clock | None = None,
+        critical_event_types: set[str] | frozenset[str] | None = None,
+        critical_delivery_timeout_seconds: float = 5.0,
     ) -> None:
+        if critical_delivery_timeout_seconds <= 0:
+            raise ValueError("critical audit delivery timeout must be positive")
         self._events: deque[AuditEvent] = deque(maxlen=max_events)
         self._sink = sink
         self.clock = clock or SystemClock()
+        self.critical_event_types = frozenset(
+            critical_event_types if critical_event_types is not None else CRITICAL_AUDIT_EVENT_TYPES
+        )
+        self.critical_delivery_timeout_seconds = critical_delivery_timeout_seconds
         self.sink_failure_count = 0
+        self.critical_delivery_failure_count = 0
         self.last_sink_error: str | None = None
 
     @property
@@ -128,6 +160,7 @@ class AuditLog:
         actor: str,
         subject_id: str,
         payload: Mapping[str, Any],
+        authority: AuthorityContext | None = None,
     ) -> AuditEvent:
         event = AuditEvent(
             id=str(uuid4()),
@@ -136,6 +169,11 @@ class AuditLog:
             subject_id=subject_id,
             payload=redact_payload(payload),
             created_at=self.clock.now(),
+            authority=authority
+            or AuthorityContext(
+                principal_id=actor,
+                roles=[PrincipalRole.SERVICE],
+            ),
         )
         self._events.append(event)
         if self._sink is not None:
@@ -148,8 +186,14 @@ class AuditLog:
             # in-memory window above, and the failure is countable via
             # sink_failure_count/last_sink_error for metrics/alerting.
             try:
-                self._sink.append_event(event)
+                acknowledgement = self._sink.append_event(event)
+                if event.event_type in self.critical_event_types:
+                    wait_for_ack = getattr(acknowledgement, "result", None)
+                    if callable(wait_for_ack):
+                        wait_for_ack(timeout=self.critical_delivery_timeout_seconds)
             except Exception as error:
                 self.sink_failure_count += 1
+                if event.event_type in self.critical_event_types:
+                    self.critical_delivery_failure_count += 1
                 self.last_sink_error = f"{type(error).__name__}: {error}"
         return event

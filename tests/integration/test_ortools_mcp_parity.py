@@ -91,6 +91,8 @@ async def test_two_independent_mcp_clients_receive_equivalent_results() -> None:
             "validate_scenario",
             "optimize_scenario",
             "explain_solution",
+            "summarize_solution",
+            "compare_scenarios",
         ]
     )
     assert first_result == second_result

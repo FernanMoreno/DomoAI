@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "PrivacyCategory": {
+      "enum": [
+        "inventory",
+        "state",
+        "plans",
+        "approvals",
+        "bundles",
+        "schedules",
+        "automations",
+        "audit"
+      ],
+      "title": "PrivacyCategory",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    },
+    "household_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Household Id",
+      "type": "string"
+    },
+    "categories": {
+      "items": {
+        "$ref": "#/$defs/PrivacyCategory"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Categories",
+      "type": "array"
+    },
+    "deleted_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "maxProperties": 16,
+      "title": "Deleted Counts",
+      "type": "object"
+    },
+    "immutable_preserved": {
+      "items": {
+        "$ref": "#/$defs/PrivacyCategory"
+      },
+      "maxItems": 16,
+      "title": "Immutable Preserved",
+      "type": "array"
+    }
+  },
+  "required": [
+    "request_id",
+    "household_id",
+    "categories"
+  ],
+  "title": "PrivacyDeletion",
+  "type": "object"
+}

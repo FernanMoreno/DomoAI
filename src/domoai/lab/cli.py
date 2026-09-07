@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
 
+from domoai.domain.digital_twin import DigitalTwinEvidence
+from domoai.lab.phase4_preflight import (
+    render_preflight_json,
+    render_preflight_markdown,
+    run_phase4_preflight,
+)
+from domoai.lab.qualification import render_markdown, run_digital_twin
 from domoai.lab.runner import (
     DEFAULT_UP_SERVICES,
     SERVICE_NAMES,
@@ -41,6 +49,31 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("--volumes", action="store_true", help="remove lab volumes explicitly")
 
     subparsers.add_parser("smoke", help="run deterministic fixture-only tests")
+
+    twin = subparsers.add_parser(
+        "twin", help="run the complete deterministic digital-twin qualification matrix"
+    )
+    twin.add_argument("--seed", type=int, default=187)
+    twin.add_argument(
+        "--report",
+        type=Path,
+        default=Path("docs/evidence/digital-twin-latest.md"),
+    )
+
+    preflight = subparsers.add_parser(
+        "preflight", help="run the Phase 4 software/process preflight"
+    )
+    preflight.add_argument("--seed", type=int, default=187)
+    preflight.add_argument(
+        "--report",
+        type=Path,
+        default=Path("docs/evidence/phase4-preflight-latest.md"),
+    )
+    preflight.add_argument(
+        "--json-report",
+        type=Path,
+        default=Path("docs/evidence/phase4-preflight-latest.json"),
+    )
     return parser
 
 
@@ -81,7 +114,37 @@ def main(argv: list[str] | None = None) -> int:
             return runner.down(remove_volumes=args.volumes)
         if args.operation == "smoke":
             return runner.smoke()
+        if args.operation == "twin":
+            evidence = asyncio.run(run_digital_twin(seed=args.seed))
+            report = args.report.resolve()
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(render_markdown(evidence), encoding="utf-8")
+            print(f"digital-twin: {evidence.status.value} ({report})")
+            return 0 if evidence.status.value == "passed" else 1
+        if args.operation == "preflight":
+            async def run_twin(seed: int) -> DigitalTwinEvidence:
+                return await run_digital_twin(seed=seed)
+
+            report = asyncio.run(
+                run_phase4_preflight(
+                    seed=args.seed,
+                    run_twin=run_twin,
+                    run_process_smoke=runner.smoke,
+                )
+            )
+            markdown_report = args.report.resolve()
+            json_report = args.json_report.resolve()
+            markdown_report.parent.mkdir(parents=True, exist_ok=True)
+            json_report.parent.mkdir(parents=True, exist_ok=True)
+            markdown_report.write_text(render_preflight_markdown(report), encoding="utf-8")
+            json_report.write_text(render_preflight_json(report), encoding="utf-8")
+            print(f"phase4-preflight: {report.status.value} ({markdown_report})")
+            return 0 if report.status.value != "failed" else 1
         raise LabRunnerError(f"unsupported lab operation: {args.operation}")
     except LabRunnerError as error:
         print(f"domoai-lab: {error}", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

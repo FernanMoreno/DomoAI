@@ -1,7 +1,14 @@
 ---
 name: optimize-home-energy
 description: Coordinate semantic home reads and solver proposals while preserving runtime approval and execution safety.
-contract_version: v3
+contract_version: v4
+required_context: devices,state,energy_context
+allowed_tools: mcp.discover_devices,mcp.get_state,mcp.get_energy_context,mcp.optimize_scenario,mcp.validate_plan,mcp.explain_solution,operator.request_approval,mcp.commit_or_schedule_bundle
+allowed_resources: domotics://devices,domotics://runtime,domotics://energy
+forbidden_tools: direct_adapter_call,direct_vendor_api,direct_solver_call
+state_max_age_seconds: 60
+approval_required_for: physical_mutation
+failure_mode: stop_and_report
 ---
 
 # Optimize home energy
@@ -12,7 +19,7 @@ does not grant authorization and it never calls a physical adapter directly.
 
 ## Contract metadata
 
-- Contract version: `v3`
+- Contract version: `v4`
 - Fixture reference: `tests/integration/test_core_skill.py`
 - Safety owner: DomoAI runtime policy and plan executor
 - Host mapping: every DomoAI operation uses one general `mcp` connection;
@@ -53,8 +60,10 @@ does not grant authorization and it never calls a physical adapter directly.
    return a complete context or its runtime revision is stale.
 4. `optimize_scenario` — build a solver-neutral scenario with explicit horizon,
    resolution, units, loads, constraints and objectives. Request a proposal only.
-5. `validate_plan` — send the returned proposal through the runtime validation
-   and policy boundary. Never treat an optimizer result as authorization.
+5. `validate_plan` — legacy persistent alias for `prepare_plan`; send the
+   returned proposal through the runtime validation and policy boundary.
+   Use `preview_plan` when the host needs an ephemeral read-only check. Never
+   treat an optimizer result as authorization.
 6. `explain_solution` — explain selected slots, hard constraints, diagnostics and
    assumptions in user-facing language.
 7. `operator_approval` — if policy or risk requires confirmation, pause and ask

@@ -609,6 +609,63 @@ async def test_emergency_stop_requires_zero_power_readback_when_configured() -> 
 
 
 @pytest.mark.asyncio
+async def test_unconfirmed_release_blocks_new_control_until_reconciliation() -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter = ReadbackControlAdapter(
+        _result().model_copy(update={"first_command_id": "battery-command-1"}),
+        readback_kw=0.0,
+    )
+    state_store = StateStore(clock=clock)
+    source_ref = SourceRef(adapter_id="fixture", external_id="battery.power")
+    await state_store.save(
+        StateSnapshot(
+            device_id="battery.home",
+            capability="battery.power",
+            value=0.0,
+            observed_at=now,
+            received_at=now,
+            status=StateStatus.CURRENT,
+            source_ref=source_ref,
+        )
+    )
+    coordinator = BatteryControlCoordinator(
+        adapter,
+        BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
+        state_store=state_store,
+        power_feedback_capability="battery.power",
+        clock=clock,
+    )
+    first = _ev_command("charge_battery").model_copy(
+        update={"device_id": "battery.home", "id": "battery-command-1"}
+    )
+    second = first.model_copy(update={"id": "battery-command-2", "idempotency_key": "battery-2"})
+
+    assert await coordinator.reconcile_startup() is True
+    acquired = await coordinator.acquire_for_plan(plan_id="plan-1", commands=[first])
+    assert acquired is not None and acquired.status is ControlLeaseStatus.ACQUIRED
+    adapter.readback_kw = 0.5
+    assert await coordinator.release_for_plan(
+        plan_id="plan-1", execution_attempt_id="release"
+    ) is False
+
+    blocked = await coordinator.acquire_for_plan(plan_id="plan-2", commands=[second])
+
+    assert blocked is not None
+    assert blocked.failure_code == "control_authority_unknown"
+    assert len(adapter.requests) == 1
+
+    adapter.readback_kw = 0.0
+    adapter.result = _result().model_copy(
+        update={"plan_id": "plan-2", "first_command_id": "battery-command-2"}
+    )
+    assert await coordinator.reconcile_startup() is True
+    reacquired = await coordinator.acquire_for_plan(plan_id="plan-2", commands=[second])
+    assert reacquired is not None and reacquired.status is ControlLeaseStatus.ACQUIRED
+    assert len(adapter.requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_release_for_plan_stops_and_confirms_zero_feedback() -> None:
     now = datetime(2026, 8, 23, 12, tzinfo=UTC)
     clock = FixedClock(now)

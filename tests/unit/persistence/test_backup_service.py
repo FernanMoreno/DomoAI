@@ -1,12 +1,18 @@
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 import domoai.persistence.backup as backup_module
-from domoai.persistence.backup import BackupError, BackupService, BackupSource
+from domoai.persistence.backup import (
+    BackupError,
+    BackupService,
+    BackupSource,
+    load_backup_encryption_key,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 
 
@@ -14,6 +20,25 @@ async def _database(path: Path) -> SQLiteDatabase:
     database = SQLiteDatabase(path)
     await database.initialize()
     return database
+
+
+def test_backup_key_file_is_exactly_aes256_and_owner_only(tmp_path: Path) -> None:
+    key_file = tmp_path / "backup.key"
+    key_file.write_bytes(b"k" * 32)
+    if os.name != "nt":
+        key_file.chmod(0o600)
+        assert load_backup_encryption_key(key_file) == b"k" * 32
+        key_file.chmod(0o640)
+        with pytest.raises(BackupError) as error:
+            load_backup_encryption_key(key_file)
+        assert error.value.code == "backup_encryption_key_invalid"
+
+    key_file.write_bytes(b"short")
+    if os.name != "nt":
+        key_file.chmod(0o600)
+    with pytest.raises(BackupError) as error:
+        load_backup_encryption_key(key_file)
+    assert error.value.code == "backup_encryption_key_invalid"
 
 
 def _insert_marker(database: SQLiteDatabase, table: str, value: str) -> None:
@@ -80,6 +105,36 @@ async def test_create_publishes_operational_and_audit_members_with_redacted_mani
     verified = service.verify(backup_dir)
     assert verified.backup_id == manifest.backup_id
     assert {member.name for member in verified.members} == {"operational", "audit"}
+    await operational.close()
+    await audit.close()
+
+
+@pytest.mark.asyncio
+async def test_unencrypted_v1_manifest_remains_readable_after_v2_upgrade(tmp_path: Path) -> None:
+    source_dir = tmp_path / "data"
+    operational = await _database(source_dir / "operational.sqlite3")
+    audit = await _database(source_dir / "audit.sqlite3")
+    manifest = await BackupService().create(
+        sources=(BackupSource("operational", operational), BackupSource("audit", audit)),
+        output_dir=tmp_path / "backups",
+        deployment_id="home-lab",
+    )
+    backup_dir = tmp_path / "backups" / manifest.backup_id
+    payload = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    payload["format_version"] = 1
+    for member in payload["members"]:
+        member.pop("encryption", None)
+        member.pop("nonce", None)
+    unsigned = dict(payload)
+    unsigned.pop("manifest_sha256")
+    payload["manifest_sha256"] = hashlib.sha256(
+        (json.dumps(unsigned, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    ).hexdigest()
+    (backup_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    verified = BackupService().verify(backup_dir)
+
+    assert verified.format_version == 1
     await operational.close()
     await audit.close()
 

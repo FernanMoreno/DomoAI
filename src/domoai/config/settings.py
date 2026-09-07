@@ -22,12 +22,39 @@ class Settings(StrictModel):
     mcp_path: str = Field(default="/mcp", min_length=2)
     mcp_public_url: str = "http://127.0.0.1:8000"
     mcp_client_token_file: Path | None = None
+    mcp_metrics_enabled: bool = False
+    mcp_metrics_max_bytes: int = Field(default=262144, gt=0)
     mcp_deployment_id: str = Field(default="default", min_length=1)
+    mcp_tenant_id: str = Field(default="default", min_length=1)
+    mcp_household_id: str = Field(default="default", min_length=1)
+    instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    multi_host_enabled: bool = False
+    multi_host_production_enabled: bool = False
+    multi_host_qualification_evidence_path: Path | None = None
+    multi_host_gateway_identity: str | None = Field(default=None, min_length=1, max_length=200)
+    active_active_enabled: bool = False
+    coordination_lease_seconds: float = Field(default=30.0, gt=1.0)
+    etcd_endpoints: tuple[str, ...] = Field(default=(), max_length=5)
+    etcd_ca_cert_path: Path | None = None
+    etcd_client_cert_path: Path | None = None
+    etcd_client_key_path: Path | None = None
+    etcd_server_name: str | None = Field(default=None, min_length=1)
+    etcd_request_timeout_seconds: float = Field(default=5.0, gt=0)
+    postgres_dsn: SecretStr | None = None
+    postgres_sslmode: Literal["require", "verify-full"] = "verify-full"
+    postgres_sslrootcert: Path | None = None
+    postgres_sslcert: Path | None = None
+    postgres_sslkey: Path | None = None
+    household_queue_max_per_household: int = Field(default=16, gt=0)
+    household_queue_max_total: int = Field(default=64, gt=0)
+    metric_history_max_samples: int = Field(default=1000, gt=0)
+    privacy_retention_days: int = Field(default=90, ge=1, le=3650)
     mcp_json_response: bool = True
     mcp_server_sent_events: bool = False
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, gt=0)
     database_path: Path = Path("data/domoai.sqlite3")
     audit_database_path: Path | None = None
+    backup_encryption_key_file: Path | None = None
     policy_config_path: Path | None = None
     risk_overrides_path: Path | None = None
     safety_limits_path: Path | None = None
@@ -38,6 +65,8 @@ class Settings(StrictModel):
     home_assistant_mapping_path: Path | None = None
     zigbee2mqtt_url: str | None = None
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
+    generic_mqtt_url: str | None = None
+    generic_mqtt_mapping_path: Path | None = None
     matter_server_url: str | None = None
     knx_gateway_host: str | None = None
     knx_gateway_port: int = Field(default=3671, ge=1, le=65535)
@@ -96,10 +125,31 @@ class Settings(StrictModel):
     solar_timeout_seconds: float = Field(default=10.0, gt=0)
     energy_max_age_seconds: float | None = Field(default=900.0, ge=0)
 
+    @property
+    def ev_charging_profile_path(self) -> Path | None:
+        """Compatibility view for the first configured EV binding path."""
+
+        return self.ev_charging_binding_paths[0] if self.ev_charging_binding_paths else None
+
     @model_validator(mode="after")
     def validate_source_selection(self) -> Settings:
         self._validate_mcp_configuration()
         self._validate_storage_isolation()
+        if self.household_queue_max_per_household > self.household_queue_max_total:
+            raise ValueError(
+                "household_queue_max_per_household cannot exceed household_queue_max_total"
+            )
+        if self.active_active_enabled:
+            raise ValueError("active-active production mode is not supported")
+        if self.multi_host_production_enabled:
+            if not self.multi_host_enabled:
+                raise ValueError("multi-host production mode requires multi-host to be enabled")
+            if self.multi_host_qualification_evidence_path is None:
+                raise ValueError(
+                    "multi-host production mode requires qualification evidence"
+                )
+            if self.multi_host_gateway_identity is None:
+                raise ValueError("multi-host production mode requires a gateway identity")
         knx_settings = (self.knx_gateway_host is not None, self.knx_config_path is not None)
         if knx_settings[0] != knx_settings[1]:
             raise ValueError(
@@ -109,6 +159,15 @@ class Settings(StrictModel):
         if modbus_settings[0] != modbus_settings[1]:
             raise ValueError(
                 "DOMOAI_MODBUS_HOST and DOMOAI_MODBUS_CONFIG_PATH must be configured together"
+            )
+        generic_mqtt_settings = (
+            self.generic_mqtt_url is not None,
+            self.generic_mqtt_mapping_path is not None,
+        )
+        if generic_mqtt_settings[0] != generic_mqtt_settings[1]:
+            raise ValueError(
+                "DOMOAI_GENERIC_MQTT_URL and DOMOAI_GENERIC_MQTT_MAPPING_PATH "
+                "must be configured together"
             )
         if self.mqtt_password is not None and self.mqtt_username is None:
             raise ValueError("DOMOAI_MQTT_USERNAME is required when a password is configured")
@@ -154,7 +213,7 @@ class Settings(StrictModel):
             return
         if self.audit_database_path.resolve() == self.database_path.resolve():
             raise ValueError(
-                "audit database must use a different file from the authority database"
+                "audit database must be separate from the authority database"
             )
 
     def _validate_mcp_configuration(self) -> None:
@@ -168,6 +227,8 @@ class Settings(StrictModel):
                 raise ValueError("non-local MCP gateway requires a client token file")
             if parsed_url.scheme != "https":
                 raise ValueError("non-local MCP gateway requires an HTTPS public URL")
+        if self.mcp_metrics_enabled and self.mcp_client_token_file is None:
+            raise ValueError("metrics endpoint requires a client token file")
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -213,7 +274,71 @@ class Settings(StrictModel):
                 if (token_file := os.getenv("DOMOAI_MCP_CLIENT_TOKEN_FILE"))
                 else None
             ),
+            mcp_metrics_enabled=boolean("DOMOAI_MCP_METRICS_ENABLED"),
+            mcp_metrics_max_bytes=int(
+                os.getenv("DOMOAI_MCP_METRICS_MAX_BYTES", "262144")
+            ),
             mcp_deployment_id=os.getenv("DOMOAI_MCP_DEPLOYMENT_ID", "default"),
+            mcp_tenant_id=os.getenv("DOMOAI_MCP_TENANT_ID", "default"),
+            mcp_household_id=os.getenv("DOMOAI_MCP_HOUSEHOLD_ID", "default"),
+            instance_id=os.getenv("DOMOAI_INSTANCE_ID") or None,
+            multi_host_enabled=boolean("DOMOAI_MULTI_HOST_ENABLED"),
+            multi_host_production_enabled=boolean("DOMOAI_MULTI_HOST_PRODUCTION_ENABLED"),
+            multi_host_qualification_evidence_path=(
+                Path(evidence_path)
+                if (evidence_path := os.getenv("DOMOAI_MULTI_HOST_QUALIFICATION_EVIDENCE_PATH"))
+                else None
+            ),
+            multi_host_gateway_identity=os.getenv("DOMOAI_MULTI_HOST_GATEWAY_IDENTITY")
+            or None,
+            active_active_enabled=boolean("DOMOAI_ACTIVE_ACTIVE_ENABLED"),
+            coordination_lease_seconds=float(
+                os.getenv("DOMOAI_COORDINATION_LEASE_SECONDS", "30")
+            ),
+            etcd_endpoints=tuple(
+                endpoint.strip()
+                for endpoint in os.getenv("DOMOAI_ETCD_ENDPOINTS", "").split(",")
+                if endpoint.strip()
+            ),
+            etcd_ca_cert_path=(
+                Path(path) if (path := os.getenv("DOMOAI_ETCD_CA_CERT_PATH")) else None
+            ),
+            etcd_client_cert_path=(
+                Path(path) if (path := os.getenv("DOMOAI_ETCD_CLIENT_CERT_PATH")) else None
+            ),
+            etcd_client_key_path=(
+                Path(path) if (path := os.getenv("DOMOAI_ETCD_CLIENT_KEY_PATH")) else None
+            ),
+            etcd_server_name=os.getenv("DOMOAI_ETCD_SERVER_NAME") or None,
+            etcd_request_timeout_seconds=float(
+                os.getenv("DOMOAI_ETCD_REQUEST_TIMEOUT_SECONDS", "5")
+            ),
+            postgres_dsn=(
+                SecretStr(dsn) if (dsn := os.getenv("DOMOAI_POSTGRES_DSN")) else None
+            ),
+            postgres_sslmode=cast(
+                Literal["require", "verify-full"],
+                os.getenv("DOMOAI_POSTGRES_SSLMODE", "verify-full"),
+            ),
+            postgres_sslrootcert=(
+                Path(path) if (path := os.getenv("DOMOAI_POSTGRES_SSLROOTCERT")) else None
+            ),
+            postgres_sslcert=(
+                Path(path) if (path := os.getenv("DOMOAI_POSTGRES_SSLCERT")) else None
+            ),
+            postgres_sslkey=(
+                Path(path) if (path := os.getenv("DOMOAI_POSTGRES_SSLKEY")) else None
+            ),
+            household_queue_max_per_household=int(
+                os.getenv("DOMOAI_HOUSEHOLD_QUEUE_MAX_PER_HOUSEHOLD", "16")
+            ),
+            household_queue_max_total=int(
+                os.getenv("DOMOAI_HOUSEHOLD_QUEUE_MAX_TOTAL", "64")
+            ),
+            metric_history_max_samples=int(
+                os.getenv("DOMOAI_METRIC_HISTORY_MAX_SAMPLES", "1000")
+            ),
+            privacy_retention_days=int(os.getenv("DOMOAI_PRIVACY_RETENTION_DAYS", "90")),
             mcp_json_response=boolean("DOMOAI_MCP_JSON_RESPONSE", True),
             mcp_server_sent_events=boolean("DOMOAI_MCP_SERVER_SENT_EVENTS", False),
             mcp_max_request_body_size=int(
@@ -223,6 +348,11 @@ class Settings(StrictModel):
             audit_database_path=(
                 Path(audit_path)
                 if (audit_path := os.getenv("DOMOAI_AUDIT_DATABASE_PATH"))
+                else None
+            ),
+            backup_encryption_key_file=(
+                Path(key_path)
+                if (key_path := os.getenv("DOMOAI_BACKUP_ENCRYPTION_KEY_FILE"))
                 else None
             ),
             policy_config_path=(
@@ -253,6 +383,12 @@ class Settings(StrictModel):
             ),
             zigbee2mqtt_url=os.getenv("DOMOAI_ZIGBEE2MQTT_URL"),
             zigbee2mqtt_base_topic=os.getenv("DOMOAI_ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),
+            generic_mqtt_url=os.getenv("DOMOAI_GENERIC_MQTT_URL"),
+            generic_mqtt_mapping_path=(
+                Path(mapping_path)
+                if (mapping_path := os.getenv("DOMOAI_GENERIC_MQTT_MAPPING_PATH"))
+                else None
+            ),
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
             knx_gateway_port=int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3671")),
@@ -362,10 +498,17 @@ class Settings(StrictModel):
                 if (profile_path := os.getenv("DOMOAI_BATTERY_DISPATCH_PROFILE_PATH"))
                 else None
             ),
-            ev_charging_binding_paths=tuple(
-                Path(entry.strip())
-                for entry in os.getenv("DOMOAI_EV_CHARGING_BINDING_PATHS", "").split(",")
-                if entry.strip()
+            ev_charging_binding_paths=(
+                tuple(
+                    Path(entry.strip())
+                    for entry in os.getenv("DOMOAI_EV_CHARGING_BINDING_PATHS", "").split(",")
+                    if entry.strip()
+                )
+                or (
+                    (Path(legacy_profile_path),)
+                    if (legacy_profile_path := os.getenv("DOMOAI_EV_CHARGING_PROFILE_PATH"))
+                    else ()
+                )
             ),
             battery_hil_evidence_path=(
                 Path(evidence_path)

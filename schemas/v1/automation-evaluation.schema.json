@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "rule_id": {
+      "title": "Rule Id",
+      "type": "string"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "executed",
+        "failed",
+        "partial",
+        "skipped",
+        "blocked",
+        "expired",
+        "duplicate",
+        "cooldown",
+        "unknown"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "reason": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "plan_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Plan Id"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "rule_id",
+    "event_id",
+    "status",
+    "reason",
+    "observed_at"
+  ],
+  "title": "AutomationEvaluation",
+  "type": "object"
+}

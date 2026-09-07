@@ -5,7 +5,7 @@ from __future__ import annotations
 from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import ExecutionSummary, Plan
+from domoai.domain.models import AggregateExecutionCapability, ExecutionSummary, Plan
 from domoai.runtime.approval_store import ApprovalGrant
 
 
@@ -29,10 +29,10 @@ class DomoticsFacade:
         plan: Plan,
         *,
         state_version_overrides: dict[str, int] | None = None,
-        aggregate_owner: bool = False,
+        aggregate_capability: AggregateExecutionCapability | None = None,
     ) -> ExecutionSummary:
         return await self.executor.execute(
             plan,
             state_version_overrides=state_version_overrides,
-            aggregate_owner=aggregate_owner,
+            aggregate_capability=aggregate_capability,
         )

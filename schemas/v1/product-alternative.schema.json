@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "plan_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "objective_values": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "maxProperties": 32,
+      "title": "Objective Values",
+      "type": "object"
+    },
+    "constraint_effects": {
+      "additionalProperties": true,
+      "maxProperties": 16,
+      "title": "Constraint Effects",
+      "type": "object"
+    },
+    "forecast_assumptions": {
+      "additionalProperties": true,
+      "maxProperties": 16,
+      "title": "Forecast Assumptions",
+      "type": "object"
+    }
+  },
+  "required": [
+    "plan_id"
+  ],
+  "title": "ProductAlternative",
+  "type": "object"
+}

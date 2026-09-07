@@ -10,13 +10,14 @@ from __future__ import annotations
 import hmac
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
 
 from domoai.domain.errors import DomainError, ErrorCode
-from domoai.domain.models import Approval, Plan, PlanStatus
+from domoai.domain.models import Approval, AuthorityContext, Plan, PlanStatus
 from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,26 @@ class ApprovalGrantPersistence(Protocol):
 
     def nonce_exists_sync(self, nonce: str) -> bool: ...
 
+    def reservation_status_sync(self, approval_id: str) -> tuple[str, str] | None: ...
+
+    def list_reservation_approval_ids_sync(self, reservation_id: str) -> list[str]: ...
+
+    def reserve_if_pending_sync(
+        self, approval_id: str, *, reservation_id: str, now: datetime
+    ) -> bool: ...
+
+    def commit_reservation_sync(
+        self, approval_id: str, *, reservation_id: str, now: datetime
+    ) -> bool: ...
+
+    def commit_reservation_batch_sync(
+        self, approval_ids: list[str], *, reservation_id: str, now: datetime
+    ) -> bool: ...
+
+    def release_reservation_sync(
+        self, approval_id: str, *, reservation_id: str, now: datetime
+    ) -> bool: ...
+
 
 @dataclass(frozen=True)
 class ApprovalGrant:
@@ -101,6 +122,7 @@ class ApprovalGrant:
     assertion_nonce: str | None = None
     approved_at: datetime | None = None
     expires_at: datetime | None = None
+    authority: AuthorityContext = field(default_factory=AuthorityContext)
 
 
 class ApprovalStore:
@@ -116,9 +138,11 @@ class ApprovalStore:
         legacy_operator_id: str = "legacy_operator",
         clock: Clock | None = None,
         persistence: ApprovalGrantPersistence | None = None,
+        operational_metrics: RuntimeOperationalMetrics | None = None,
     ) -> None:
         self._grants: dict[str, ApprovalGrant] = {}
         self._consumed: set[str] = set()
+        self._reservations: dict[str, tuple[str, str]] = {}
         self._assertion_nonces: set[str] = set()
         stripped = operator_token.strip() if operator_token is not None else ""
         self._operator_token: str | None = stripped or None
@@ -126,6 +150,7 @@ class ApprovalStore:
         self._legacy_operator_id = legacy_operator_id
         self._clock = clock or SystemClock()
         self._persistence = persistence
+        self._operational_metrics = operational_metrics
 
     def issue(
         self,
@@ -356,6 +381,7 @@ class ApprovalStore:
             assertion_nonce=assertion_nonce,
             approved_at=approved_at,
             expires_at=effective_expiry,
+            authority=plan.authority,
         )
         if self._persistence is not None:
             self._persistence.save_sync(grant)
@@ -370,18 +396,144 @@ class ApprovalStore:
         bundle_digest: str | None = None,
         recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
-        grant = self.validate(
-            approval_id,
-            plan,
-            bundle_digest=bundle_digest,
-            recurrence_digest=recurrence_digest,
-        )
+        try:
+            grant = self.validate(
+                approval_id,
+                plan,
+                bundle_digest=bundle_digest,
+                recurrence_digest=recurrence_digest,
+            )
+        except DomainError:
+            self._record_approval("rejected")
+            raise
         if self._persistence is not None and not self._persistence.consume_if_pending_sync(
             approval_id, now=self._clock.now()
         ):
+            self._record_approval("rejected")
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval has already been consumed")
         self._consumed.add(approval_id)
+        self._record_approval("consumed")
         return grant
+
+    def reserve(
+        self,
+        approval_id: str,
+        plan: Plan,
+        *,
+        reservation_id: str,
+        bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
+    ) -> ApprovalGrant:
+        """Hold a grant while a durable commit is assembled.
+
+        Reservation deliberately leaves the grant pending in the approval
+        ledger. It becomes consumed only after the caller has durably created
+        the schedule/commit record, and can be released on a pre-write
+        failure.
+        """
+
+        if not reservation_id.strip():
+            raise ValueError("approval reservation ID must be non-empty")
+        existing = self._reservation_status(approval_id)
+        if existing is not None:
+            if existing == (reservation_id, "reserved"):
+                grant = self._load_grant(approval_id)
+                if grant is None:
+                    raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Unknown approval")
+                self._validate_grant_binding(
+                    grant,
+                    plan,
+                    bundle_digest=bundle_digest,
+                    recurrence_digest=recurrence_digest,
+                )
+                return grant
+            if existing[1] != "released":
+                raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is already reserved")
+        try:
+            grant = self.validate(
+                approval_id,
+                plan,
+                bundle_digest=bundle_digest,
+                recurrence_digest=recurrence_digest,
+            )
+        except DomainError:
+            self._record_approval("rejected")
+            raise
+        if self._persistence is not None and not self._persistence.reserve_if_pending_sync(
+            approval_id,
+            reservation_id=reservation_id,
+            now=self._clock.now(),
+        ):
+            self._record_approval("rejected")
+            raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is already reserved")
+        self._reservations[approval_id] = (reservation_id, "reserved")
+        self._record_approval("reserved")
+        return grant
+
+    def commit_reservation(
+        self, reservation_id: str, approval_ids: list[str] | None = None
+    ) -> None:
+        """Atomically consume the grants held by a commit reservation."""
+
+        ids = self._reservation_ids(reservation_id, approval_ids)
+        if self._persistence is not None and ids:
+            if not self._persistence.commit_reservation_batch_sync(
+                ids, reservation_id=reservation_id, now=self._clock.now()
+            ):
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approval reservation could not commit",
+                )
+            for approval_id in ids:
+                self._reservations[approval_id] = (reservation_id, "committed")
+                self._consumed.add(approval_id)
+                self._record_approval("consumed")
+            return
+        for approval_id in ids:
+            status = self._reservation_status(approval_id)
+            if status is None or status[0] != reservation_id:
+                raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval reservation is missing")
+            if status[1] == "committed":
+                self._consumed.add(approval_id)
+                continue
+            if status[1] != "reserved":
+                raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval reservation is not active")
+            if self._persistence is not None and not self._persistence.commit_reservation_sync(
+                approval_id,
+                reservation_id=reservation_id,
+                now=self._clock.now(),
+            ):
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Approval reservation could not commit",
+                )
+            self._reservations[approval_id] = (reservation_id, "committed")
+            self._consumed.add(approval_id)
+            self._record_approval("consumed")
+
+    def release_reservation(
+        self, reservation_id: str, approval_ids: list[str] | None = None
+    ) -> None:
+        """Release grants held by a commit that failed before physical writes."""
+
+        for approval_id in self._reservation_ids(reservation_id, approval_ids):
+            status = self._reservation_status(approval_id)
+            if status is None or status[0] != reservation_id or status[1] == "released":
+                continue
+            if status[1] == "committed":
+                continue
+            if self._persistence is not None:
+                self._persistence.release_reservation_sync(
+                    approval_id,
+                    reservation_id=reservation_id,
+                    now=self._clock.now(),
+                )
+            self._reservations[approval_id] = (reservation_id, "released")
+            self._record_approval("released")
+
+    def _record_approval(self, event: str) -> None:
+        if self._operational_metrics is not None:
+            self._operational_metrics.record_approval(event)
 
     def verify_consumed(
         self,
@@ -444,6 +596,9 @@ class ApprovalStore:
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Unknown approval")
         if self._is_consumed(approval_id):
             raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval has already been consumed")
+        reservation = self._reservation_status(approval_id)
+        if reservation is not None and reservation[1] == "reserved":
+            raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is reserved")
         self._validate_grant_binding(
             grant,
             plan,
@@ -467,6 +622,33 @@ class ApprovalStore:
             approval_id
         )
 
+    def _reservation_status(self, approval_id: str) -> tuple[str, str] | None:
+        local = self._reservations.get(approval_id)
+        if local is not None:
+            return local
+        if self._persistence is not None:
+            return self._persistence.reservation_status_sync(approval_id)
+        return None
+
+    def _reservation_ids(
+        self, reservation_id: str, approval_ids: list[str] | None
+    ) -> list[str]:
+        ids = list(dict.fromkeys(approval_ids or []))
+        ids.extend(
+            approval_id
+            for approval_id, (held_by, _status) in self._reservations.items()
+            if held_by == reservation_id and approval_id not in ids
+        )
+        if self._persistence is not None:
+            ids.extend(
+                approval_id
+                for approval_id in self._persistence.list_reservation_approval_ids_sync(
+                    reservation_id
+                )
+                if approval_id not in ids
+            )
+        return ids
+
     def _validate_grant_binding(
         self,
         grant: ApprovalGrant,
@@ -486,6 +668,13 @@ class ApprovalStore:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the plan's current validation digest",
+            )
+        if grant.authority.tenant_id != plan.authority.tenant_id or (
+            grant.authority.household_id != plan.authority.household_id
+        ):
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the plan authority context",
             )
         if grant.validation_valid_until != plan.validation.valid_until:
             raise DomainError(
@@ -537,6 +726,7 @@ class ApprovalStore:
             "window_digest": grant.window_digest,
             "schedule_revision": grant.schedule_revision,
             "approval_id": grant.approval_id,
+            "authority": grant.authority,
         }
         actual = {
             field_name: getattr(approval, field_name)

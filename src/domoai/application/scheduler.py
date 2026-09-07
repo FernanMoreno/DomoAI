@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 from domoai.application.execution_admission import AdmissionOperation, ExecutionAdmission
+from domoai.application.execution_projection import project_execution_summary
 from domoai.application.executor import PlanExecutor
-from domoai.application.recurrence import next_occurrence
+from domoai.application.recurrence import (
+    next_occurrence,
+    occurrence_idempotency_key,
+    recurrence_digest,
+    recurring_template_digest,
+)
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     BundleMemberCommitStatus,
     Command,
+    ExecutionDependencyEvidence,
     ExecutionStatus,
     ExecutionSummary,
     Plan,
     PlanStatus,
     RecurrenceRule,
+    execution_dependency_evidence_digest,
+    execution_outcome_digest,
 )
 from domoai.persistence.repositories import (
     BundleCommitRepository,
@@ -59,6 +69,8 @@ class Scheduler:
         recurring_repository: RecurringScheduleRepository | None = None,
         bundle_repository: BundleCommitRepository | None = None,
         execution_admission: ExecutionAdmission | None = None,
+        recovery_runner: Callable[[], Awaitable[None]] | None = None,
+        local_automation_runner: Callable[[datetime], Awaitable[object]] | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.executor = executor
@@ -69,6 +81,8 @@ class Scheduler:
         self.recurring_repository = recurring_repository
         self.bundle_repository = bundle_repository
         self.execution_admission = execution_admission
+        self.recovery_runner = recovery_runner
+        self.local_automation_runner = local_automation_runner
         self.clock = clock or SystemClock()
         self.alive = False
         self.last_lateness_seconds: float | None = None
@@ -84,7 +98,6 @@ class Scheduler:
             await self.execution_admission.admit(
                 plan,
                 operation=AdmissionOperation.SCHEDULE,
-                aggregate_owner=False,
             )
         await self.repository.schedule(plan)
 
@@ -96,7 +109,6 @@ class Scheduler:
             await self.execution_admission.admit(
                 scheduled[0],
                 operation=AdmissionOperation.CANCEL,
-                aggregate_owner=False,
             )
         return await self.repository.cancel(plan_id)
 
@@ -116,7 +128,6 @@ class Scheduler:
             await self.execution_admission.admit(
                 scheduled[0],
                 operation=AdmissionOperation.RESCHEDULE,
-                aggregate_owner=False,
             )
         return await self.repository.reschedule(
             plan_id,
@@ -314,16 +325,61 @@ class Scheduler:
                     predecessor_plan_ids=predecessor_ids,
                 )
             evidence = predecessor.details.get("dependency_evidence")
-            if not isinstance(evidence, dict) or (
-                evidence.get("status") != ExecutionStatus.CONFIRMED_SUCCESS.value
+            try:
+                dependency_evidence = ExecutionDependencyEvidence.model_validate(evidence)
+            except Exception:
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+
+            if (
+                dependency_evidence.bundle_id != bundle.id
+                or dependency_evidence.member_plan_id != predecessor_plan_id
+                or dependency_evidence.predecessor_plan_id != predecessor_plan_id
+                or dependency_evidence.status is not ExecutionStatus.CONFIRMED_SUCCESS
             ):
                 return _PredecessorGateResult(
                     allowed=False,
                     predecessor_plan_id=predecessor_plan_id,
                     predecessor_plan_ids=predecessor_ids,
                 )
-            versions = evidence.get("state_versions")
-            if isinstance(versions, dict) and dependencies is not None:
+
+            predecessor_plan_repository = self._plan_repository()
+            if predecessor_plan_repository is None:
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+            persisted_predecessor = await predecessor_plan_repository.get(predecessor_plan_id)
+            if persisted_predecessor is None or persisted_predecessor.execution is None:
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+            outcomes = persisted_predecessor.execution.outcomes
+            if (
+                [outcome.command_id for outcome in outcomes]
+                != dependency_evidence.predecessor_command_ids
+                or [command.id for command in persisted_predecessor.commands]
+                != dependency_evidence.predecessor_command_ids
+                or any(
+                    outcome.status is not ExecutionStatus.CONFIRMED_SUCCESS
+                    for outcome in outcomes
+                )
+                or execution_outcome_digest(outcomes) != dependency_evidence.outcome_digest
+            ):
+                return _PredecessorGateResult(
+                    allowed=False,
+                    predecessor_plan_id=predecessor_plan_id,
+                    predecessor_plan_ids=predecessor_ids,
+                )
+
+            versions = dependency_evidence.state_versions
+            if dependencies is not None:
                 overrides.update(
                     {
                         key: value
@@ -370,13 +426,38 @@ class Scheduler:
             for key in keys:
                 device_id, _, capability_name = key.partition("::")
                 state_versions[key] = state_store.state_version(device_id, capability_name)
-        details = {
-            "dependency_evidence": {
-                "predecessor_plan_id": plan.id,
-                "status": execution_status.value,
-                "state_versions": state_versions,
-            }
-        }
+        details: dict[str, Any] = {}
+        if member_status is BundleMemberCommitStatus.EXECUTED:
+            bundle = await self.bundle_repository.get_for_plan(plan.id)
+            if bundle is None:
+                return
+            outcome_digest = execution_outcome_digest(execution.outcomes)
+            captured_at = self.clock.now()
+            evidence = ExecutionDependencyEvidence(
+                bundle_id=bundle.id,
+                member_plan_id=plan.id,
+                predecessor_plan_id=plan.id,
+                predecessor_command_ids=[
+                    outcome.command_id for outcome in execution.outcomes
+                ],
+                status=execution_status,
+                state_versions=state_versions,
+                captured_at=captured_at,
+                outcome_digest=outcome_digest,
+                evidence_digest=execution_dependency_evidence_digest(
+                    bundle_id=bundle.id,
+                    member_plan_id=plan.id,
+                    predecessor_plan_id=plan.id,
+                    predecessor_command_ids=[
+                        outcome.command_id for outcome in execution.outcomes
+                    ],
+                    status=execution_status,
+                    state_versions=state_versions,
+                    captured_at=captured_at,
+                    outcome_digest=outcome_digest,
+                ),
+            )
+            details = {"dependency_evidence": evidence.model_dump(mode="json")}
         await self.bundle_repository.record_member_outcome(
             plan.id,
             status=member_status,
@@ -474,14 +555,30 @@ class Scheduler:
                     )
                     results.append({"plan_id": plan.id, "outcome": "dependency_failed"})
                     continue
+                execution_kwargs: dict[str, Any] = {}
                 if gate.state_version_overrides:
-                    execution = await self.executor.execute(
-                        plan,
-                        state_version_overrides=gate.state_version_overrides,
-                        aggregate_owner=True,
+                    execution_kwargs["state_version_overrides"] = gate.state_version_overrides
+                bundle = (
+                    await self.bundle_repository.get_for_plan(plan.id)
+                    if self.bundle_repository is not None
+                    else None
+                )
+                if (
+                    bundle is not None
+                    and self.execution_admission is not None
+                    and any(member.plan_id == plan.id for member in bundle.members)
+                ):
+                    execution_kwargs["aggregate_capability"] = (
+                        await self.execution_admission.issue_aggregate_capability(
+                            bundle.id, plan.id
+                        )
                     )
-                else:
-                    execution = await self.executor.execute(plan, aggregate_owner=True)
+                elif self.execution_admission is None:
+                    # Isolated scheduler fakes may omit admission. They can
+                    # exercise scheduling bookkeeping, but no production
+                    # composition can use this branch for physical execution.
+                    pass
+                execution = await self.executor.execute(plan, **execution_kwargs)
                 statuses = {outcome.status for outcome in execution.outcomes}
                 if ExecutionStatus.UNKNOWN in statuses:
                     self.execution_unknown_total += 1
@@ -551,13 +648,25 @@ class Scheduler:
         *,
         plan: Plan | None = None,
         approval: Any | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> datetime:
         if self.recurring_repository is None:
             raise ValueError("Recurring scheduling is unavailable in this deployment")
+        if self.execution_admission is not None and plan is not None:
+            await self.execution_admission.admit(
+                plan,
+                operation=AdmissionOperation.STANDING_AUTOMATION,
+            )
         first_occurrence = next_occurrence(rule, self.clock.now())
         if rule.expires_at is not None and first_occurrence > rule.expires_at:
             raise ValueError("Recurring schedule expires_at is before its first occurrence")
-        await self.recurring_repository.create(schedule_id, commands, rule, first_occurrence)
+        await self.recurring_repository.create(
+            schedule_id,
+            commands,
+            rule,
+            first_occurrence,
+            authority,
+        )
         # Creating a standing automation is a distinct authority act from
         # executing a command once (see spec 145): the digest, policy
         # decisions, and (when required) the approval evidence that
@@ -573,6 +682,12 @@ class Scheduler:
                 ),
                 "validation_digest": (
                     plan.validation.digest if plan is not None and plan.validation else None
+                ),
+                "template_digest": (
+                    authority.get("template_digest") if authority is not None else None
+                ),
+                "recurrence_digest": (
+                    authority.get("recurrence_digest") if authority is not None else None
                 ),
                 "policy_decisions": (
                     [decision.model_dump(mode="json") for decision in plan.policy_decisions]
@@ -603,7 +718,56 @@ class Scheduler:
         results: list[dict[str, Any]] = []
         active_schedules = await self.recurring_repository.list_active()
         for schedule_id, commands, rule, execute_at in active_schedules:
-            if rule.expires_at is not None and execute_at > rule.expires_at:
+            authority = await self.recurring_repository.get_authority(schedule_id)
+            if authority:
+                expected_template_digest = recurring_template_digest(commands)
+                expected_recurrence_digest = recurrence_digest(
+                    str(authority.get("plan_id", "")),
+                    rule,
+                    template_digest=expected_template_digest,
+                )
+                if (
+                    authority.get("schema") != "standing-automation-authority-v1"
+                    or authority.get("template_digest") != expected_template_digest
+                    or authority.get("recurrence_digest") != expected_recurrence_digest
+                    or not authority.get("validation_digest")
+                    or not authority.get("owner")
+                    or not authority.get("approval_id")
+                ):
+                    await self.recurring_repository.cancel(schedule_id)
+                    self.audit.append(
+                        event_type="recurring_authority_rejected",
+                        actor="runtime",
+                        subject_id=schedule_id,
+                        payload={"reason": "stored_authority_mismatch"},
+                    )
+                    results.append({"schedule_id": schedule_id, "outcome": "authority_rejected"})
+                    continue
+                authority_expires_at = authority.get("expires_at")
+                authority_expired = False
+                if authority_expires_at is not None:
+                    try:
+                        authority_expiry = datetime.fromisoformat(
+                            authority_expires_at
+                        )
+                        if authority_expiry.tzinfo is None or authority_expiry.utcoffset() is None:
+                            raise ValueError("standing authority expiry must be timezone-aware")
+                        authority_expired = self.clock.now() >= authority_expiry
+                    except (TypeError, ValueError):
+                        authority_expired = True
+                if authority_expired:
+                    await self.recurring_repository.cancel(schedule_id)
+                    self.audit.append(
+                        event_type="recurring_authority_expired",
+                        actor="runtime",
+                        subject_id=schedule_id,
+                        payload={"reason": "standing_authority_expired"},
+                    )
+                    results.append({"schedule_id": schedule_id, "outcome": "authority_expired"})
+                    continue
+            if rule.expires_at is not None and (
+                execute_at > rule.expires_at or sweep_time >= rule.expires_at
+            ):
                 await self.recurring_repository.cancel(schedule_id)
                 self.audit.append(
                     event_type="recurring_schedule_expired",
@@ -617,12 +781,32 @@ class Scheduler:
                 continue
             plan = Plan(
                 id=f"{schedule_id}@{execute_at.isoformat()}",
-                commands=commands,
+                commands=[
+                    command.model_copy(
+                        update={
+                            "idempotency_key": occurrence_idempotency_key(
+                                household_id=rule.authority.household_id,
+                                automation_id=schedule_id,
+                                definition_digest=expected_template_digest
+                                if authority
+                                else recurring_template_digest(commands),
+                                occurrence_id=execute_at.isoformat(),
+                                command_id=command.id,
+                                command_index=index,
+                            )
+                        }
+                    )
+                    for index, command in enumerate(commands)
+                ],
                 created_at=self.clock.now(),
+                expires_at=rule.expires_at,
+                authority=rule.authority,
+                agent_request_id=rule.authority.principal_id,
             )
             try:
+                outcome: str
                 if await self._reconcile_inflight_plan(plan.id, settle_scheduled_row=False):
-                    next_time = next_occurrence(rule, execute_at)
+                    next_time = next_occurrence(rule, sweep_time)
                     await self.recurring_repository.advance(schedule_id, next_time)
                     self.audit.append(
                         event_type="recurring_occurrence_reconciled",
@@ -639,7 +823,7 @@ class Scheduler:
                 evidence = await self._terminal_plan_evidence(plan.id)
                 if evidence is not None:
                     plan_status, _schedule_status = evidence
-                    next_time = next_occurrence(rule, execute_at)
+                    next_time = next_occurrence(rule, sweep_time)
                     await self.recurring_repository.advance(schedule_id, next_time)
                     self.audit.append(
                         event_type="recurring_occurrence_reconciled",
@@ -654,8 +838,19 @@ class Scheduler:
                     continue
                 validated = self.executor.plan_service.validate(plan)
                 if validated.status is PlanStatus.READY:
-                    await self.executor.execute(validated, aggregate_owner=True)
-                    outcome = "executed"
+                    execution = await self.executor.execute(validated)
+                    outcome, outcome_reason = project_execution_summary(execution)
+                    if outcome != "executed":
+                        self.audit.append(
+                            event_type="recurring_occurrence_result",
+                            actor="runtime",
+                            subject_id=plan.id,
+                            payload={
+                                "schedule_id": schedule_id,
+                                "outcome": outcome,
+                                "reason": outcome_reason,
+                            },
+                        )
                 else:
                     reason = (
                         "requires_confirmation"
@@ -669,7 +864,7 @@ class Scheduler:
                         payload={"schedule_id": schedule_id, "reason": reason},
                     )
                     outcome = "skipped"
-                next_time = next_occurrence(rule, execute_at)
+                next_time = next_occurrence(rule, sweep_time)
                 await self.recurring_repository.advance(schedule_id, next_time)
             except Exception as error:
                 self.audit.append(
@@ -710,5 +905,25 @@ class Scheduler:
                         subject_id="scheduler",
                         payload={"error": str(error)[:200]},
                     )
+                if self.local_automation_runner is not None:
+                    try:
+                        await self.local_automation_runner(self.clock.now())
+                    except Exception as error:
+                        self.audit.append(
+                            event_type="local_automation_sweep_error",
+                            actor="runtime",
+                            subject_id="local-automation",
+                            payload={"error": str(error)[:200]},
+                        )
+                if self.recovery_runner is not None:
+                    try:
+                        await self.recovery_runner()
+                    except Exception as error:
+                        self.audit.append(
+                            event_type="runtime_reconciliation_error",
+                            actor="runtime",
+                            subject_id="scheduler",
+                            payload={"error": str(error)[:200]},
+                        )
         finally:
             self.alive = False

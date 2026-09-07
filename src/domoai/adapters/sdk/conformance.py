@@ -19,7 +19,7 @@ from .manifest import (
     DiagnosticSeverity,
     sanitize_exception,
 )
-from .registry import AdapterRegistration
+from .registry import AdapterRegistration, AdapterRegistry
 
 
 class ConformanceCheck(StrictModel):
@@ -94,6 +94,29 @@ class ConformanceHarness:
                 _failed(checks, "discover", "discovery failed", diagnostics, error)
                 return _result(
                     self.registration.manifest, self.fixture_profile, checks, diagnostics
+                )
+
+            try:
+                compatibility_registry = AdapterRegistry()
+                compatibility_registry.register(self.registration)
+                compatibility = compatibility_registry.compatibility(
+                    self.registration.manifest.adapter_id, snapshot
+                )
+                if compatibility.status.value != "compatible":
+                    diagnostics.extend(compatibility.diagnostics)
+                    raise ValueError("discovery does not satisfy the provider manifest")
+                _passed(
+                    checks,
+                    "manifest_compatibility",
+                    "discovery satisfies the provider capability manifest",
+                )
+            except Exception as error:
+                _failed(
+                    checks,
+                    "manifest_compatibility",
+                    "provider manifest compatibility failed",
+                    diagnostics,
+                    error,
                 )
 
             try:

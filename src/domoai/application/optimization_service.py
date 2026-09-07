@@ -5,7 +5,7 @@ from __future__ import annotations
 from domoai.application.plan_service import PlanService
 from domoai.domain.models import ErrorDetail, Plan
 from domoai.optimizer.ports import OptimizationResult, OptimizationStatus, OptimizerPort
-from domoai.optimizer.scenario import OptimizationScenario
+from domoai.optimizer.scenario import OptimizationScenario, scenario_definition_digest
 from domoai.runtime.registry import DeviceRegistry
 
 
@@ -29,6 +29,10 @@ class OptimizationService:
         result = self.optimizer.optimize(scenario)
         if result.solver_evidence is not None:
             self._last_wall_time_seconds = result.solver_evidence.wall_time_seconds
+        if isinstance(scenario, OptimizationScenario):
+            return result.model_copy(
+                update={"definition_digest": scenario_definition_digest(scenario)}
+            )
         return result
 
     def validate_proposal(self, result: OptimizationResult) -> OptimizationResult:

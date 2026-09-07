@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
+from secrets import token_urlsafe
 from typing import Any, cast
 
+from domoai.application.coordination import FencingGuard
+from domoai.domain.coordination import FencingViolation
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
+    AggregateExecutionCapability,
+    BundleCommit,
     BundleMemberCommitStatus,
+    ExecutionDependencyEvidence,
     ExecutionStatus,
     Plan,
     PlanStatus,
 )
 from domoai.runtime.approval_store import ApprovalStore
+from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog, redact_payload
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 
 _AUDIT_IDENTIFIER_MAX_LENGTH = 200
 _AUDIT_IDENTIFIER_MAX_JSON_BYTES = _AUDIT_IDENTIFIER_MAX_LENGTH + 2
@@ -52,6 +61,7 @@ def _bounded_audit_identifier(identifier: str) -> str:
 class AdmissionOperation(StrEnum):
     EXECUTE = "execute"
     SCHEDULE = "schedule"
+    STANDING_AUTOMATION = "standing_automation"
     CANCEL = "cancel"
     RESCHEDULE = "reschedule"
 
@@ -69,6 +79,7 @@ class ExecutionAdmission:
     _MEMBER_REJECTION_ERRORS = {
         AdmissionOperation.EXECUTE: ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
         AdmissionOperation.SCHEDULE: ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
+        AdmissionOperation.STANDING_AUTOMATION: ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
         AdmissionOperation.CANCEL: ErrorCode.BUNDLE_MEMBER_CANCEL_FORBIDDEN,
         AdmissionOperation.RESCHEDULE: ErrorCode.BUNDLE_MEMBER_RESCHEDULE_FORBIDDEN,
     }
@@ -80,20 +91,76 @@ class ExecutionAdmission:
         bundle_repository: Any | None = None,
         approval_store: ApprovalStore | None = None,
         audit: AuditLog | None = None,
+        clock: Clock | None = None,
+        fencing_guard: FencingGuard | None = None,
+        operational_metrics: RuntimeOperationalMetrics | None = None,
     ) -> None:
         self.bundle_repository = bundle_repository
         self.approval_store = approval_store
         self.audit = audit
+        self.clock = clock or SystemClock()
+        self.fencing_guard = fencing_guard
+        self.operational_metrics = operational_metrics
+        self._issued_capabilities: dict[str, AggregateExecutionCapability] = {}
+
+    async def issue_aggregate_capability(
+        self, bundle_id: str, member_plan_id: str, *, ttl_seconds: float = 60.0
+    ) -> AggregateExecutionCapability:
+        """Issue a short-lived capability only for a persisted bundle member."""
+
+        if self.bundle_repository is None:
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Cannot issue aggregate execution capability without bundle persistence",
+            )
+        bundle = await self.bundle_repository.get_for_plan(member_plan_id)
+        if bundle is None or bundle.id != bundle_id:
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Bundle aggregate does not own the requested member",
+            )
+        member = next((item for item in bundle.members if item.plan_id == member_plan_id), None)
+        if member is None:
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Bundle aggregate does not own the requested member",
+            )
+        if ttl_seconds <= 0:
+            raise ValueError("aggregate capability TTL must be positive")
+        capability = AggregateExecutionCapability(
+            authority=bundle.authority,
+            bundle_id=bundle.id,
+            member_plan_id=member_plan_id,
+            bundle_digest=bundle.bundle_digest,
+            nonce=token_urlsafe(32),
+            expires_at=self.clock.now() + timedelta(seconds=ttl_seconds),
+        )
+        self._issued_capabilities[capability.nonce] = capability
+        return capability
 
     async def admit(
         self,
         plan: Plan,
         *,
         operation: AdmissionOperation = AdmissionOperation.EXECUTE,
-        aggregate_owner: bool = False,
+        aggregate_capability: AggregateExecutionCapability | None = None,
     ) -> AdmissionDecision:
         if not isinstance(operation, AdmissionOperation):
             raise ValueError("Unsupported admission operation")
+        if self.fencing_guard is not None:
+            try:
+                await self.fencing_guard.assert_writable_for_authority(plan.authority)
+            except FencingViolation as error:
+                if self.operational_metrics is not None:
+                    self.operational_metrics.record_fencing(
+                        "stale_rejected" if "stale" in str(error) else "lease_lost"
+                    )
+                raise DomainError(
+                    ErrorCode.FENCING_VIOLATION,
+                    "Physical execution requires the current household fencing lease",
+                    retryable=True,
+                    details={"reason": str(error)},
+                ) from error
         if self.bundle_repository is None:
             self._verify_non_member_execution(
                 plan,
@@ -113,10 +180,18 @@ class ExecutionAdmission:
         if member is None:
             self._verify_execution(plan, operation=operation, expected_bundle_digest=None)
             return AdmissionDecision(plan_id=plan.id, bundle_id=bundle.id)
-        if not aggregate_owner:
-            self._reject_bundle_member(plan, bundle_id=bundle.id, operation=operation)
         if operation is not AdmissionOperation.EXECUTE:
-            return AdmissionDecision(plan_id=plan.id, bundle_id=bundle.id)
+            self._reject_bundle_member(plan, bundle_id=bundle.id, operation=operation)
+        if aggregate_capability is None:
+            self._reject_bundle_member(plan, bundle_id=bundle.id, operation=operation)
+        if operation is AdmissionOperation.EXECUTE and not self._valid_aggregate_capability(
+            aggregate_capability, bundle, plan.id
+        ):
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Invalid or replayed aggregate execution capability",
+                details={"bundle_id": bundle.id, "plan_id": plan.id},
+            )
         if plan.approval is not None and (
             "bundle" not in plan.approval.scope.split("+")
             or plan.approval.bundle_digest != bundle.bundle_digest
@@ -135,12 +210,22 @@ class ExecutionAdmission:
             predecessor = next(
                 (item for item in bundle.members if item.plan_id == predecessor_id), None
             )
+            evidence: ExecutionDependencyEvidence | None = None
+            if predecessor is not None:
+                try:
+                    evidence = ExecutionDependencyEvidence.model_validate(
+                        predecessor.details.get("dependency_evidence")
+                    )
+                except Exception:
+                    evidence = None
             if (
                 predecessor is None
                 or predecessor.status is not BundleMemberCommitStatus.EXECUTED
-                or not isinstance(predecessor.details.get("dependency_evidence"), dict)
-                or predecessor.details["dependency_evidence"].get("status")
-                != ExecutionStatus.CONFIRMED_SUCCESS.value
+                or evidence is None
+                or evidence.bundle_id != bundle.id
+                or evidence.member_plan_id != predecessor_id
+                or evidence.predecessor_plan_id != predecessor_id
+                or evidence.status is not ExecutionStatus.CONFIRMED_SUCCESS
             ):
                 raise DomainError(
                     ErrorCode.PRECONDITION_FAILED,
@@ -157,10 +242,31 @@ class ExecutionAdmission:
             operation=operation,
             expected_bundle_digest=expected_bundle_digest,
         )
+        assert aggregate_capability is not None
+        self._issued_capabilities.pop(aggregate_capability.nonce, None)
         return AdmissionDecision(
             plan_id=plan.id,
             bundle_id=bundle.id,
             predecessor_plan_ids=predecessor_ids,
+        )
+
+    def _valid_aggregate_capability(
+        self,
+        capability: AggregateExecutionCapability | None,
+        bundle: BundleCommit,
+        plan_id: str,
+    ) -> bool:
+        if capability is None:
+            return False
+        issued = self._issued_capabilities.get(capability.nonce)
+        return (
+            issued == capability
+            and capability.authority.tenant_id == bundle.authority.tenant_id
+            and capability.authority.household_id == bundle.authority.household_id
+            and capability.bundle_id == bundle.id
+            and capability.bundle_digest == bundle.bundle_digest
+            and capability.member_plan_id == plan_id
+            and self.clock.now() < capability.expires_at
         )
 
     def _verify_non_member_execution(

@@ -17,7 +17,7 @@ def _snapshot(status: StateStatus) -> StateSnapshot:
     return StateSnapshot(
         device_id="garage.door",
         capability="door_closed",
-        value=True,
+        value=True if status not in {StateStatus.INVALID, StateStatus.UNAVAILABLE} else None,
         observed_at=observed_at,
         received_at=observed_at,
         status=status,

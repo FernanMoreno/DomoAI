@@ -18,13 +18,14 @@ from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
-from domoai.application.recurrence import recurrence_digest
+from domoai.application.recurrence import recurrence_digest, recurring_template_digest
 from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError
 from domoai.domain.models import (
     BundleCommit,
     BundleMemberCommit,
+    Command,
     PlanStatus,
     Policy,
     PolicyAction,
@@ -57,6 +58,10 @@ OPERATOR_TOKEN = "test-operator-secret"
 
 
 def structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return result[1]
     assert isinstance(result, dict)
@@ -212,7 +217,12 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
     assert tools == [
         "discover_devices",
         "get_state",
+        "get_history",
         "get_energy_context",
+        "preview_command",
+        "prepare_command",
+        "preview_plan",
+        "prepare_plan",
         "validate_command",
         "validate_plan",
         "request_approval",
@@ -224,11 +234,16 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "schedule_recurring_plan",
         "cancel_recurring_schedule",
         "list_recurring_schedules",
+        "create_local_automation_rule",
+        "update_local_automation_rule",
+        "list_local_automation_rules",
+        "set_local_automation_status",
         "list_audit_events",
     ]
     assert resources == [
         "domotics://areas",
         "domotics://capabilities",
+        "domotics://coverage",
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",
@@ -250,6 +265,7 @@ async def test_invalid_mcp_command_returns_safe_error_envelope_without_adapter_c
             "validate_command",
             {
                 "command": {
+                    "id": "invalid-command",
                     "device_id": device_id,
                     "command": "set_brightness",
                     "value": 140,
@@ -259,9 +275,45 @@ async def test_invalid_mcp_command_returns_safe_error_envelope_without_adapter_c
         )
     )
 
-    assert result["error"]["code"] == "validation_error"
+    assert result["validation"]["status"] == "invalid"
+    assert result["validation"]["errors"]
     assert adapter.calls == []
     assert "token" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_preview_is_read_only_and_prepare_is_explicitly_persistent() -> None:
+    context = await build_context()
+    server = create_domotics_server(context)
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    plan = {
+        "id": "plan-preview-contract",
+        "agent_request_id": "agent-preview-contract",
+        "commands": [
+            {
+                "id": "command-preview-contract",
+                "device_id": device_id,
+                "command": "turn_on",
+                "idempotency_key": "intent-preview-contract",
+            }
+        ],
+    }
+
+    preview = structured(await server.call_tool("preview_plan", {"plan": plan}))
+    assert preview["plan"]["id"] == plan["id"]
+    assert context.plans == {}
+
+    prepared = structured(await server.call_tool("prepare_plan", {"plan": plan}))
+    assert prepared["plan"]["id"] == plan["id"]
+    assert context.plans[plan["id"]].validation is not None
+
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    assert tools["preview_plan"].annotations.readOnlyHint is True  # type: ignore[union-attr]
+    assert tools["preview_plan"].annotations.destructiveHint is False  # type: ignore[union-attr]
+    assert tools["prepare_plan"].annotations.readOnlyHint is False  # type: ignore[union-attr]
+    assert tools["prepare_plan"].annotations.destructiveHint is True  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -701,7 +753,12 @@ async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> N
     assert tools == [
         "discover_devices",
         "get_state",
+        "get_history",
         "get_energy_context",
+        "preview_command",
+        "prepare_command",
+        "preview_plan",
+        "prepare_plan",
         "validate_command",
         "validate_plan",
         "request_approval",
@@ -713,6 +770,10 @@ async def test_composed_runtime_keeps_mcp_surface_semantic_and_aggregated() -> N
         "schedule_recurring_plan",
         "cancel_recurring_schedule",
         "list_recurring_schedules",
+        "create_local_automation_rule",
+        "update_local_automation_rule",
+        "list_local_automation_rules",
+        "set_local_automation_status",
         "list_audit_events",
     ]
     assert {device["id"] for device in inventory["devices"]} >= {
@@ -1738,6 +1799,12 @@ async def test_schedule_recurring_plan_succeeds_after_request_approval(tmp_path)
                 "recurrence_digest": recurrence_digest(
                     validated["plan"]["id"],
                     RecurrenceRule(time_of_day=time(0, 0), timezone="UTC"),
+                    template_digest=recurring_template_digest(
+                        [
+                            Command.model_validate(command)
+                            for command in validated["plan"]["commands"]
+                        ]
+                    ),
                 ),
             },
         )
@@ -1760,6 +1827,19 @@ async def test_schedule_recurring_plan_succeeds_after_request_approval(tmp_path)
     active = structured(await server.call_tool("list_recurring_schedules", {}))
     assert len(active["schedules"]) == 1
 
+    retry = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+            },
+        )
+    )
+    assert retry["schedule_id"] == scheduled["schedule_id"]
+    assert len(structured(await server.call_tool("list_recurring_schedules", {}))["schedules"]) == 1
+
     # The approval grant is single-use: it was consumed by creating the
     # recurring schedule and cannot also authorize a one-shot execution.
     reuse = structured(
@@ -1776,7 +1856,7 @@ async def test_schedule_recurring_plan_succeeds_after_request_approval(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_schedule_recurring_plan_does_not_require_approval_for_safe_plan(
+async def test_schedule_recurring_plan_requires_standing_approval_for_safe_plan(
     tmp_path,
 ) -> None:
     context = await build_context_with_scheduler_and_recurring(
@@ -1807,6 +1887,19 @@ async def test_schedule_recurring_plan_does_not_require_approval_for_safe_plan(
     )
     assert validated["validation"]["status"] == "valid"
 
+    without_approval = structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": validated["plan"]["id"],
+                "time_of_day": "00:00",
+                "timezone": "UTC",
+            },
+        )
+    )
+    assert without_approval["error"]["code"] == "approval_required"
+    assert (await context.scheduler.list_recurring()) == []  # type: ignore[union-attr]
+
     standing_approval = structured(
         await server.call_tool(
             "request_approval",
@@ -1817,6 +1910,12 @@ async def test_schedule_recurring_plan_does_not_require_approval_for_safe_plan(
                 "recurrence_digest": recurrence_digest(
                     validated["plan"]["id"],
                     RecurrenceRule(time_of_day=time(0, 0), timezone="UTC"),
+                    template_digest=recurring_template_digest(
+                        [
+                            Command.model_validate(command)
+                            for command in validated["plan"]["commands"]
+                        ]
+                    ),
                 ),
             },
         )

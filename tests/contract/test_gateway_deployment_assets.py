@@ -100,3 +100,46 @@ def test_wsl_launcher_does_not_leave_signal_handling_to_uv_wrapper() -> None:
 
     assert 'GATEWAY_BIN="$PROJECT_ROOT/.venv/bin/domoai-mcp-gateway"' in launcher
     assert 'exec "$GATEWAY_BIN"' in launcher
+
+
+def test_adapter_coverage_inventory_is_complete_and_sanitized() -> None:
+    coverage = (ROOT / "docs/adapter-coverage.md").read_text(encoding="utf-8")
+
+    for category in (
+        "native",
+        "via_home_assistant",
+        "plugin",
+        "fixture_or_simulation",
+        "unavailable",
+        "physically_qualified",
+    ):
+        assert category in coverage
+    for adapter_id in ("home_assistant", "matter", "zigbee2mqtt", "knx", "modbus"):
+        assert adapter_id in coverage
+    assert "DOMOAI_HOME_ASSISTANT_TOKEN=" not in coverage
+    assert "DOMOAI_MQTT_PASSWORD=" not in coverage
+
+
+def test_pending_work_index_reflects_current_program_and_external_gates() -> None:
+    pending = (ROOT / "docs/program-status-2026-09-06.md").read_text(encoding="utf-8")
+
+    assert "comparativa-auditoria-especificaciones-2026-09-06.md" in pending
+    assert "196-universal-mcp-baseline" in pending
+    for external_spec in (
+        "133-battery-hil-certification",
+        "140-real-composition-tests",
+        "141-provider-contract-tests",
+    ):
+        assert external_spec in pending
+    assert "319 passed, 8 skipped" not in pending
+
+
+def test_public_docs_link_the_current_adapter_coverage_inventory() -> None:
+    for relative_path in (
+        "README.md",
+        "docs/unified-mcp.md",
+        "docs/adapter-sdk.md",
+        "docs/contracts.md",
+    ):
+        document = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "adapter-coverage.md" in document, relative_path

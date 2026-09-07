@@ -65,6 +65,68 @@ def test_client_token_file_rejects_non_hex_sha256_hash(tmp_path: Path) -> None:
         StaticBearerTokenVerifier.from_file(token_file)
 
 
+def test_client_token_file_rejects_duplicate_client_ids_and_hashes(tmp_path: Path) -> None:
+    from domoai.mcp.auth import StaticBearerTokenVerifier
+
+    token_hash = hashlib.sha256(b"shared-secret").hexdigest()
+    token_file = tmp_path / "tokens.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "clients": [
+                    {"client_id": "one", "token_hash": token_hash},
+                    {"client_id": "two", "token_hash": token_hash},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid MCP client token file"):
+        StaticBearerTokenVerifier.from_file(token_file)
+
+
+def test_client_token_file_rejects_naive_expiry(tmp_path: Path) -> None:
+    from domoai.mcp.auth import StaticBearerTokenVerifier
+
+    token_file = tmp_path / "tokens.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "clients": [
+                    {
+                        "client_id": "naive",
+                        "token_hash": hashlib.sha256(b"naive-secret").hexdigest(),
+                        "expires_at": "2030-01-01T00:00:00",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid MCP client token file"):
+        StaticBearerTokenVerifier.from_file(token_file)
+
+
+def test_client_token_verifier_reload_revokes_removed_token(tmp_path: Path) -> None:
+    from domoai.mcp.auth import StaticBearerTokenVerifier
+
+    token_file = tmp_path / "tokens.json"
+    token_hash = hashlib.sha256(b"reload-secret").hexdigest()
+    token_file.write_text(
+        json.dumps({"clients": [{"client_id": "reload", "token_hash": token_hash}]}),
+        encoding="utf-8",
+    )
+    verifier = StaticBearerTokenVerifier.from_file(token_file)
+    assert asyncio.run(verifier.verify_token("reload-secret")) is not None
+
+    token_file.write_text(json.dumps({"clients": []}), encoding="utf-8")
+    verifier.reload()
+
+    assert asyncio.run(verifier.verify_token("reload-secret")) is None
+
+
 def test_client_scope_is_required_for_physical_mutations() -> None:
     from domoai.mcp.auth import require_client_scope
 

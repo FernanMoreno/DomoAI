@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "BundleCommitRequestMember": {
+      "additionalProperties": false,
+      "properties": {
+        "plan_id": {
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "validation_digest": {
+          "minLength": 1,
+          "title": "Validation Digest",
+          "type": "string"
+        },
+        "execute_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execute At"
+        },
+        "approval_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Id"
+        },
+        "predecessor_plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Predecessor Plan Id"
+        },
+        "predecessor_plan_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Predecessor Plan Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "plan_id",
+        "validation_digest"
+      ],
+      "title": "BundleCommitRequestMember",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Request envelope for one scene routed through the bundle aggregate.",
+  "properties": {
+    "scene_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "scene_digest": {
+      "minLength": 1,
+      "title": "Scene Digest",
+      "type": "string"
+    },
+    "scenario_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Scenario Id",
+      "type": "string"
+    },
+    "runtime_revision": {
+      "minLength": 1,
+      "title": "Runtime Revision",
+      "type": "string"
+    },
+    "bundle_digest": {
+      "minLength": 1,
+      "title": "Bundle Digest",
+      "type": "string"
+    },
+    "members": {
+      "items": {
+        "$ref": "#/$defs/BundleCommitRequestMember"
+      },
+      "maxItems": 50,
+      "minItems": 1,
+      "title": "Members",
+      "type": "array"
+    }
+  },
+  "required": [
+    "scene_id",
+    "scene_digest",
+    "scenario_id",
+    "runtime_revision",
+    "bundle_digest",
+    "members"
+  ],
+  "title": "SceneCommitRequest",
+  "type": "object"
+}

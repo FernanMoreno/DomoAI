@@ -200,6 +200,9 @@ class HomeAssistantProvider:
 
     async def disconnect(self) -> None:
         self._connected = False
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            await close()
 
     async def discover(self) -> list[DeviceDescriptor]:
         snapshot = await self._load_snapshot()

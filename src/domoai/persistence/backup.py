@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -17,6 +18,9 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from domoai.persistence.serialized import SerializedStorageExecutor
 from domoai.persistence.sqlite import (
     MIGRATIONS_DIR,
@@ -26,7 +30,8 @@ from domoai.persistence.sqlite import (
 )
 from domoai.runtime.clock import Clock, SystemClock
 
-BACKUP_FORMAT_VERSION = 1
+BACKUP_FORMAT_VERSION = 2
+SUPPORTED_BACKUP_FORMAT_VERSIONS = frozenset({1, BACKUP_FORMAT_VERSION})
 MANIFEST_FILENAME = "manifest.json"
 COMPLETION_FILENAME = "COMPLETE"
 MEMBER_FILENAMES = {
@@ -64,9 +69,11 @@ class BackupMember:
     sha256: str
     integrity_check: str
     schema_migrations: tuple[str, ...]
+    encryption: str = "none"
+    nonce: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": self.name,
             "filename": self.filename,
             "source_label": self.source_label,
@@ -77,6 +84,10 @@ class BackupMember:
             "integrity_check": self.integrity_check,
             "schema_migrations": list(self.schema_migrations),
         }
+        if self.encryption != "none" or self.nonce is not None:
+            payload["encryption"] = self.encryption
+            payload["nonce"] = self.nonce
+        return payload
 
     @classmethod
     def from_dict(cls, payload: object) -> BackupMember:
@@ -93,7 +104,7 @@ class BackupMember:
             "integrity_check",
             "schema_migrations",
         }
-        if set(payload) != required:
+        if not required.issubset(payload) or set(payload) - required - {"encryption", "nonce"}:
             raise BackupError("backup_manifest_invalid")
         name = payload["name"]
         filename = payload["filename"]
@@ -104,6 +115,8 @@ class BackupMember:
         sha256 = payload["sha256"]
         integrity_check = payload["integrity_check"]
         migrations = payload["schema_migrations"]
+        encryption = payload.get("encryption", "none")
+        nonce = payload.get("nonce")
         if (
             not isinstance(name, str)
             or not isinstance(filename, str)
@@ -121,6 +134,9 @@ class BackupMember:
             or integrity_check != "ok"
             or not isinstance(migrations, list)
             or not all(isinstance(item, str) for item in migrations)
+            or encryption not in {"none", "aes-256-gcm"}
+            or (encryption == "none" and nonce is not None)
+            or (encryption == "aes-256-gcm" and not isinstance(nonce, str))
             or Path(filename).name != filename
             or filename in {"", ".", ".."}
         ):
@@ -135,6 +151,8 @@ class BackupMember:
             sha256=sha256,
             integrity_check=integrity_check,
             schema_migrations=tuple(migrations),
+            encryption=encryption,
+            nonce=nonce,
         )
 
 
@@ -360,7 +378,10 @@ def _load_manifest(backup_dir: Path) -> BackupManifest:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BackupError("backup_manifest_invalid") from error
-    if manifest.format_version != BACKUP_FORMAT_VERSION or manifest.status != "complete":
+    if (
+        manifest.format_version not in SUPPORTED_BACKUP_FORMAT_VERSIONS
+        or manifest.status != "complete"
+    ):
         raise BackupError("backup_schema_incompatible")
     if _manifest_digest(manifest) != manifest.manifest_sha256:
         raise BackupError("backup_digest_mismatch")
@@ -388,26 +409,90 @@ def _verify_staged_member(
 ) -> None:
     try:
         _safe_file(path, error_code="restore_staging_failed")
-        if path.stat().st_size != member.size or _sha256(path) != member.sha256:
+        if member.encryption == "none" and (
+            path.stat().st_size != member.size or _sha256(path) != member.sha256
+        ):
             raise BackupError("restore_staging_failed")
-        integrity, migrations = _read_sqlite_metadata(path)
-        if integrity != member.integrity_check or migrations != member.schema_migrations:
-            raise BackupError("restore_staging_failed")
-        if not set(migrations).issubset(known_migrations):
-            raise BackupError("restore_staging_failed")
+        _verify_sqlite_member(path, member, known_migrations, error_code="restore_staging_failed")
     except BackupError as error:
         if error.code == "restore_staging_failed":
             raise
         raise BackupError("restore_staging_failed") from error
-    except (OSError, sqlite3.Error) as error:
-        raise BackupError("restore_staging_failed") from error
+
+
+def _verify_sqlite_member(
+    path: Path,
+    member: BackupMember,
+    known_migrations: frozenset[str],
+    *,
+    error_code: str,
+) -> None:
+    try:
+        integrity, migrations = _read_sqlite_metadata(path)
+        if integrity != member.integrity_check or migrations != member.schema_migrations:
+            raise BackupError(error_code)
+        if not set(migrations).issubset(known_migrations):
+            raise BackupError(error_code)
+    except BackupError:
+        raise
+    except (OSError, sqlite3.Error, RuntimeError) as error:
+        raise BackupError(error_code) from error
+
+
+def _validate_encryption_key(key: bytes | None) -> bytes | None:
+    if key is not None and len(key) != 32:
+        raise BackupError("backup_encryption_key_invalid")
+    return key
+
+
+def load_backup_encryption_key(path: Path) -> bytes:
+    """Load exactly one AES-256 key from a separate, owner-readable file."""
+
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise BackupError("backup_encryption_key_invalid")
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise BackupError("backup_encryption_key_invalid")
+        key = path.read_bytes()
+    except BackupError:
+        raise
+    except OSError as error:
+        raise BackupError("backup_encryption_key_invalid") from error
+    return _validate_encryption_key(key) or b""
+
+
+def _encrypt_member(source: Path, destination: Path, *, key: bytes, filename: str) -> str:
+    nonce = os.urandom(12)
+    try:
+        plaintext = source.read_bytes()
+        ciphertext = AESGCM(key).encrypt(nonce, plaintext, filename.encode("utf-8"))
+        destination.write_bytes(ciphertext)
+        _fsync_file(destination)
+    except (OSError, ValueError) as error:
+        raise BackupError("backup_encryption_failed") from error
+    return base64.urlsafe_b64encode(nonce).decode("ascii")
+
+
+def _decrypt_member(source: Path, destination: Path, *, key: bytes, member: BackupMember) -> None:
+    if member.encryption != "aes-256-gcm" or member.nonce is None:
+        raise BackupError("backup_schema_incompatible")
+    try:
+        nonce = base64.urlsafe_b64decode(member.nonce.encode("ascii"))
+        if len(nonce) != 12:
+            raise ValueError("invalid AES-GCM nonce")
+        plaintext = AESGCM(key).decrypt(nonce, source.read_bytes(), member.filename.encode("utf-8"))
+        destination.write_bytes(plaintext)
+        _fsync_file(destination)
+    except (InvalidTag, OSError, ValueError) as error:
+        raise BackupError("backup_decryption_failed") from error
 
 
 class BackupService:
     """Create, verify, and restore a local runtime backup set."""
 
-    def __init__(self, *, clock: Clock | None = None) -> None:
+    def __init__(self, *, clock: Clock | None = None, encryption_key: bytes | None = None) -> None:
         self._clock = clock or SystemClock()
+        self._encryption_key = _validate_encryption_key(encryption_key)
 
     async def create(
         self,
@@ -474,13 +559,32 @@ class BackupService:
     async def _backup_member(self, source: BackupSource, temporary: Path) -> BackupMember:
         started = self._clock.now().astimezone(UTC)
         destination = temporary / MEMBER_FILENAMES[source.name]
+        plaintext_destination = temporary / f".{destination.name}.plaintext"
+        encryption = "none"
+        nonce: str | None = None
         try:
             if source.storage is None:
-                result = await _to_thread_drain(source.database.backup_to, destination)
+                result = await _to_thread_drain(source.database.backup_to, plaintext_destination)
             else:
-                result = await source.storage.run(lambda: source.database.backup_to(destination))
+                result = await source.storage.run(
+                    lambda: source.database.backup_to(plaintext_destination)
+                )
             if not isinstance(result, SQLiteBackupResult):
                 raise RuntimeError("invalid backup result")
+            encryption_key = self._encryption_key
+            if encryption_key is not None:
+                nonce = await _to_thread_drain(
+                    lambda: _encrypt_member(
+                        plaintext_destination,
+                        destination,
+                        key=encryption_key,
+                        filename=destination.name,
+                    )
+                )
+                encryption = "aes-256-gcm"
+                plaintext_destination.unlink(missing_ok=True)
+            else:
+                os.replace(plaintext_destination, destination)
             await _to_thread_drain(_fsync_file, destination)
             size = await _to_thread_drain(lambda: destination.stat().st_size)
             digest = await _to_thread_drain(_sha256, destination)
@@ -488,6 +592,8 @@ class BackupService:
             raise
         except (OSError, sqlite3.Error, RuntimeError) as error:
             raise BackupError("backup_source_unavailable") from error
+        finally:
+            plaintext_destination.unlink(missing_ok=True)
         completed = self._clock.now().astimezone(UTC)
         return BackupMember(
             name=source.name,
@@ -499,6 +605,8 @@ class BackupService:
             sha256=digest,
             integrity_check=result.integrity_check,
             schema_migrations=result.schema_migrations,
+            encryption=encryption,
+            nonce=nonce,
         )
 
     @staticmethod
@@ -536,6 +644,7 @@ class BackupService:
     def verify(self, backup_dir: Path) -> BackupManifest:
         manifest = _load_manifest(backup_dir)
         known_migrations = _known_migrations()
+        temporary_directory: Path | None = None
         for member in manifest.members:
             path = backup_dir / member.filename
             try:
@@ -549,15 +658,37 @@ class BackupService:
                     raise BackupError("backup_digest_mismatch")
                 if _sha256(path) != member.sha256:
                     raise BackupError("backup_digest_mismatch")
-                integrity, migrations = _read_sqlite_metadata(path)
-                if integrity != member.integrity_check or migrations != member.schema_migrations:
-                    raise BackupError("backup_schema_incompatible")
-                if not set(migrations).issubset(known_migrations):
-                    raise BackupError("backup_schema_incompatible")
+                verification_path = path
+                if member.encryption == "aes-256-gcm":
+                    if self._encryption_key is None:
+                        raise BackupError("backup_encryption_key_required")
+                    if temporary_directory is None:
+                        temporary_directory = Path(
+                            tempfile.mkdtemp(prefix=".backup-verify-", dir=backup_dir)
+                        )
+                    verification_path = temporary_directory / member.filename
+                    _decrypt_member(
+                        path,
+                        verification_path,
+                        key=self._encryption_key,
+                        member=member,
+                    )
+                _verify_sqlite_member(
+                    verification_path,
+                    member,
+                    known_migrations,
+                    error_code="backup_schema_incompatible",
+                )
             except BackupError:
+                if temporary_directory is not None:
+                    shutil.rmtree(temporary_directory, ignore_errors=True)
                 raise
             except (OSError, RuntimeError, sqlite3.Error) as error:
+                if temporary_directory is not None:
+                    shutil.rmtree(temporary_directory, ignore_errors=True)
                 raise BackupError("backup_member_invalid") from error
+        if temporary_directory is not None:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
         return manifest
 
     async def restore(
@@ -601,7 +732,20 @@ class BackupService:
             for member in manifest.members:
                 source = backup_dir / member.filename
                 destination = staging / member.filename
-                shutil.copy2(source, destination)
+                if member.encryption == "aes-256-gcm":
+                    if self._encryption_key is None:
+                        raise BackupError("backup_encryption_key_required")
+                    encrypted_staging = staging / f".{member.filename}.encrypted"
+                    shutil.copy2(source, encrypted_staging)
+                    _decrypt_member(
+                        encrypted_staging,
+                        destination,
+                        key=self._encryption_key,
+                        member=member,
+                    )
+                    encrypted_staging.unlink(missing_ok=True)
+                else:
+                    shutil.copy2(source, destination)
                 _safe_file(destination, error_code="restore_staging_failed")
             known_migrations = _known_migrations()
             for member in manifest.members:

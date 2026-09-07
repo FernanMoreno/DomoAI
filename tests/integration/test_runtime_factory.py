@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,10 @@ from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProvide
 from domoai.adapters.knx.adapter import KnxAdapter
 from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.modbus.adapter import ModbusAdapter
+from domoai.adapters.mqtt.adapter import GenericMqttAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
+from domoai.application.discovery_service import DiscoveryService
+from domoai.application.recovery import PlanRecoveryService
 from domoai.application.runtime_factory import (
     _select_control_adapter,
     build_runtime,
@@ -200,6 +204,38 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
     assert plaintext_adapter.transport.port == 1884
     assert plaintext_adapter.transport.tls is False
 
+    generic_mapping_path = tmp_path / "generic-mqtt.json"
+    generic_mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v1",
+                "adapter_id": "mqtt",
+                "devices": [
+                    {
+                        "source_id": "esp.lamp",
+                        "type": "light",
+                        "capabilities": [
+                            {
+                                "name": "power",
+                                "state_topic": "home/lamp/state",
+                                "command_topic": "home/lamp/set",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    generic_adapter = create_adapter(
+        Settings(
+            generic_mqtt_url="mqtt://broker.test:1885",
+            generic_mqtt_mapping_path=generic_mapping_path,
+        )
+    )
+    assert isinstance(generic_adapter, GenericMqttAdapter)
+    assert generic_adapter.transport.port == 1885
+
     tls_adapter = create_adapter(Settings(zigbee2mqtt_url="mqtts://broker.test"))
     assert isinstance(tls_adapter, Zigbee2MqttAdapter)
     assert tls_adapter.transport.port == 8883
@@ -322,17 +358,13 @@ def test_runtime_factory_scopes_home_assistant_ev_routes_to_matching_binding(
     tmp_path: Path,
 ) -> None:
     mapping_path = tmp_path / "home-assistant-ev.json"
-    mapping_path.write_text(
-        json.dumps(_home_assistant_ev_mapping()), encoding="utf-8"
-    )
+    mapping_path.write_text(json.dumps(_home_assistant_ev_mapping()), encoding="utf-8")
     settings = Settings(
         home_assistant_url="http://home-assistant.test",
         home_assistant_token=SecretStr("fixture-token"),
         home_assistant_mapping_path=mapping_path,
     )
-    active_binding = _ev_charging_binding(
-        provider_id="home_assistant", device_id="lab.ev_charger"
-    )
+    active_binding = _ev_charging_binding(provider_id="home_assistant", device_id="lab.ev_charger")
     registry = ProviderRegistry()
 
     adapter = create_adapter(
@@ -634,9 +666,7 @@ async def test_scheduled_plan_executes_after_real_runtime_restart(tmp_path: Path
         results = await second_run.scheduler.run_due(now=execute_at + timedelta(seconds=1))
 
         assert results == [{"plan_id": validated.id, "outcome": "executed"}]
-        assert [command.id for command in second_adapter.calls] == [
-            "restart-scheduled-command-1"
-        ]
+        assert [command.id for command in second_adapter.calls] == ["restart-scheduled-command-1"]
         stored = await second_run.scheduled_plan_repository.get(validated.id)
         assert stored is not None
         assert stored[1] == "executed"
@@ -964,9 +994,7 @@ async def test_runtime_factory_external_provider_takes_precedence_over_built_in_
             "energy_context_provider is supplied"
         )
 
-    monkeypatch.setattr(
-        runtime_factory_module, "_create_energy_context_provider", _fail_if_called
-    )
+    monkeypatch.setattr(runtime_factory_module, "_create_energy_context_provider", _fail_if_called)
 
     custom_provider = _MinimalFakeEnergyContextProvider()
     settings = Settings(
@@ -1311,6 +1339,71 @@ async def test_build_runtime_starts_degraded_when_discovery_fails(tmp_path: Path
     audit_events = await runtime.audit_repository.list_all()
     assert any(event.event_type == "runtime_started_degraded" for event in audit_events)
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_releases_ownership_when_cancelled_during_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+
+    async def blocked_refresh(self: DiscoveryService, **kwargs: object) -> None:
+        del self, kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(DiscoveryService, "refresh", blocked_refresh)
+    database_path = tmp_path / "cancelled-build.sqlite3"
+    build_task = asyncio.create_task(
+        build_runtime(Settings(database_path=database_path), adapter=SimulatedHomeAdapter())
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    build_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await build_task
+
+    connection = sqlite3.connect(database_path)
+    row = connection.execute(
+        "SELECT status, uncertain FROM runtime_ownership WHERE deployment_id = ?",
+        ("default",),
+    ).fetchone()
+    connection.close()
+    assert row == ("released", 0)
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_releases_all_resources_when_cancelled_after_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+
+    async def blocked_recovery(self: PlanRecoveryService) -> list[str]:
+        del self
+        started.set()
+        await asyncio.Event().wait()
+        return []
+
+    monkeypatch.setattr(PlanRecoveryService, "recover_orphaned_plans", blocked_recovery)
+    database_path = tmp_path / "cancelled-build-after-discovery.sqlite3"
+    adapter = RecordingAdapter("fixture", source_snapshot(adapter_id="fixture"))
+    build_task = asyncio.create_task(
+        build_runtime(Settings(database_path=database_path), adapter=adapter)
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    build_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await build_task
+
+    connection = sqlite3.connect(database_path)
+    row = connection.execute(
+        "SELECT status, uncertain FROM runtime_ownership WHERE deployment_id = ?",
+        ("default",),
+    ).fetchone()
+    connection.close()
+    assert row == ("released", 0)
+    assert adapter.connected is False
 
 
 @pytest.mark.composition

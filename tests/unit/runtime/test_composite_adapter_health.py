@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from domoai.domain.models import Command
+from domoai.domain.models import Command, SourceRef, StateSnapshot, StateStatus
 from domoai.runtime.composite_adapter import CompositeAdapter
 from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.registry import DeviceRegistry
@@ -125,3 +125,64 @@ async def test_composite_forwards_the_same_execution_context_to_child() -> None:
     )
 
     assert child.execution_contexts == [context]
+
+
+@pytest.mark.asyncio
+async def test_composite_read_state_reports_missing_reference_as_unavailable() -> None:
+    child = _adapter("fixture")
+    composite = CompositeAdapter([child])
+    await composite.connect()
+
+    results = await composite.read_state_detailed(
+        [
+            SourceRef(adapter_id="fixture", external_id="sensor.fixture.temperature"),
+            SourceRef(adapter_id="fixture", external_id="sensor.fixture.missing"),
+        ]
+    )
+
+    assert [result.status for result in results] == ["success", "unavailable"]
+    assert results[0].snapshot is not None
+    assert results[1].snapshot is None
+    assert results[1].error_code == "state_missing"
+
+
+@pytest.mark.asyncio
+async def test_composite_read_state_preserves_multiple_capabilities_per_reference() -> None:
+    child = _adapter("fixture")
+    source_ref = SourceRef(adapter_id="fixture", external_id="light.main")
+    now = source_snapshot(adapter_id="fixture").source_states[0]["observed_at"]
+
+    async def read_state(_source_refs):
+        return [
+            StateSnapshot(
+                device_id="light.main",
+                capability="power",
+                value=True,
+                unit=None,
+                observed_at=now,
+                received_at=now,
+                status=StateStatus.CURRENT,
+                source_ref=source_ref,
+            ),
+            StateSnapshot(
+                device_id="light.main",
+                capability="brightness",
+                value=75,
+                unit="%",
+                observed_at=now,
+                received_at=now,
+                status=StateStatus.CURRENT,
+                source_ref=source_ref,
+            ),
+        ]
+
+    child.read_state = read_state
+    composite = CompositeAdapter([child])
+    await composite.connect()
+
+    results = await composite.read_state([source_ref])
+
+    assert [(result.capability, result.value) for result in results] == [
+        ("power", True),
+        ("brightness", 75),
+    ]

@@ -27,11 +27,16 @@ from domoai.domain.models import (
     BundleMemberCommit,
     BundleMemberCommitStatus,
     Command,
+    ExecutionDependencyEvidence,
+    ExecutionOutcome,
     ExecutionStatus,
+    ExecutionSummary,
     Plan,
     PlanStatus,
     Policy,
     PolicyAction,
+    execution_dependency_evidence_digest,
+    execution_outcome_digest,
 )
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.persistence.repositories import (
@@ -39,6 +44,7 @@ from domoai.persistence.repositories import (
     BundleCommitRepository,
     ExecutionOutcomeRepository,
     PlanRepository,
+    RecurringScheduleRepository,
     ScheduledPlanRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
@@ -85,6 +91,10 @@ def _bundle(*members: BundleMemberCommit) -> BundleCommit:
 
 
 def _structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return result[1]
     assert isinstance(result, dict)
@@ -118,6 +128,7 @@ async def _build_context(
     plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit, clock=clock)
     plan_repository = PlanRepository(database, clock=clock)
     scheduled_repository = ScheduledPlanRepository(database, clock=clock)
+    recurring_repository = RecurringScheduleRepository(database, clock=clock)
     bundle_repository = BundleCommitRepository(database, clock=clock)
     approval_store = ApprovalStore(
         operator_token=OPERATOR_TOKEN,
@@ -144,6 +155,7 @@ async def _build_context(
         scheduled_repository,
         audit,
         bundle_repository=bundle_repository,
+        recurring_repository=recurring_repository,
         execution_admission=execution_admission,
         clock=clock,
     )
@@ -206,16 +218,43 @@ async def _validated_plan(
 def _dependency_member(
     plan_id: str,
     *,
+    bundle_id: str,
     status: BundleMemberCommitStatus,
     execution_status: ExecutionStatus | None,
 ) -> BundleMemberCommit:
     details: dict[str, Any] = {}
     if execution_status is ExecutionStatus.CONFIRMED_SUCCESS:
+        captured_at = datetime(2026, 8, 30, 12, tzinfo=UTC)
+        command_id = f"{plan_id}:command"
+        outcome = ExecutionOutcome(
+            plan_id=plan_id,
+            command_id=command_id,
+            execution_attempt_id=f"attempt:{plan_id}",
+            status=ExecutionStatus.CONFIRMED_SUCCESS,
+            completed_at=captured_at,
+        )
+        outcome_digest = execution_outcome_digest([outcome])
+        evidence = ExecutionDependencyEvidence(
+            bundle_id=bundle_id,
+            member_plan_id=plan_id,
+            predecessor_plan_id=plan_id,
+            predecessor_command_ids=[command_id],
+            status=ExecutionStatus.CONFIRMED_SUCCESS,
+            captured_at=captured_at,
+            outcome_digest=outcome_digest,
+            evidence_digest=execution_dependency_evidence_digest(
+                bundle_id=bundle_id,
+                member_plan_id=plan_id,
+                predecessor_plan_id=plan_id,
+                predecessor_command_ids=[command_id],
+                status=ExecutionStatus.CONFIRMED_SUCCESS,
+                state_versions={},
+                captured_at=captured_at,
+                outcome_digest=outcome_digest,
+            ),
+        )
         details = {
-            "dependency_evidence": {
-                "status": ExecutionStatus.CONFIRMED_SUCCESS.value,
-                "captured_at": "2026-08-30T12:00:00+00:00",
-            }
+            "dependency_evidence": evidence.model_dump(mode="json")
         }
     return BundleMemberCommit(
         plan_id=plan_id,
@@ -226,19 +265,40 @@ def _dependency_member(
     )
 
 
-def _confirmed_predecessor(plan_id: str) -> BundleMemberCommit:
-    captured_at = datetime(2026, 8, 26, 12, tzinfo=UTC)
-    return BundleMemberCommit(
-        plan_id=plan_id,
-        validation_digest=f"sha256:{plan_id}",
+def _confirmed_predecessor(plan_id: str, *, bundle_id: str) -> BundleMemberCommit:
+    return _dependency_member(
+        plan_id,
+        bundle_id=bundle_id,
         status=BundleMemberCommitStatus.EXECUTED,
         execution_status=ExecutionStatus.CONFIRMED_SUCCESS,
-        details={
-            "dependency_evidence": {
-                "status": ExecutionStatus.CONFIRMED_SUCCESS.value,
-                "captured_at": captured_at.isoformat(),
-            }
-        },
+    )
+
+
+def _persisted_predecessor(plan_id: str, status: ExecutionStatus) -> Plan:
+    command_id = f"{plan_id}:command"
+    outcome = ExecutionOutcome(
+        plan_id=plan_id,
+        command_id=command_id,
+        execution_attempt_id=f"attempt:{plan_id}",
+        status=status,
+        completed_at=datetime(2026, 8, 30, 12, tzinfo=UTC),
+    )
+    return Plan(
+        id=plan_id,
+        status=(
+            PlanStatus.COMPLETED
+            if status is ExecutionStatus.CONFIRMED_SUCCESS
+            else PlanStatus.FAILED
+        ),
+        commands=[
+            Command(
+                id=command_id,
+                device_id="light.one",
+                command="turn_on",
+                idempotency_key=f"{plan_id}:intent",
+            )
+        ],
+        execution=ExecutionSummary(outcomes=[outcome]),
     )
 
 
@@ -247,7 +307,9 @@ def _confirmed_predecessor(plan_id: str) -> BundleMemberCommit:
 async def test_direct_execution_of_bundle_member_is_rejected_before_write() -> None:
     plan = _plan("dependent-direct")
     bundle = _bundle(
-        _confirmed_predecessor("predecessor-direct"),
+        _confirmed_predecessor(
+            "predecessor-direct", bundle_id="physical-admission-composition-bundle"
+        ),
         BundleMemberCommit(
             plan_id=plan.id,
             validation_digest="sha256:dependent-direct",
@@ -266,7 +328,9 @@ async def test_direct_execution_of_bundle_member_is_rejected_before_write() -> N
 async def test_fan_in_requires_confirmed_success_from_every_predecessor() -> None:
     plan = _plan("fan-in-dependent")
     bundle = _bundle(
-        _confirmed_predecessor("fan-in-success"),
+        _confirmed_predecessor(
+            "fan-in-success", bundle_id="physical-admission-composition-bundle"
+        ),
         BundleMemberCommit(
             plan_id="fan-in-failed",
             validation_digest="sha256:fan-in-failed",
@@ -281,10 +345,14 @@ async def test_fan_in_requires_confirmed_success_from_every_predecessor() -> Non
         ),
     )
 
+    admission = ExecutionAdmission(
+        bundle_repository=_BundleRepository(bundle),
+        clock=FixedClock(datetime(2026, 8, 30, 12, tzinfo=UTC)),
+    )
+    capability = await admission.issue_aggregate_capability(bundle.id, plan.id)
+
     with pytest.raises(DomainError) as excinfo:
-        await ExecutionAdmission(bundle_repository=_BundleRepository(bundle)).admit(
-            plan, aggregate_owner=True
-        )
+        await admission.admit(plan, aggregate_capability=capability)
 
     assert excinfo.value.code is ErrorCode.PRECONDITION_FAILED
     assert excinfo.value.details["predecessor_plan_id"] == "fan-in-failed"
@@ -417,6 +485,47 @@ async def test_mcp_bundle_member_rejection_has_no_physical_or_durable_side_effec
         }
         for event in new_events
     )
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_recurring_route_rejects_bundle_member_before_persistence(tmp_path) -> None:
+    now = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    context = await _build_context(tmp_path, now=now)
+    server = create_domotics_server(context)
+    plan = await _validated_plan(
+        context,
+        plan_id="composition-recurring-bundle-member",
+        execute_at=now + timedelta(hours=1),
+    )
+    assert context.bundle_commit_service is not None
+    await context.bundle_commit_service.bundle_repository.save(
+        BundleCommit(
+            id="composition-recurring-bundle",
+            bundle_digest="sha256:composition-recurring-bundle",
+            scenario_id="composition-recurring-bundle",
+            members=[
+                BundleMemberCommit(
+                    plan_id=plan.id,
+                    validation_digest=plan.validation.digest if plan.validation else "missing",
+                )
+            ],
+        )
+    )
+
+    result = _structured(
+        await server.call_tool(
+            "schedule_recurring_plan",
+            {
+                "plan_id": plan.id,
+                "time_of_day": "13:00",
+                "timezone": "UTC",
+            },
+        )
+    )
+
+    assert result["error"]["code"] == ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN.value
+    assert await context.scheduler.list_recurring() == []
 
 
 @pytest.mark.composition
@@ -577,6 +686,7 @@ async def test_scheduler_fan_in_blocks_when_either_predecessor_lacks_success(
     predecessor_members = [
         _dependency_member(
             predecessor_id,
+            bundle_id=f"composition-fan-in-failure-bundle-{failed_index}",
             status=BundleMemberCommitStatus.EXECUTED,
             execution_status=(
                 ExecutionStatus.FAILED
@@ -602,6 +712,15 @@ async def test_scheduler_fan_in_blocks_when_either_predecessor_lacks_success(
         members=[*predecessor_members, owner],
     )
     await context.bundle_commit_service.bundle_repository.save(bundle)
+    for index, predecessor_id in enumerate(predecessor_ids):
+        await context.plan_repository.save(
+            _persisted_predecessor(
+                predecessor_id,
+                ExecutionStatus.FAILED
+                if index == failed_index
+                else ExecutionStatus.CONFIRMED_SUCCESS,
+            )
+        )
     await context.plan_repository.save_validation(plan)
     await context.scheduler.repository.schedule(plan)
 
@@ -644,6 +763,7 @@ async def test_scheduler_fan_in_dispatches_after_both_predecessors_confirm_succe
             *[
                 _dependency_member(
                     predecessor_id,
+                    bundle_id="composition-fan-in-success-bundle",
                     status=BundleMemberCommitStatus.EXECUTED,
                     execution_status=ExecutionStatus.CONFIRMED_SUCCESS,
                 )
@@ -661,6 +781,10 @@ async def test_scheduler_fan_in_dispatches_after_both_predecessors_confirm_succe
     )
     assert context.bundle_commit_service is not None
     await context.bundle_commit_service.bundle_repository.save(bundle)
+    for predecessor_id in predecessor_ids:
+        await context.plan_repository.save(
+            _persisted_predecessor(predecessor_id, ExecutionStatus.CONFIRMED_SUCCESS)
+        )
     await context.plan_repository.save_validation(plan)
     await context.scheduler.repository.schedule(plan)
 
@@ -680,6 +804,62 @@ async def test_scheduler_fan_in_dispatches_after_both_predecessors_confirm_succe
     outcomes = await context.facade.executor.outcome_repository.list_for_plan(plan.id)  # type: ignore[union-attr]
     assert len(outcomes) == 1
     assert outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_scheduler_rejects_tampered_dependency_evidence_before_dispatch(tmp_path) -> None:
+    now = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    context = await _build_context(tmp_path, now=now)
+    assert context.scheduler is not None
+    assert context.plan_repository is not None
+    assert context.bundle_commit_service is not None
+    plan = await _validated_plan(
+        context,
+        plan_id="composition-tampered-dependency",
+        execute_at=now - timedelta(seconds=1),
+    )
+    predecessor_id = "tampered-predecessor"
+    bundle_id = "composition-tampered-dependency-bundle"
+    predecessor = _dependency_member(
+        predecessor_id,
+        bundle_id=bundle_id,
+        status=BundleMemberCommitStatus.EXECUTED,
+        execution_status=ExecutionStatus.CONFIRMED_SUCCESS,
+    )
+    tampered_evidence = dict(predecessor.details["dependency_evidence"])
+    tampered_evidence["bundle_id"] = "another-bundle"
+    predecessor = predecessor.model_copy(
+        update={"details": {"dependency_evidence": tampered_evidence}}
+    )
+    bundle = BundleCommit(
+        id=bundle_id,
+        bundle_digest="sha256:composition-tampered-dependency",
+        scenario_id="composition-tampered-dependency",
+        status=BundleCommitStatus.SCHEDULED,
+        members=[
+            predecessor,
+            BundleMemberCommit(
+                plan_id=plan.id,
+                validation_digest=plan.validation.digest if plan.validation else "missing",
+                execute_at=plan.execute_at,
+                status=BundleMemberCommitStatus.SCHEDULED,
+                scheduled=True,
+                predecessor_plan_id=predecessor_id,
+            ),
+        ],
+    )
+    await context.bundle_commit_service.bundle_repository.save(bundle)
+    await context.plan_repository.save(
+        _persisted_predecessor(predecessor_id, ExecutionStatus.CONFIRMED_SUCCESS)
+    )
+    await context.plan_repository.save_validation(plan)
+    await context.scheduler.repository.schedule(plan)
+
+    results = await context.scheduler.run_due()
+
+    assert results == [{"plan_id": plan.id, "outcome": "dependency_failed"}]
+    assert cast(SimulatedHomeAdapter, context.facade.executor.adapter).calls == []
 
 
 @pytest.mark.composition

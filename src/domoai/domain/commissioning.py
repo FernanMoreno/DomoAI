@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -9,6 +11,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from domoai.domain.models import (
+    AuthorityContext,
     DeviceType,
     SourceRef,
     StrictModel,
@@ -26,6 +29,30 @@ class CommissioningCandidateStatus(StrEnum):
     READY_FOR_BINDING = "ready_for_binding"
     OBSERVED_ONLY = "observed_only"
     BLOCKED = "blocked"
+
+
+class CommissioningEvidenceClass(StrEnum):
+    SIMULATION = "simulation"
+    HARDWARE = "hardware"
+    EXTERNAL_DEPENDENCY = "external_dependency"
+
+
+class CommissioningCheckStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class CommissioningQualificationStatus(StrEnum):
+    QUALIFIED = "qualified"
+    REJECTED = "rejected"
+    BLOCKED_EXTERNAL_DEPENDENCY = "blocked_external_dependency"
+
+
+class CommissioningCheck(StrictModel):
+    check_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.-]*$")
+    status: CommissioningCheckStatus
+    detail: str = Field(min_length=1, max_length=256)
 
 
 class CommissioningBlocker(StrictModel):
@@ -99,6 +126,7 @@ class CommissioningReport(StrictModel):
     """Runtime-wide commissioning evidence shared by every MCP client."""
 
     schema_version: Literal["v1"] = "v1"
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     runtime_revision: str = Field(min_length=1, max_length=128)
     generated_at: datetime
     report_digest: str = Field(pattern=_SHA256)
@@ -115,11 +143,83 @@ class CommissioningReport(StrictModel):
         return self
 
 
+class CommissioningEvidence(StrictModel):
+    """Bounded operator evidence; it is not an execution grant."""
+
+    schema_version: Literal["v1"] = "v1"
+    authority: AuthorityContext
+    evidence_id: str = Field(min_length=1, max_length=128)
+    candidate_digest: str = Field(pattern=_SHA256)
+    observed_at: datetime
+    expires_at: datetime
+    evidence_class: CommissioningEvidenceClass
+    checks: list[CommissioningCheck] = Field(min_length=1, max_length=32)
+    source_refs: list[SourceRef] = Field(default_factory=list, max_length=64)
+    evidence_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> CommissioningEvidence:
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("commissioning evidence observed_at must be timezone-aware")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("commissioning evidence expires_at must be timezone-aware")
+        if self.expires_at <= self.observed_at:
+            raise ValueError("commissioning evidence must expire after observation")
+        check_ids = [check.check_id for check in self.checks]
+        if len(set(check_ids)) != len(check_ids):
+            raise ValueError("commissioning evidence check ids must be unique")
+        expected = commissioning_evidence_digest(self)
+        if self.evidence_digest is None:
+            object.__setattr__(self, "evidence_digest", expected)
+        elif self.evidence_digest != expected:
+            raise ValueError("commissioning evidence digest does not match evidence")
+        return self
+
+
+class CommissioningQualification(StrictModel):
+    """Verification result that cannot create physical authority."""
+
+    schema_version: Literal["v1"] = "v1"
+    authority: AuthorityContext
+    candidate_digest: str = Field(pattern=_SHA256)
+    evidence_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    status: CommissioningQualificationStatus
+    verified_checks: list[str] = Field(default_factory=list, max_length=32)
+    blockers: list[str] = Field(default_factory=list, max_length=32)
+    checked_at: datetime
+    authority_created: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_result(self) -> CommissioningQualification:
+        if self.checked_at.tzinfo is None or self.checked_at.utcoffset() is None:
+            raise ValueError("commissioning qualification checked_at must be timezone-aware")
+        if self.status is CommissioningQualificationStatus.QUALIFIED and self.blockers:
+            raise ValueError("qualified commissioning result cannot contain blockers")
+        if self.status is not CommissioningQualificationStatus.QUALIFIED and not self.blockers:
+            raise ValueError("non-qualified commissioning result requires blockers")
+        return self
+
+
+def commissioning_evidence_digest(evidence: CommissioningEvidence) -> str:
+    """Return a stable digest excluding the digest field itself."""
+
+    payload = evidence.model_dump(mode="json", exclude={"evidence_digest"})
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
+
 __all__ = [
+    "CommissioningCheck",
+    "CommissioningCheckStatus",
     "CommissioningAssetType",
     "CommissioningBlocker",
     "CommissioningCandidate",
     "CommissioningCandidateStatus",
     "CommissioningReport",
     "CommissioningRoute",
+    "CommissioningEvidence",
+    "CommissioningEvidenceClass",
+    "CommissioningQualification",
+    "CommissioningQualificationStatus",
+    "commissioning_evidence_digest",
 ]

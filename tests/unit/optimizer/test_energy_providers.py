@@ -141,7 +141,7 @@ def _battery_snapshot(
     return StateSnapshot(
         device_id=device_id,
         capability="battery.soc",
-        value=value,
+        value=value if status not in {StateStatus.INVALID, StateStatus.UNAVAILABLE} else None,
         unit=unit,
         observed_at=observed_at,
         received_at=observed_at,

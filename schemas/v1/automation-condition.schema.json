@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "minLength": 1,
+      "title": "Device Id",
+      "type": "string"
+    },
+    "capability": {
+      "minLength": 1,
+      "title": "Capability",
+      "type": "string"
+    },
+    "operator": {
+      "default": "equals",
+      "enum": [
+        "equals",
+        "not_equals"
+      ],
+      "title": "Operator",
+      "type": "string"
+    },
+    "expected": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScalarValue"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "device_id",
+    "capability"
+  ],
+  "title": "AutomationCondition",
+  "type": "object"
+}

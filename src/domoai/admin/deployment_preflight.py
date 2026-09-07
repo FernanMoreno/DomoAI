@@ -243,7 +243,7 @@ def _validate_proxy(caddy: str, values: dict[str, str]) -> bool:
     required = (
         _CADDY_HOSTNAME,
         f"path {mcp_path} {mcp_path}/*",
-        "path /healthz /readyz",
+        "path /healthz /readyz /metrics",
         "respond 404",
     )
     if any(item not in caddy for item in required):

@@ -1,9 +1,11 @@
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.domain.models import Command, SourceRef
+from domoai.lab.virtual_plant import VirtualPlantClock
 
 
 def _set_temperature_command(value: float) -> Command:
@@ -62,3 +64,18 @@ async def test_set_temperature_below_current_cools_instead_of_heating() -> None:
     states = await adapter.read_state(ref)
 
     assert _read_temperature(states, "temperature") < 20.0
+
+
+@pytest.mark.asyncio
+async def test_climate_uses_injected_virtual_time_without_wall_clock_sleep() -> None:
+    clock = VirtualPlantClock(datetime(2026, 1, 1, tzinfo=UTC))
+    adapter = SimulatedHomeAdapter(clock=clock)
+    ref = [SourceRef(adapter_id="fixture", external_id="climate.bedroom")]
+
+    ack = await adapter.execute(_set_temperature_command(25.0))
+    assert ack.accepted
+
+    clock.advance(timedelta(seconds=10))
+    states = await adapter.read_state(ref)
+
+    assert _read_temperature(states, "temperature") > 20.0

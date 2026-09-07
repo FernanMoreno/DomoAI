@@ -26,7 +26,10 @@ async def test_real_agent_can_connect_discover_and_validate_over_the_wire(
     server_params = StdioServerParameters(
         command=_domoai_mcp_command(),
         args=[],
-        env={"DOMOAI_DATABASE_PATH": str(tmp_path / "mcp-cert.sqlite3")},
+        env={
+            "DOMOAI_DATABASE_PATH": str(tmp_path / "mcp-cert.sqlite3"),
+            "DOMOAI_RUNTIME_MODE": "fixture",
+        },
     )
 
     async with stdio_client(server_params) as (read, write):

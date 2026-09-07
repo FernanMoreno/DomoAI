@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from typing import Any, cast
 
-from domoai.domain.models import AdapterSnapshot
+from domoai.domain.models import AdapterSnapshot, Capability
 from domoai.runtime.ports import AdapterPort
 
 from .manifest import (
@@ -15,6 +15,7 @@ from .manifest import (
     AdapterManifest,
     CapabilityCompatibility,
     CapabilityCompatibilityStatus,
+    CapabilityDeclaration,
     CompatibilityDiagnostic,
     CompatibilityReport,
     CompatibilityStatus,
@@ -134,11 +135,29 @@ class AdapterRegistry:
             raise KeyError(f"unknown adapter id {adapter_id!r}")
         manifest = registration.manifest
         observed = _observed_capabilities(snapshot) if snapshot is not None else set()
+        observed_details = (
+            _observed_capability_details(snapshot) if snapshot is not None else {}
+        )
         capabilities: list[CapabilityCompatibility] = []
         diagnostics: list[CompatibilityDiagnostic] = []
+        for name in sorted(_malformed_observed_capabilities(snapshot)):
+            diagnostics.append(
+                CompatibilityDiagnostic(
+                    code="malformed_observed_capability",
+                    severity=DiagnosticSeverity.ERROR,
+                    subject=name,
+                    message="observed capability does not satisfy the canonical contract",
+                )
+            )
         for declaration in manifest.capabilities:
             if snapshot is None or declaration.name in observed:
                 capability_status = CapabilityCompatibilityStatus.SUPPORTED
+                diagnostics.extend(
+                    _compare_capability_guarantees(
+                        declaration,
+                        observed_details.get(declaration.name, ()),
+                    )
+                )
             elif declaration.optional:
                 capability_status = CapabilityCompatibilityStatus.OPTIONAL
             else:
@@ -199,3 +218,94 @@ def _observed_capabilities(snapshot: AdapterSnapshot | None) -> set[str]:
             if isinstance(capability, dict) and isinstance(capability.get("name"), str):
                 observed.add(cast(str, capability["name"]))
     return observed
+
+
+def _observed_capability_details(
+    snapshot: AdapterSnapshot,
+) -> dict[str, list[Capability]]:
+    details: dict[str, list[Capability]] = {}
+    for entity in snapshot.source_entities:
+        raw_capabilities = entity.get("capabilities", [])
+        if not isinstance(raw_capabilities, list):
+            continue
+        for raw_capability in raw_capabilities:
+            if not isinstance(raw_capability, dict):
+                continue
+            name = raw_capability.get("name")
+            if not isinstance(name, str):
+                continue
+            try:
+                capability = Capability.model_validate(raw_capability)
+            except Exception:
+                # The existing discovery compatibility report will still show
+                # the capability as observed; this separate diagnostic keeps
+                # malformed details fail-closed without exposing provider data.
+                continue
+            details.setdefault(name, []).append(capability)
+    return details
+
+
+def _malformed_observed_capabilities(snapshot: AdapterSnapshot | None) -> set[str]:
+    if snapshot is None:
+        return set()
+    malformed: set[str] = set()
+    for entity in snapshot.source_entities:
+        raw_capabilities = entity.get("capabilities", [])
+        if not isinstance(raw_capabilities, list):
+            continue
+        for raw_capability in raw_capabilities:
+            if not isinstance(raw_capability, dict):
+                continue
+            name = raw_capability.get("name")
+            if not isinstance(name, str):
+                malformed.add("unknown")
+                continue
+            try:
+                Capability.model_validate(raw_capability)
+            except Exception:
+                malformed.add(name)
+    return malformed
+
+
+def _compare_capability_guarantees(
+    declaration: CapabilityDeclaration,
+    observed: tuple[Capability, ...] | list[Capability],
+) -> list[CompatibilityDiagnostic]:
+    diagnostics: list[CompatibilityDiagnostic] = []
+    for capability in observed:
+        violations: list[str] = []
+        if capability.writable and not declaration.writable:
+            violations.append("writable_scope")
+        if (
+            declaration.minimum is not None
+            and capability.minimum is not None
+            and capability.minimum < declaration.minimum
+        ):
+            violations.append("minimum_range")
+        if (
+            declaration.maximum is not None
+            and capability.maximum is not None
+            and capability.maximum > declaration.maximum
+        ):
+            violations.append("maximum_range")
+        if declaration.guarantees.readback_required and not capability.guarantees.readback_required:
+            violations.append("readback_required")
+        declared_latency = declaration.guarantees.expected_latency_ms
+        observed_latency = capability.guarantees.expected_latency_ms
+        if (
+            declared_latency is not None
+            and observed_latency is not None
+            and observed_latency < declared_latency
+        ):
+            violations.append("expected_latency_ms")
+        if violations:
+            diagnostics.append(
+                CompatibilityDiagnostic(
+                    code="capability_guarantee_mismatch",
+                    severity=DiagnosticSeverity.ERROR,
+                    subject=declaration.name,
+                    message="observed capability exceeds its provider declaration",
+                    details={"violations": ",".join(violations)},
+                )
+            )
+    return diagnostics

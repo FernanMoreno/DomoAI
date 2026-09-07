@@ -212,7 +212,7 @@ class KnxAdapter:
                 StateSnapshot(
                     device_id=self._canonical_by_source[entity_id],
                     capability=capability,
-                    value=state["value"],
+                    value=state["value"] if self._available else None,
                     unit=state["unit"],
                     observed_at=observed_at,
                     received_at=received_at,

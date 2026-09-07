@@ -10,8 +10,10 @@ from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
 from domoai.domain.models import (
+    AdapterExecutionAck,
     Command,
     CommandPostcondition,
+    ExecutionStatus,
     Plan,
     PlanStatus,
     Precondition,
@@ -23,6 +25,7 @@ from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import AuditLog
 from domoai.runtime.execution_context import ExecutionContext
+from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
 
@@ -48,6 +51,15 @@ class _ContextRecordingAdapter(SimulatedHomeAdapter):
     async def execute(self, command, execution_context=None):
         self.execution_contexts.append(execution_context)
         return await super().execute(command, execution_context)
+
+
+class _AcceptedWithoutReadbackAdapter(SimulatedHomeAdapter):
+    async def execute(self, command, execution_context=None):
+        del execution_context
+        return AdapterExecutionAck(
+            accepted=True,
+            source_ref=SourceRef(adapter_id=self.adapter_id, external_id=command.device_id),
+        )
 
 
 def _light_id(registry: DeviceRegistry) -> str:
@@ -296,6 +308,70 @@ async def test_successful_adapter_dispatch_has_both_ids() -> None:
     outcome = summary.outcomes[0]
     assert outcome.execution_attempt_id
     assert outcome.adapter_request_id
+
+
+@pytest.mark.asyncio
+async def test_adapter_dispatch_latency_and_outcome_are_projected() -> None:
+    adapter, registry, plan_service, _ = await _build_context()
+    metrics = RuntimeOperationalMetrics()
+    executor = PlanExecutor(adapter, plan_service, AuditLog(), operational_metrics=metrics)
+    light_id = _light_id(registry)
+    validated = plan_service.validate(
+        Plan(
+            id="plan-operational-metrics",
+            commands=[
+                Command(
+                    id="cmd-operational-metrics",
+                    device_id=light_id,
+                    command="turn_on",
+                    idempotency_key="intent-operational-metrics",
+                )
+            ],
+        )
+    )
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status is not None
+    snapshot = metrics.snapshot()
+    assert snapshot["command_outcomes"]["confirmed_success"] == 1
+    assert snapshot["command_latency_ms"][0]["adapter_id"] == adapter.adapter_id
+    assert snapshot["command_latency_ms"][0]["capability"] == "power"
+    assert snapshot["command_latency_ms"][0]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_only_current_contradictory_readback_counts_as_mismatch() -> None:
+    adapter = _AcceptedWithoutReadbackAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore()
+    audit = AuditLog()
+    await DiscoveryService(adapter, registry, state_store, audit).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit)
+    metrics = RuntimeOperationalMetrics()
+    executor = PlanExecutor(adapter, plan_service, audit, operational_metrics=metrics)
+    light_id = _light_id(registry)
+    validated = plan_service.validate(
+        Plan(
+            id="plan-readback-mismatch-metrics",
+            commands=[
+                Command(
+                    id="cmd-readback-mismatch-metrics",
+                    device_id=light_id,
+                    command="turn_on",
+                    idempotency_key="intent-readback-mismatch-metrics",
+                    postconditions=[
+                        CommandPostcondition(capability="power", expected=True)
+                    ],
+                )
+            ],
+        )
+    )
+
+    summary = await executor.execute(validated)
+
+    assert summary.outcomes[0].status is ExecutionStatus.UNKNOWN
+    assert metrics.snapshot()["readback_mismatch_total"] == 1
 
 
 @pytest.mark.asyncio

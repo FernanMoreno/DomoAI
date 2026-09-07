@@ -1023,6 +1023,47 @@ async def test_sensitive_command_requires_matching_operator_approval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_expired_persisted_approval_never_reaches_the_adapter() -> None:
+    initial = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore(clock=clock)
+    audit = AuditLog(clock=clock)
+    await DiscoveryService(adapter, registry, state_store, audit, clock=clock).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
+    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    validated = plan_service.validate(
+        Plan(
+            id="plan-expired-approved-evidence",
+            commands=[
+                Command(
+                    id="command-expired-approved-evidence",
+                    device_id=device_id,
+                    command="open",
+                    risk_class=RiskClass.CONFIRM,
+                    idempotency_key="intent-expired-approved-evidence",
+                )
+            ],
+        )
+    )
+    grant = ApprovalStore(
+        clock=clock, operator_token="operator", allow_legacy_token=True
+    ).issue(validated, approved_by="operator", operator_token="operator")
+    approved = plan_service.approve(validated, grant=grant)
+    assert approved.approval is not None
+    assert approved.approval.expires_at is not None
+    clock.set(approved.approval.expires_at + timedelta(seconds=1))
+
+    with pytest.raises(DomainError) as error:
+        await executor.execute(approved)
+
+    assert error.value.code is ErrorCode.APPROVAL_ASSERTION_EXPIRED
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_changed_runtime_revision_requires_revalidation() -> None:
     adapter, registry, state_store, _, plan_service, executor = await build_plan_context()
     device_id = next(device.id for device in registry.devices if device.type.value == "switch")

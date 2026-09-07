@@ -15,7 +15,10 @@ from domoai.domain.models import (
     Plan,
     Precondition,
     RiskClass,
+    SourceCursor,
+    SourceOrderingPolicy,
     SourceRef,
+    StateChangedEvent,
     StateSnapshot,
     StateStatus,
 )
@@ -87,6 +90,82 @@ def test_state_snapshot_requires_matching_observation_order() -> None:
             status=StateStatus.CURRENT,
             source_ref=SourceRef(adapter_id="fixture", external_id="light.living_room"),
         )
+
+
+def _state_snapshot_kwargs() -> dict[str, object]:
+    return {
+        "device_id": "living_room.main_light",
+        "capability": "brightness",
+        "value": 50,
+        "observed_at": datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+        "received_at": datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+        "status": StateStatus.CURRENT,
+        "source_ref": SourceRef(adapter_id="fixture", external_id="light.living_room"),
+    }
+
+
+def test_source_cursor_requires_ordering_identity_and_non_negative_sequence() -> None:
+    cursor = SourceCursor(source_id="fixture", stream_id="events", epoch="boot-1", sequence=7)
+
+    assert cursor.source_id == "fixture"
+    assert cursor.sequence == 7
+    assert cursor.resync is False
+    assert SourceOrderingPolicy.ORDERED.value == "ordered"
+
+    with pytest.raises(ValidationError):
+        SourceCursor(source_id="fixture", stream_id="events", epoch="boot-1", sequence=-1)
+
+
+def test_state_snapshot_rejects_non_finite_numeric_values() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError, match="finite"):
+            StateSnapshot(**{**_state_snapshot_kwargs(), "value": value})
+
+
+@pytest.mark.parametrize("status", [StateStatus.CURRENT])
+def test_current_state_snapshot_requires_a_value(status: StateStatus) -> None:
+    with pytest.raises(ValidationError, match="value"):
+        StateSnapshot(**{**_state_snapshot_kwargs(), "value": None, "status": status})
+
+
+@pytest.mark.parametrize("status", [StateStatus.INVALID, StateStatus.UNAVAILABLE])
+def test_unusable_state_snapshot_cannot_carry_a_value(status: StateStatus) -> None:
+    with pytest.raises(ValidationError, match="value"):
+        StateSnapshot(**{**_state_snapshot_kwargs(), "value": 50, "status": status})
+
+
+def test_state_snapshot_rejects_cursor_for_another_source() -> None:
+    with pytest.raises(ValidationError, match="source_id"):
+        StateSnapshot(
+            **{
+                **_state_snapshot_kwargs(),
+                "source_cursor": SourceCursor(
+                    source_id="other-adapter",
+                    stream_id="events",
+                    epoch="boot-1",
+                    sequence=1,
+                ),
+            }
+        )
+
+
+def test_state_changed_event_decodes_cursor_from_payload() -> None:
+    event = StateChangedEvent(
+        source_adapter_id="fixture",
+        payload={
+            "cursor": {
+                "source_id": "fixture",
+                "stream_id": "events",
+                "epoch": "boot-1",
+                "sequence": 8,
+                "resync": True,
+            }
+        },
+    )
+
+    assert event.source_cursor is not None
+    assert event.source_cursor.sequence == 8
+    assert event.source_cursor.resync is True
 
 
 def test_plan_rejects_more_than_fifty_commands() -> None:

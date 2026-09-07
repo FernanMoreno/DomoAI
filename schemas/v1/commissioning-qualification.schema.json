@@ -1,0 +1,164 @@
+{
+  "$defs": {
+    "AuthorityContext": {
+      "additionalProperties": false,
+      "description": "Non-secret identity and resource scope attached to authority records.\n\nThe defaults are the legacy single-home local runtime. They let v1 rows be\nread during an additive migration while every new authority record still\ncarries an explicit principal and household.",
+      "properties": {
+        "tenant_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "household_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Household Ids",
+          "type": "array"
+        },
+        "principal_id": {
+          "default": "system",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/PrincipalRole"
+          },
+          "maxItems": 5,
+          "title": "Roles",
+          "type": "array"
+        },
+        "area_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Area Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "title": "AuthorityContext",
+      "type": "object"
+    },
+    "CommissioningQualificationStatus": {
+      "enum": [
+        "qualified",
+        "rejected",
+        "blocked_external_dependency"
+      ],
+      "title": "CommissioningQualificationStatus",
+      "type": "string"
+    },
+    "PrincipalRole": {
+      "description": "Role granted by a trusted identity provider for one deployment.",
+      "enum": [
+        "viewer",
+        "planner",
+        "operator",
+        "owner",
+        "service"
+      ],
+      "title": "PrincipalRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Verification result that cannot create physical authority.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "authority": {
+      "$ref": "#/$defs/AuthorityContext"
+    },
+    "candidate_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Digest",
+      "type": "string"
+    },
+    "evidence_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Evidence Digest",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/CommissioningQualificationStatus"
+    },
+    "verified_checks": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Verified Checks",
+      "type": "array"
+    },
+    "blockers": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Blockers",
+      "type": "array"
+    },
+    "checked_at": {
+      "format": "date-time",
+      "title": "Checked At",
+      "type": "string"
+    },
+    "authority_created": {
+      "const": false,
+      "default": false,
+      "title": "Authority Created",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "authority",
+    "candidate_digest",
+    "evidence_digest",
+    "status",
+    "checked_at"
+  ],
+  "title": "CommissioningQualification",
+  "type": "object"
+}

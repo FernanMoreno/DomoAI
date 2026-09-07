@@ -1,4 +1,4 @@
-from domoai.domain.models import AuditEvent
+from domoai.domain.models import AuditEvent, AuthorityContext, PrincipalRole
 from domoai.runtime.events import AuditLog, redact_payload
 
 
@@ -85,6 +85,36 @@ def test_sink_failure_never_propagates_to_the_caller() -> None:
     assert "storage boundary overloaded" in (audit.last_sink_error or "")
 
 
+def test_critical_event_waits_for_durable_sink_ack() -> None:
+    class Ack:
+        def __init__(self) -> None:
+            self.called = False
+
+        def result(self, timeout: float) -> None:
+            self.called = True
+            assert timeout > 0
+
+    class Sink:
+        def __init__(self) -> None:
+            self.ack = Ack()
+
+        def append_event(self, event: AuditEvent) -> Ack:
+            del event
+            return self.ack
+
+    sink = Sink()
+    audit = AuditLog(sink=sink, critical_event_types={"plan_execution_started"})
+
+    audit.append(
+        event_type="plan_execution_started",
+        actor="runtime",
+        subject_id="plan-critical-1",
+        payload={},
+    )
+
+    assert sink.ack.called
+
+
 def test_negative_indexing_and_slicing_work_within_the_retained_window() -> None:
     audit = AuditLog(max_events=1000)
 
@@ -125,3 +155,23 @@ def test_append_stamps_created_at_from_the_injected_clock() -> None:
     event = audit.append(event_type="test_event", actor="test", subject_id="x", payload={})
 
     assert event.created_at == fixed.now()
+
+
+def test_append_preserves_verified_request_authority() -> None:
+    authority = AuthorityContext(
+        tenant_id="tenant-a",
+        household_id="home-a",
+        household_ids=["home-a"],
+        principal_id="operator-a",
+        roles=[PrincipalRole.OPERATOR],
+    )
+
+    event = AuditLog().append(
+        event_type="mcp_request_authorized",
+        actor="agent:operator-a",
+        subject_id="plan-1",
+        payload={},
+        authority=authority,
+    )
+
+    assert event.authority == authority

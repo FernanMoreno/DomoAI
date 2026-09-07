@@ -131,13 +131,17 @@ class SimulatedHomeAdapter:
         # Decision 1's linear RC model), not a reuse of the lab module.
         self._climate_hvac_mode: dict[str, str] = {}
         self._climate_last_tick_by_entity: dict[str, float] = {}
+        # VirtualPlantClock exposes explicit ``advance``; use its timeline
+        # for deterministic lab runs while retaining monotonic wall time for
+        # legacy fixture callers and FixedClock-based tests.
+        self._uses_virtual_time = callable(getattr(self._clock, "advance", None))
 
     def _sync_climate_state(self, entity: dict[str, Any]) -> None:
         if entity["domain"] != "climate":
             return
         entity_id = entity["entity_id"]
         state = entity.setdefault("state", {})
-        elapsed = min(max(_time.monotonic() - self._climate_last_tick(entity_id), 0.0), 10.0)
+        elapsed = min(max(self._clock_timestamp() - self._climate_last_tick(entity_id), 0.0), 10.0)
         mode = self._climate_hvac_mode.get(entity_id, "off")
         if elapsed and mode != "off":
             current = float(state["temperature"])
@@ -174,9 +178,14 @@ class SimulatedHomeAdapter:
 
     def _climate_last_tick(self, entity_id: str) -> float:
         last = self._climate_last_tick_by_entity.get(entity_id)
-        now = _time.monotonic()
+        now = self._clock_timestamp()
         self._climate_last_tick_by_entity[entity_id] = now
         return last if last is not None else now
+
+    def _clock_timestamp(self) -> float:
+        if self._uses_virtual_time:
+            return self._clock.now().timestamp()
+        return _time.monotonic()
 
     async def connect(self) -> None:
         self._connected = True

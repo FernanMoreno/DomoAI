@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from domoai.domain.models import SourceCursor, SourceOrderingPolicy
 from domoai.persistence.repositories import RuntimeStateMetadataRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.state_store import StateStoreMetadata
@@ -72,3 +73,32 @@ async def test_runtime_state_metadata_replaces_singleton_row(tmp_path) -> None:
     await repository.save(updated)
 
     assert await repository.get() == updated
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_metadata_round_trips_source_integrity_evidence(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "runtime-state-integrity.sqlite3")
+    await database.initialize()
+    repository = RuntimeStateMetadataRepository(database)
+    metadata = StateStoreMetadata(
+        inventory_revision=4,
+        version_counter=12,
+        state_versions={("light.kitchen", "brightness"): 12},
+        source_cursors={
+            ("fixture", "events"): SourceCursor(
+                source_id="fixture",
+                stream_id="events",
+                epoch="boot-1",
+                sequence=22,
+            )
+        },
+        source_ordering_policies={
+            ("fixture", "events"): SourceOrderingPolicy.ORDERED,
+            ("fixture", "unordered"): SourceOrderingPolicy.UNORDERED,
+        },
+        resync_required={("fixture", "events"): "sequence_gap"},
+    )
+
+    await repository.save(metadata)
+
+    assert await repository.get() == metadata

@@ -50,6 +50,7 @@ SERVICE_PROFILES = {
     "matter-server": "matter",
 }
 FIXTURE_SMOKE_TESTS = (
+    "tests/integration/test_digital_twin_matrix.py",
     "tests/integration/test_virtual_lab_assets.py",
     "tests/integration/test_virtual_lab_smoke_configuration.py",
     "tests/integration/test_zigbee2mqtt_fixture.py",

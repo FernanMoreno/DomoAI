@@ -584,6 +584,9 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         constraint_summary={
             "hard_satisfied": True,
             "battery_actuator_bound": battery is not None and battery.actuator is not None,
+            "constraint_enforcement": {
+                constraint.type: constraint.enforcement for constraint in scenario.constraints
+            },
             "slots": slots,
             "violations": [],
             "soft_violations": _reported_soft_violations(solver, soft_violations),

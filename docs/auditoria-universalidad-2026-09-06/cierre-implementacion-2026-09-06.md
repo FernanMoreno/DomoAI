@@ -77,10 +77,13 @@ flujo OAuth que no implemente.
 
 ## Consolidación de worktrees
 
-`DomoAI` queda como ubicación canónica. La rama `feat/approval-authority-jit` ya estaba contenida en la historia de
-la rama principal; se integraron 40 cambios rastreados sin solapamiento y 3 archivos nuevos. En 52 rutas solapadas y
-14 variantes sin rastrear prevaleció la versión más avanzada que ya estaba en `DomoAI`; las versiones de respaldo se
-conservaron fuera del repositorio durante la revisión. Los otros worktrees permanecen intactos para permitir una
-revisión o recuperación posterior.
+`DomoAI` queda como ubicación canónica y está situado en `main`. El árbol efectivo de `main` coincide con el commit
+`f0cacdf`, que es el estado verificado por la suite y las compuertas de composición. La integración del trabajo de
+`feat/composition-safety-gaps` queda registrada en `7929888`, junto con la sincronización de `main` y la corrección
+del manejador duplicado de snapshots.
 
-No se hizo commit, push, merge de Git ni limpieza destructiva de cambios ajenos del worktree.
+El trabajo local de `feat/approval-authority-jit` se conservó en `be5e1da` para no perderlo. Su integración directa
+se revirtió en `01dd3e9` porque su implementación alternativa, basada en una arquitectura anterior, produjo 143
+errores de colección al combinarse con `main`; por sí sola también dejó una prueba bloqueada por un recurso de
+laboratorio ausente. Sus versiones no están activas en `main`; se mantiene la implementación posterior que cumple
+las verificaciones actuales. Los otros worktrees permanecen intactos para revisión o recuperación.

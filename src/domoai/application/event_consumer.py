@@ -329,44 +329,6 @@ class RuntimeEventConsumer:
             snapshots.append(snapshot.model_copy(update={"device_id": canonical_id}))
         return snapshots
 
-    def _event_driven_source_ids(self) -> frozenset[str]:
-        declared = getattr(self.adapter, "event_driven_state_adapter_ids", None)
-        if declared is None and getattr(self.adapter, "state_events_are_authoritative", False):
-            declared = {self.adapter.adapter_id}
-        return frozenset(str(adapter_id) for adapter_id in (declared or ()))
-
-    def _event_snapshots(
-        self, event: StateChangedEvent, source_adapter_id: str
-    ) -> list[StateSnapshot] | None:
-        """Decode source-owned state evidence without performing adapter I/O.
-
-        ``None`` means this is a legacy event with no embedded evidence. An
-        empty list is a valid event with no known canonical routes; in both
-        cases the caller must not manufacture a read for an authoritative
-        source.
-        """
-
-        raw_states = event.payload.get("states")
-        if raw_states is None:
-            return None
-        if not isinstance(raw_states, list):
-            raise ValueError("state event evidence must be a list")
-
-        snapshots: list[StateSnapshot] = []
-        for raw_state in raw_states:
-            if not isinstance(raw_state, Mapping):
-                raise ValueError("state event evidence entries must be objects")
-            snapshot = StateSnapshot.model_validate(raw_state)
-            if snapshot.source_ref.adapter_id != source_adapter_id:
-                raise ValueError("state event source adapter does not match evidence")
-            canonical_id = self.discovery.registry.canonical_id_for_source(
-                source_adapter_id, snapshot.source_ref.external_id
-            )
-            if canonical_id is None:
-                continue
-            snapshots.append(snapshot.model_copy(update={"device_id": canonical_id}))
-        return snapshots
-
     def _known_source_refs(self, adapter_id: str) -> list[SourceRef]:
         return [
             source_ref

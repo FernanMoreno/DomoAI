@@ -151,19 +151,22 @@ def test_rehydrated_identity_does_not_merge_replacement_with_same_local_name() -
     assert len(registry.devices) == 1
 
 
-def test_live_rediscovery_with_renamed_entity_reuses_persisted_identity_claim() -> None:
+def test_rehydrated_identity_claims_preserve_canonical_id_after_entity_rename() -> None:
     registry = DeviceRegistry()
     registry.load_persisted(
         [
             Device(
-                id="energy.battery",
+                id="battery.home",
                 type=DeviceType.ENERGY,
-                name="Battery",
-                protocol="fixture",
+                name="Home battery",
+                protocol="home_assistant",
+                availability=AvailabilityStatus.AVAILABLE,
                 capabilities=[_power_capability()],
-                source_refs=[SourceRef(adapter_id="fixture", external_id="old-battery")],
-                identity_keys=["fixture:device:battery-1"],
-                connections=["fixture:battery-1"],
+                source_refs=[
+                    SourceRef(adapter_id="home_assistant", external_id="sensor.old_power")
+                ],
+                identity_keys=["ha-device:stable-battery"],
+                connections=["mac:aa:bb:cc:dd:ee:ff"],
             )
         ]
     )
@@ -172,21 +175,85 @@ def test_live_rediscovery_with_renamed_entity_reuses_persisted_identity_claim() 
         AdapterSnapshot(
             source_entities=[
                 {
-                    "entity_id": "renamed-battery",
-                    "device_id": "battery-1",
-                    "name": "Battery",
+                    "entity_id": "sensor.renamed_power",
+                    "device_id": "ha-device-renamed",
+                    "name": "Renamed battery",
                     "semantic_type": "energy",
-                    "identity_keys": ["fixture:device:battery-1"],
-                    "connections": ["fixture:battery-1"],
+                    "identity_keys": ["ha-device:stable-battery"],
+                    "connections": ["mac:aa:bb:cc:dd:ee:ff"],
                     "capabilities": [_power_capability().model_dump(mode="json")],
                 }
             ]
         ),
-        "fixture",
+        "home_assistant",
     )
 
-    assert registry.canonical_id_for_source("fixture", "renamed-battery") == "energy.battery"
-    assert registry.get("energy.battery") is not None
+    assert registry.canonical_id_for_source("home_assistant", "sensor.renamed_power") == (
+        "battery.home"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persisted_source_device_identity_rebinds_renamed_entity_after_restart(
+    tmp_path: Path,
+) -> None:
+    first_run = DeviceRegistry()
+    first_run.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "sensor.battery_power",
+                    "device_id": "ha-device-stable-battery",
+                    "name": "Battery power",
+                    "area_id": "garage",
+                    "semantic_type": "energy",
+                    "capabilities": [_power_capability().model_dump(mode="json")],
+                }
+            ]
+        ),
+        "home_assistant",
+    )
+    original = first_run.devices[0]
+
+    database = SQLiteDatabase(tmp_path / "identity.sqlite3")
+    await database.initialize()
+    repository = DeviceRepository(database)
+    await repository.save(original)
+    persisted = await repository.list_all()
+    assert persisted[0].source_refs[0].source_device_id == "ha-device-stable-battery"
+
+    restarted = DeviceRegistry()
+    restarted.load_persisted(persisted)
+    assert (
+        restarted.resolve_command_route(original.id, "turn_on").reason
+        == "route_not_found"
+    )
+    restarted.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "sensor.battery_power_renamed",
+                    "device_id": "ha-device-stable-battery",
+                    "name": "Renamed battery power",
+                    "area_id": "garage",
+                    "semantic_type": "energy",
+                    "capabilities": [_power_capability().model_dump(mode="json")],
+                }
+            ]
+        ),
+        "home_assistant",
+    )
+
+    assert (
+        restarted.canonical_id_for_source(
+            "home_assistant", "sensor.battery_power_renamed"
+        )
+        == original.id
+    )
+    assert restarted.get(original.id) is not None
+    assert restarted.resolve_command_route(original.id, "turn_on").route is not None
+    assert restarted.canonical_id_for_source("home_assistant", "sensor.battery_power") is None
+    await database.close()
 
 
 @pytest.mark.asyncio

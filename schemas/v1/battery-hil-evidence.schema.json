@@ -2,7 +2,7 @@
   "$defs": {
     "HILIdentityObservation": {
       "additionalProperties": false,
-      "description": "Identity read from the exercised device or a trusted test authority.\n\nThe CLI labels are intentionally not enough: qualification needs a\nstructured observation tied to the artifact and its observation time.",
+      "description": "Structured identity evidence attached to a HIL qualification artifact.",
       "properties": {
         "hardware_id": {
           "maxLength": 200,
@@ -193,6 +193,32 @@
       "default": false,
       "title": "Firmware Identity Observed",
       "type": "boolean"
+    },
+    "identity_observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identity Observed At"
+    },
+    "identity_evidence_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identity Evidence Digest"
     },
     "manual_check_status": {
       "additionalProperties": {

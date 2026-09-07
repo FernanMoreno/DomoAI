@@ -1,29 +1,28 @@
-from __future__ import annotations
-
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from domoai.application.dynamic_safety import DynamicSafetyGuard
-from domoai.domain.energy import BatteryActuator, BatteryProfile, EVChargingBinding
-from domoai.domain.models import Command, ScalarValue, SourceRef, StateSnapshot, StateStatus
+from domoai.domain.energy import EVActuator
+from domoai.domain.models import Command, SourceRef, StateSnapshot, StateStatus
+from domoai.optimizer.energy import BatteryActuator, BatteryProfile
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.state_store import StateStore
 
 
 def _profile() -> BatteryProfile:
     return BatteryProfile(
-        capacity_kwh=10.0,
-        initial_soc_kwh=5.0,
-        min_soc_kwh=2.0,
-        max_soc_kwh=9.0,
-        max_charge_kw=4.0,
-        max_discharge_kw=4.0,
-        charge_efficiency=0.95,
-        discharge_efficiency=0.95,
+        capacity_kwh=10,
+        initial_soc_kwh=5,
+        min_soc_kwh=2,
+        max_soc_kwh=9,
+        max_charge_kw=3,
+        max_discharge_kw=3,
+        charge_efficiency=1,
+        discharge_efficiency=1,
         actuator=BatteryActuator(
-            device_id="battery.home",
-            capability="battery.power",
+            device_id="battery.one",
+            capability="battery.control",
             charge_command="charge",
             discharge_command="discharge",
             stop_command="stop",
@@ -35,178 +34,340 @@ def _profile() -> BatteryProfile:
 
 
 def _snapshot(
-    capability: str,
-    value: ScalarValue,
     *,
-    clock: FixedClock,
-    status: StateStatus = StateStatus.CURRENT,
-    age: timedelta = timedelta(seconds=0),
+    value: float,
+    observed_at: datetime,
+    status: StateStatus,
+    received_at: datetime | None = None,
+    unit: str = "kWh",
 ) -> StateSnapshot:
-    observed_at = clock.now() - age
     return StateSnapshot(
-        device_id="battery.home",
+        device_id="battery.one",
+        capability="battery.soc",
+        value=value,
+        unit=unit,
+        observed_at=observed_at,
+        received_at=received_at or observed_at,
+        status=status,
+        source_ref=SourceRef(adapter_id="fixture", external_id="battery.soc"),
+    )
+
+
+def _command(command: str, value: float) -> Command:
+    return Command(
+        id=f"command-{command}",
+        device_id="battery.one",
+        command=command,
+        value=value,
+        unit="kW",
+        idempotency_key=f"intent-{command}",
+    )
+
+
+def _ev_actuator() -> EVActuator:
+    return EVActuator(
+        device_id="ev.one",
+        capability="ev.charge_power",
+        charge_command="charge_ev",
+        stop_command="stop_ev",
+        max_charge_kw=7,
+    )
+
+
+def _ev_snapshot(
+    capability: str,
+    value: bool | float | str,
+    *,
+    observed_at: datetime,
+    received_at: datetime | None = None,
+) -> StateSnapshot:
+    return StateSnapshot(
+        device_id="ev.one",
         capability=capability,
         value=value,
         observed_at=observed_at,
-        received_at=clock.now(),
-        status=status,
-        source_ref=SourceRef(adapter_id="fixture", external_id=capability),
-    )
-
-
-def _command(name: str, value: float) -> Command:
-    return Command(
-        id=f"battery-{name}",
-        device_id="battery.home",
-        command=name,
-        value=value,
-        unit="kW",
-        idempotency_key=f"battery-{name}",
-    )
-
-
-def _ev_binding() -> EVChargingBinding:
-    return EVChargingBinding(
-        provider_id="fixture_ev",
-        device_id="ev.garage",
-        capability="ev.charge_power",
-        charge_command="set_charge_power",
-        stop_command="stop_charging",
-        connected_capability="ev.connected",
-        soc_capability="ev.soc",
-        power_feedback_capability="ev.power",
-        departure_capability="ev.departure_at",
-        capacity_kwh=60.0,
-        max_charge_kw=7.4,
-    )
-
-
-def _ev_snapshot(capability: str, value: ScalarValue, *, clock: FixedClock) -> StateSnapshot:
-    return StateSnapshot(
-        device_id="ev.garage",
-        capability=capability,
-        value=value,
-        observed_at=clock.now(),
-        received_at=clock.now(),
+        received_at=received_at or observed_at,
         status=StateStatus.CURRENT,
-        source_ref=SourceRef(adapter_id="fixture_ev", external_id=capability),
+        source_ref=SourceRef(adapter_id="fixture", external_id=f"ev.one.{capability}"),
     )
 
 
 @pytest.mark.asyncio
-async def test_battery_dispatch_requires_current_soc_and_power_readbacks() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 12, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_snapshot("battery.soc", 5.0, clock=clock))
-    guard = DynamicSafetyGuard(state_store, _profile(), clock=clock)
+async def test_dynamic_guard_rejects_discharge_at_current_reserve() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    await store.save(_snapshot(value=2, observed_at=now, status=StateStatus.CURRENT))
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
 
-    error = await guard.check(_command("charge", 2.0))
-
-    assert error is not None
-    assert "power" in error.message.lower()
-
-
-@pytest.mark.asyncio
-async def test_battery_dispatch_rejects_current_power_outside_profile_envelope() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 12, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_snapshot("battery.soc", 5.0, clock=clock))
-    await state_store.save(_snapshot("battery.power", 5.0, clock=clock))
-    guard = DynamicSafetyGuard(state_store, _profile(), clock=clock)
-
-    error = await guard.check(_command("charge", 2.0))
+    error = await guard.check(_command("discharge", 0.5))
 
     assert error is not None
-    assert "envelope" in error.message.lower()
+    assert error.code == "safety_limit_exceeded"
+    assert "reserve" in error.message
 
 
 @pytest.mark.asyncio
-async def test_battery_dispatch_accepts_current_state_inside_profile_envelope() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 12, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_snapshot("battery.soc", 5.0, clock=clock))
-    await state_store.save(_snapshot("battery.power", 0.0, clock=clock))
-    guard = DynamicSafetyGuard(state_store, _profile(), clock=clock)
+async def test_dynamic_guard_rejects_expired_soc_before_write() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
+    await store.save(
+        _snapshot(
+            value=5,
+            observed_at=now - timedelta(minutes=6),
+            status=StateStatus.CURRENT,
+        )
+    )
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
 
-    assert await guard.check(_command("charge", 2.0)) is None
+    error = await guard.check(_command("charge", 0.5))
+
+    assert error is not None
+    assert error.code == "safety_limit_exceeded"
+    assert "expired" in error.message
 
 
 @pytest.mark.asyncio
-async def test_ev_charge_requires_current_connection_soc_power_and_departure() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 12, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_ev_snapshot("ev.connected", True, clock=clock))
-    await state_store.save(_ev_snapshot("ev.soc", 20.0, clock=clock))
-    await state_store.save(_ev_snapshot("ev.power", 0.0, clock=clock))
-    await state_store.save(
-        _ev_snapshot("ev.departure_at", "2026-08-25T13:00:00+00:00", clock=clock)
+async def test_dynamic_guard_uses_battery_receipt_age_not_source_observation_age() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
+    await store.save(
+        _snapshot(
+            value=5,
+            observed_at=now - timedelta(hours=2),
+            received_at=now - timedelta(seconds=1),
+            status=StateStatus.CURRENT,
+        )
+    )
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
+
+    error = await guard.check(_command("charge", 0.5))
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_converts_percentage_soc_before_applying_kwh_limits() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    await store.save(
+        _snapshot(value=50, observed_at=now, status=StateStatus.CURRENT, unit="%")
+    )
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
+
+    error = await guard.check(_command("charge", 0.5))
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_rejects_future_soc_before_write() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    await store.save(
+        _snapshot(
+            value=5,
+            observed_at=now + timedelta(seconds=1),
+            status=StateStatus.CURRENT,
+        )
+    )
+    guard = DynamicSafetyGuard(store, _profile(), clock=clock)
+
+    error = await guard.check(_command("charge", 0.5))
+
+    assert error is not None
+    assert error.code == "safety_limit_exceeded"
+    assert "current" in error.message
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_rejects_ev_charge_above_bound() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    store = StateStore(clock=FixedClock(now))
+    await store.save(_ev_snapshot("ev.connected", True, observed_at=now))
+    await store.save(
+        _ev_snapshot("ev.departure_at", (now + timedelta(hours=2)).isoformat(), observed_at=now)
     )
     guard = DynamicSafetyGuard(
-        state_store, _profile(), ev_bindings=[_ev_binding()], clock=clock
+        store,
+        None,
+        ev_actuators=(_ev_actuator(),),
+        clock=FixedClock(now),
     )
+
+    error = await guard.check(
+        Command(
+            id="ev-charge",
+            device_id="ev.one",
+            command="charge_ev",
+            value=7.1,
+            unit="kW",
+            idempotency_key="ev-charge-key",
+        )
+    )
+
+    assert error is not None
+    assert error.code == "safety_limit_exceeded"
+    assert "envelope" in error.message
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_uses_receipt_age_not_source_observation_age() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
+    observed_at = now - timedelta(hours=2)
+    received_at = now - timedelta(seconds=1)
+    await store.save(
+        _ev_snapshot(
+            "ev.connected",
+            True,
+            observed_at=observed_at,
+            received_at=received_at,
+        )
+    )
+    await store.save(
+        _ev_snapshot(
+            "ev.departure_at",
+            (now + timedelta(hours=2)).isoformat(),
+            observed_at=observed_at,
+            received_at=received_at,
+        )
+    )
+    guard = DynamicSafetyGuard(
+        store,
+        None,
+        ev_actuators=(_ev_actuator(),),
+        clock=clock,
+    )
+
+    error = await guard.check(
+        Command(
+            id="ev-charge-receipt-fresh",
+            device_id="ev.one",
+            command="charge_ev",
+            value=1,
+            unit="kW",
+            idempotency_key="ev-charge-receipt-fresh-key",
+        )
+    )
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_rejects_zero_ev_charge() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    store = StateStore(clock=FixedClock(now))
+    await store.save(_ev_snapshot("ev.connected", True, observed_at=now))
+    await store.save(
+        _ev_snapshot("ev.departure_at", (now + timedelta(hours=2)).isoformat(), observed_at=now)
+    )
+    guard = DynamicSafetyGuard(
+        store,
+        None,
+        ev_actuators=(_ev_actuator(),),
+        clock=FixedClock(now),
+    )
+
+    error = await guard.check(
+        Command(
+            id="ev-zero-charge",
+            device_id="ev.one",
+            command="charge_ev",
+            value=0,
+            unit="kW",
+            idempotency_key="ev-zero-charge-key",
+        )
+    )
+
+    assert error is not None
+    assert error.code == "safety_limit_exceeded"
+    assert "envelope" in error.message
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_rejects_ev_charge_when_disconnected_or_departed() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    await store.save(_ev_snapshot("ev.connected", False, observed_at=now))
+    await store.save(
+        _ev_snapshot("ev.departure_at", (now - timedelta(minutes=1)).isoformat(), observed_at=now)
+    )
+    guard = DynamicSafetyGuard(store, None, ev_actuators=(_ev_actuator(),), clock=clock)
     command = Command(
         id="ev-charge",
-        device_id="ev.garage",
-        command="set_charge_power",
-        value=7.0,
+        device_id="ev.one",
+        command="charge_ev",
+        value=1,
         unit="kW",
-        idempotency_key="ev-charge",
-    )
-
-    assert await guard.check(command) is None
-
-
-@pytest.mark.asyncio
-async def test_ev_charge_rejects_disconnected_vehicle() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 12, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_ev_snapshot("ev.connected", False, clock=clock))
-    await state_store.save(_ev_snapshot("ev.soc", 20.0, clock=clock))
-    await state_store.save(_ev_snapshot("ev.power", 0.0, clock=clock))
-    await state_store.save(
-        _ev_snapshot("ev.departure_at", "2026-08-25T13:00:00+00:00", clock=clock)
-    )
-    guard = DynamicSafetyGuard(
-        state_store, _profile(), ev_bindings=[_ev_binding()], clock=clock
-    )
-    command = Command(
-        id="ev-charge-disconnected",
-        device_id="ev.garage",
-        command="set_charge_power",
-        value=7.0,
-        unit="kW",
-        idempotency_key="ev-charge-disconnected",
+        idempotency_key="ev-charge-key",
     )
 
     error = await guard.check(command)
 
     assert error is not None
-    assert "connected" in error.message.lower()
+    assert "connected" in error.message
 
-
-@pytest.mark.asyncio
-async def test_ev_charge_rejects_expired_departure_and_excess_power() -> None:
-    clock = FixedClock(datetime(2026, 8, 25, 14, tzinfo=UTC))
-    state_store = StateStore(stale_after=timedelta(minutes=5), clock=clock)
-    await state_store.save(_ev_snapshot("ev.connected", True, clock=clock))
-    await state_store.save(_ev_snapshot("ev.soc", 20.0, clock=clock))
-    await state_store.save(_ev_snapshot("ev.power", 8.0, clock=clock))
-    await state_store.save(
-        _ev_snapshot("ev.departure_at", "2026-08-25T13:00:00+00:00", clock=clock)
-    )
-    guard = DynamicSafetyGuard(
-        state_store, _profile(), ev_bindings=[_ev_binding()], clock=clock
-    )
-    command = Command(
-        id="ev-charge-expired",
-        device_id="ev.garage",
-        command="set_charge_power",
-        value=8.0,
-        unit="kW",
-        idempotency_key="ev-charge-expired",
-    )
-
+    await store.save(_ev_snapshot("ev.connected", True, observed_at=now))
     error = await guard.check(command)
 
     assert error is not None
-    assert "departure" in error.message.lower() or "power" in error.message.lower()
+    assert "departure" in error.message
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_rejects_future_ev_telemetry() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    store = StateStore(clock=clock)
+    future = now + timedelta(seconds=1)
+    await store.save(_ev_snapshot("ev.connected", True, observed_at=future))
+    await store.save(
+        _ev_snapshot("ev.departure_at", (now + timedelta(hours=2)).isoformat(), observed_at=now)
+    )
+    guard = DynamicSafetyGuard(store, None, ev_actuators=(_ev_actuator(),), clock=clock)
+
+    error = await guard.check(
+        Command(
+            id="ev-charge-future",
+            device_id="ev.one",
+            command="charge_ev",
+            value=1,
+            unit="kW",
+            idempotency_key="ev-charge-future-key",
+        )
+    )
+
+    assert error is not None
+    assert error.code == "safety_limit_exceeded"
+    assert "current" in error.message
+
+
+@pytest.mark.asyncio
+async def test_dynamic_guard_allows_ev_stop_without_live_charge_state() -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    guard = DynamicSafetyGuard(
+        StateStore(clock=FixedClock(now)),
+        None,
+        ev_actuators=(_ev_actuator(),),
+        clock=FixedClock(now),
+    )
+
+    error = await guard.check(
+        Command(
+            id="ev-stop",
+            device_id="ev.one",
+            command="stop_ev",
+            value=0,
+            unit="kW",
+            idempotency_key="ev-stop-key",
+        )
+    )
+
+    assert error is None

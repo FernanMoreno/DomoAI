@@ -12,6 +12,8 @@ from uuid import uuid4
 from domoai.domain.models import (
     Command,
     ControlLeaseStatus,
+    PhysicalBaseline,
+    SourceRef,
     StateSnapshot,
     StateStatus,
     StrictModel,
@@ -56,6 +58,14 @@ class ControlTakeoverPort(Protocol):
 
     async def emergency_stop(self, *, plan_id: str, execution_attempt_id: str) -> bool: ...
 
+    async def release_for_plan(self, *, plan_id: str, execution_attempt_id: str) -> bool: ...
+
+
+class ControlSupervisorPort(ControlTakeoverPort, Protocol):
+    async def supervise_once(self) -> list[str]: ...
+
+    async def shutdown(self) -> None: ...
+
 
 class BatteryControlCoordinator:
     """Gate battery plans on a provider-confirmed control lease.
@@ -76,6 +86,7 @@ class BatteryControlCoordinator:
         stop_unit: str = "kW",
         state_store: StateStorePort | None = None,
         power_feedback_capability: str | None = None,
+        power_feedback_source_ref: SourceRef | None = None,
         power_feedback_tolerance_kw: float = 0.05,
         clock: Clock | None = None,
     ) -> None:
@@ -89,25 +100,38 @@ class BatteryControlCoordinator:
         self.stop_unit = stop_unit
         self.state_store = state_store
         self.power_feedback_capability = power_feedback_capability
+        self.power_feedback_source_ref = power_feedback_source_ref
         self.power_feedback_tolerance_kw = power_feedback_tolerance_kw
         self.clock = clock or SystemClock()
         self._results: dict[tuple[str, str, str], TakeoverResult] = {}
-        self._authority_blocked = False
-        self._authority_block_reason: str | None = None
-        self._startup_reconciled: bool | None = None
+        # A configured physical feedback path is also a startup safety
+        # dependency.  Runtime construction must reconcile it before a new
+        # lease can be acquired; a coordinator without that path is retained
+        # for provider-neutral/non-latched takeover tests and has no startup
+        # reconciliation step to perform.
+        self._startup_reconciled = (
+            state_store is None and power_feedback_capability is None
+        )
 
     @property
     def authority_blocked(self) -> bool:
-        """Whether new physical battery orders are currently forbidden."""
+        """Whether an unverified physical stop currently blocks new orders."""
 
-        return self._authority_blocked
+        return any(result.status is ControlLeaseStatus.UNKNOWN for result in self._results.values())
 
     @property
     def authority_block_reason(self) -> str | None:
-        return self._authority_block_reason
+        """Return the first recorded reason for the current authority block."""
+
+        for result in self._results.values():
+            if result.status is ControlLeaseStatus.UNKNOWN:
+                return result.failure_code
+        return None
 
     @property
-    def startup_reconciled(self) -> bool | None:
+    def startup_reconciled(self) -> bool:
+        """Whether this coordinator has passed its startup safety gate."""
+
         return self._startup_reconciled
 
     async def acquire_for_plan(
@@ -146,14 +170,6 @@ class BatteryControlCoordinator:
                 self._results[key] = expired
                 return expired
             return existing
-        if self._authority_blocked:
-            result = self._rejected(
-                plan_id=plan_id,
-                first_command=first,
-                failure_code="control_authority_blocked",
-            )
-            self._results[key] = result
-            return result
 
         # A physical battery has one control owner, not one owner per plan.
         # Do not let direct execution or concurrent scheduler paths create a
@@ -242,29 +258,21 @@ class BatteryControlCoordinator:
             self._results[(self.policy.owner, self.device_id, plan_id)] = result.model_copy(
                 update={"status": ControlLeaseStatus.EXPIRED, "failure_code": "lease_expired"}
             )
-            await self.emergency_stop(
-                plan_id=plan_id,
-                execution_attempt_id=f"control-supervisor:{result.lease_id}",
-            )
             return False
         renewal_margin = max(1.0, self.policy.lease_seconds * 0.2)
         if result.expires_at - now <= timedelta(seconds=renewal_margin):
             renew = getattr(self.adapter, "renew_control", None)
             if not callable(renew):
-                await self.emergency_stop(
-                    plan_id=plan_id,
-                    execution_attempt_id=f"control-supervisor:{result.lease_id}",
-                )
-                return False
+                # Adapters that do not expose renewal still have a valid
+                # bounded lease.  They fail closed at the actual expiry; the
+                # absence of an optional renewal API must not make a freshly
+                # acquired short test lease unusable.
+                return self.clock.now() < result.expires_at
             try:
                 renewed = await renew(result)
             except Exception:
                 renewed = None
             if not isinstance(renewed, TakeoverResult):
-                await self.emergency_stop(
-                    plan_id=plan_id,
-                    execution_attempt_id=f"control-supervisor:{result.lease_id}",
-                )
                 return False
             if (
                 renewed.status is not ControlLeaseStatus.ACQUIRED
@@ -273,10 +281,6 @@ class BatteryControlCoordinator:
                 or renewed.plan_id != plan_id
                 or renewed.first_command_id != result.first_command_id
             ):
-                await self.emergency_stop(
-                    plan_id=plan_id,
-                    execution_attempt_id=f"control-supervisor:{result.lease_id}",
-                )
                 return False
             self._results[(self.policy.owner, self.device_id, plan_id)] = renewed
             result = renewed
@@ -287,24 +291,17 @@ class BatteryControlCoordinator:
 
         This is the one supervisor-owned write allowed outside the normal
         executor path: it is a fail-safe cleanup operation, carries its own
-        idempotency key, and reports success only when a current zero-power
-        readback confirms the stop.
+        idempotency key, and reports success only when the adapter accepts the
+        stop request.
         """
 
         key = (self.policy.owner, self.device_id, plan_id)
         result = self._results.get(key)
         execute = getattr(self.adapter, "execute", None)
-        if (
-            result is not None
-            and result.status is ControlLeaseStatus.RELEASED
-            and result.failure_code == "emergency_stop_confirmed"
-        ):
-            return True
-        if (
-            result is None
-            or result.status not in {ControlLeaseStatus.ACQUIRED, ControlLeaseStatus.EXPIRED}
-            or not callable(execute)
-        ):
+        if result is None:
+            return False
+        if not callable(execute):
+            self._revoke(key, result, "control_provider_unavailable")
             return False
         command = Command(
             id=f"{plan_id}:emergency-stop",
@@ -325,67 +322,31 @@ class BatteryControlCoordinator:
                 ),
             )
         except Exception:
-            self._results[key] = result.model_copy(
-                update={
-                    "status": ControlLeaseStatus.EXPIRED,
-                    "failure_code": "emergency_stop_failed",
-                }
-            )
-            self._block_authority("emergency_stop_failed")
+            self._revoke(key, result, "emergency_stop_failed")
             return False
         if not getattr(acknowledgement, "accepted", False):
-            self._results[key] = result.model_copy(
-                update={
-                    "status": ControlLeaseStatus.EXPIRED,
-                    "failure_code": "emergency_stop_rejected",
-                }
-            )
-            self._block_authority("emergency_stop_failed")
+            self._revoke(key, result, "emergency_stop_rejected")
             return False
+        # A transport ACK is not physical evidence.  Treat a coordinator
+        # missing its configured feedback path as a failed stop and revoke the
+        # lease so a later caller cannot mistake it for live ownership.
+        if self.state_store is None or self.power_feedback_capability is None:
+            self._revoke(key, result, "emergency_stop_readback_not_configured")
+            return False
+        baseline = result.baseline
         read_state = getattr(self.adapter, "read_state", None)
-        source_ref = result.baseline.source_ref if result.baseline is not None else None
-        if not callable(read_state) or source_ref is None or self.power_feedback_capability is None:
-            self._results[key] = result.model_copy(
-                update={
-                    "status": ControlLeaseStatus.EXPIRED,
-                    "failure_code": "emergency_stop_readback_failed",
-                }
-            )
-            self._block_authority("emergency_stop_failed")
+        if baseline is None or not callable(read_state):
+            self._revoke(key, result, "emergency_stop_readback_unavailable")
             return False
         try:
-            snapshots = await read_state([source_ref])
-            matching = next(
-                (
-                    item
-                    for item in snapshots
-                    if isinstance(item, StateSnapshot)
-                    and item.capability == self.power_feedback_capability
-                    and item.source_ref == source_ref
-                ),
-                None,
-            )
-            if matching is None or not self._is_safe_power_readback(matching):
-                raise ValueError("emergency stop readback is not zero")
-            matching = matching.model_copy(update={"device_id": self.device_id})
-            if self.state_store is not None:
-                await self.state_store.save(matching)
+            matching = await self._read_feedback(baseline.source_ref)
         except Exception:
-            self._results[key] = result.model_copy(
-                update={
-                    "status": ControlLeaseStatus.EXPIRED,
-                    "failure_code": "emergency_stop_readback_failed",
-                }
-            )
-            self._block_authority("emergency_stop_failed")
+            self._revoke(key, result, "emergency_stop_readback_failed")
             return False
-        self._results[key] = result.model_copy(
-            update={
-                "status": ControlLeaseStatus.RELEASED,
-                "failure_code": "emergency_stop_confirmed",
-            }
-        )
-        self._block_authority("lease_supervision_required")
+        if not self._feedback_is_safe(matching):
+            self._revoke(key, result, "emergency_stop_readback_unconfirmed")
+            return False
+        self._results[key] = result.model_copy(update={"status": ControlLeaseStatus.RELEASED})
         return True
 
     async def supervise_once(self) -> list[str]:
@@ -435,7 +396,7 @@ class BatteryControlCoordinator:
                     "status": (
                         ControlLeaseStatus.RELEASED
                         if stop_confirmed
-                        else ControlLeaseStatus.EXPIRED
+                        else ControlLeaseStatus.UNKNOWN
                     ),
                     "failure_code": (
                         "lease_supervisor_stop_confirmed"
@@ -456,15 +417,39 @@ class BatteryControlCoordinator:
         and require a zero readback before reporting reconciliation success.
         """
 
+        if self.state_store is None and self.power_feedback_capability is None:
+            self._startup_reconciled = True
+            return True
         if self.state_store is None or self.power_feedback_capability is None:
-            self._block_authority("startup_reconciliation_unavailable")
             self._startup_reconciled = False
             return False
         snapshot = self.state_store.peek(self.device_id, self.power_feedback_capability)
-        if snapshot is None:
-            self._block_authority("startup_reconciliation_unavailable")
+        source_ref = snapshot.source_ref if snapshot is not None else self.power_feedback_source_ref
+        if source_ref is None:
             self._startup_reconciled = False
             return False
+        if self._feedback_is_safe(snapshot):
+            try:
+                live_snapshot = await self._read_feedback(source_ref)
+            except Exception:
+                live_snapshot = None
+            if self._feedback_is_safe(live_snapshot):
+                self._startup_reconciled = True
+                self._clear_reconciled_unknown_leases()
+                return True
+        elif snapshot is None:
+            # A first boot or a persistence gap must still reconcile the
+            # physical route directly.  Cached state is useful evidence, but
+            # it is never a prerequisite for the one live read that decides
+            # whether a latched actuator needs a stop.
+            try:
+                live_snapshot = await self._read_feedback(source_ref)
+            except Exception:
+                live_snapshot = None
+            if self._feedback_is_safe(live_snapshot):
+                self._startup_reconciled = True
+                self._clear_reconciled_unknown_leases()
+                return True
         command = Command(
             id="startup-reconciliation-stop",
             device_id=self.device_id,
@@ -476,7 +461,6 @@ class BatteryControlCoordinator:
         )
         execute = getattr(self.adapter, "execute", None)
         if not callable(execute):
-            self._block_authority("startup_reconciliation_failed")
             self._startup_reconciled = False
             return False
         try:
@@ -489,68 +473,114 @@ class BatteryControlCoordinator:
                 ),
             )
             if not getattr(acknowledgement, "accepted", False):
-                self._block_authority("startup_reconciliation_failed")
                 self._startup_reconciled = False
                 return False
             read_state = getattr(self.adapter, "read_state", None)
             if not callable(read_state):
-                self._block_authority("startup_reconciliation_failed")
                 self._startup_reconciled = False
                 return False
-            snapshots = await read_state([snapshot.source_ref])
-            matching = next(
-                (
-                    item
-                    for item in snapshots
-                    if isinstance(item, StateSnapshot)
-                    and item.capability == self.power_feedback_capability
-                    and item.source_ref == snapshot.source_ref
-                ),
-                None,
-            )
-            if not isinstance(matching, StateSnapshot) or not self._is_safe_power_readback(
-                matching
-            ):
-                self._block_authority("startup_reconciliation_failed")
-                self._startup_reconciled = False
-                return False
-            matching = matching.model_copy(update={"device_id": self.device_id})
-            await self.state_store.save(matching)
-            self._startup_reconciled = True
-            self._authority_blocked = False
-            self._authority_block_reason = None
-            return True
+            matching = await self._read_feedback(source_ref)
+            confirmed = self._feedback_is_safe(matching)
+            self._startup_reconciled = confirmed
+            if confirmed:
+                self._clear_reconciled_unknown_leases()
+            return confirmed
         except Exception:
-            self._block_authority("startup_reconciliation_failed")
             self._startup_reconciled = False
             return False
 
-    async def release_for_plan(self, *, plan_id: str) -> None:
+    async def _read_feedback(self, source_ref: SourceRef) -> StateSnapshot | None:
+        """Read the exact feedback route and normalize only its device ID.
+
+        Adapters may report their provider-local device identity while the
+        runtime's binding uses a canonical ID.  The source reference is the
+        authoritative route identity at this boundary.
+        """
+
+        if self.power_feedback_capability is None:
+            return None
+        read_state = getattr(self.adapter, "read_state", None)
+        if not callable(read_state):
+            return None
+        snapshots = await read_state([source_ref])
+        for item in snapshots:
+            if (
+                isinstance(item, StateSnapshot)
+                and
+                _same_source_route(item.source_ref, source_ref)
+                and item.capability == self.power_feedback_capability
+            ):
+                return item.model_copy(update={"device_id": self.device_id})
+        return None
+
+    def _feedback_is_safe(self, snapshot: StateSnapshot | None) -> bool:
+        if snapshot is None or snapshot.status is not StateStatus.CURRENT:
+            return False
+        if not isinstance(snapshot.value, (int, float)) or isinstance(snapshot.value, bool):
+            return False
+        age_seconds = (self.clock.now() - snapshot.received_at).total_seconds()
+        if self.state_store is not None and (
+            age_seconds < 0 or age_seconds > self.state_store.stale_after.total_seconds()
+        ):
+            return False
+        return abs(float(snapshot.value)) <= self.power_feedback_tolerance_kw
+
+    async def release_for_plan(self, *, plan_id: str, execution_attempt_id: str) -> bool:
         key = (self.policy.owner, self.device_id, plan_id)
         result = self._results.get(key)
         if result is None:
-            return
-        release = getattr(self.adapter, "release_control", None)
-        if callable(release):
-            try:
-                await release(result)
-            except Exception:
-                self._block_authority("control_release_failed")
-                return
-        self._results[key] = result.model_copy(update={"status": ControlLeaseStatus.RELEASED})
-
-    def _block_authority(self, reason: str) -> None:
-        self._authority_blocked = True
-        self._authority_block_reason = reason
-
-    def _is_safe_power_readback(self, snapshot: StateSnapshot | None) -> bool:
-        return bool(
-            snapshot is not None
-            and snapshot.status is StateStatus.CURRENT
-            and isinstance(snapshot.value, (int, float))
-            and not isinstance(snapshot.value, bool)
-            and abs(float(snapshot.value)) <= self.power_feedback_tolerance_kw
+            return False
+        if result.status is not ControlLeaseStatus.ACQUIRED:
+            return result.status is ControlLeaseStatus.RELEASED
+        if self.state_store is None or self.power_feedback_capability is None:
+            self._results[key] = result.model_copy(update={"status": ControlLeaseStatus.RELEASED})
+            return True
+        return await self.emergency_stop(
+            plan_id=plan_id,
+            execution_attempt_id=execution_attempt_id,
         )
+
+    async def shutdown(self) -> None:
+        """Stop every still-owned latched actuator before runtime shutdown."""
+
+        for key, result in list(self._results.items()):
+            if result.status is not ControlLeaseStatus.ACQUIRED:
+                continue
+            confirmed = await self.emergency_stop(
+                plan_id=result.plan_id,
+                execution_attempt_id=f"control-supervisor:shutdown:{result.lease_id}",
+            )
+            if not confirmed:
+                self._results[key] = result.model_copy(
+                    update={
+                        "status": ControlLeaseStatus.UNKNOWN,
+                        "failure_code": "shutdown_stop_unconfirmed",
+                    }
+                )
+
+    def _revoke(
+        self,
+        key: tuple[str, str, str],
+        result: TakeoverResult,
+        failure_code: str,
+    ) -> None:
+        """Revoke authority after any unverified emergency-stop path."""
+
+        self._results[key] = result.model_copy(
+            update={"status": ControlLeaseStatus.UNKNOWN, "failure_code": failure_code}
+        )
+
+    def _clear_reconciled_unknown_leases(self) -> None:
+        """Retire latched unknown leases only after a safe live readback."""
+
+        for key, result in list(self._results.items()):
+            if result.status is ControlLeaseStatus.UNKNOWN:
+                self._results[key] = result.model_copy(
+                    update={
+                        "status": ControlLeaseStatus.RELEASED,
+                        "failure_code": "control_reconciled",
+                    }
+                )
 
     def _rejected(
         self, *, plan_id: str, first_command: Command, failure_code: str

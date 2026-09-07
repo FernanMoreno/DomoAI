@@ -142,9 +142,11 @@ async def build_workflow_fixture(
 
 
 def default_horizon() -> Horizon:
-    # Keep independently-created fixture requests identical within a clock
-    # minute while remaining due and inside their execution window.
-    start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(hours=1)
+    # Keep independently-created fixture requests identical for the process
+    # lifetime while remaining due and inside their execution window. Using
+    # datetime.now() for each call made this helper cross a minute boundary
+    # during a slow suite and caused the strict provider horizon check to fail.
+    start = _DEFAULT_HORIZON_START - timedelta(hours=1)
     return Horizon(
         start=start,
         end=start + timedelta(hours=2),

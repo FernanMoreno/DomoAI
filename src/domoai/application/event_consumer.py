@@ -10,9 +10,14 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.domain.models import (
     AdapterDiagnosticEvent,
     AdapterHealth,
+    AvailabilityChangedEvent,
+    DeviceMembershipChangedEvent,
+    MetadataChangedEvent,
     SourceEvent,
     SourceRef,
     StateChangedEvent,
+    StateSnapshot,
+    StateStatus,
 )
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import AuditLog
@@ -45,23 +50,35 @@ class RuntimeEventConsumer:
         self.last_event_lag_seconds: float | None = None
 
     async def consume_once(self) -> SourceEvent | None:
-        """Apply one event, or mark cached state unavailable when the source is lost."""
+        """Apply one event, or mark cached state stale when the source is lost."""
 
         try:
             event = await anext(self.adapter.subscribe_events())
         except StopAsyncIteration:
             return None
         except (ConnectionError, OSError) as error:
-            await self._mark_source_unavailable(
-                event_type="source_event_stream_unavailable", error=error
+            stale = await self.discovery.apply_source_availability(
+                self.adapter.adapter_id, available=False
+            )
+            self.audit.append(
+                event_type="source_event_stream_unavailable",
+                actor="runtime",
+                subject_id=self.adapter.adapter_id,
+                payload={"error": str(error), "stale_states": len(stale)},
             )
             return None
 
         try:
             await self._apply_event(event)
         except (ConnectionError, OSError) as error:
-            await self._mark_source_unavailable(
-                event_type="source_event_stream_unavailable", error=error
+            stale = await self.discovery.apply_source_availability(
+                self.adapter.adapter_id, available=False
+            )
+            self.audit.append(
+                event_type="source_event_stream_unavailable",
+                actor="runtime",
+                subject_id=self.adapter.adapter_id,
+                payload={"error": str(error), "stale_states": len(stale)},
             )
             return None
 
@@ -92,7 +109,6 @@ class RuntimeEventConsumer:
                     delay = min(delay * 2, max_reconnect_delay)
                     continue
 
-                await self._mark_degraded_components(health)
                 if degraded:
                     await self._mark_degraded_components(health)
                     try:
@@ -136,14 +152,17 @@ class RuntimeEventConsumer:
         )
 
         if isinstance(event, StateChangedEvent):
-            await self._apply_state_only(event)
-        elif isinstance(event, AdapterDiagnosticEvent):
-            source_adapter_id = event.source_adapter_id or event.payload.get("source_adapter_id")
-            diagnostic = event.payload.get("event")
-            if source_adapter_id and diagnostic != "adapter_reconnected":
-                await self.state_store.mark_source_unavailable(str(source_adapter_id))
-            await self.discovery.refresh()
-        else:
+            snapshots = await self._apply_state_only(event)
+            if self.automation_handler is not None:
+                for automation_event in self._automation_events(event, snapshots):
+                    await self.automation_handler(automation_event)
+        elif isinstance(event, AvailabilityChangedEvent):
+            await self._apply_availability(event)
+        elif isinstance(event, (DeviceMembershipChangedEvent, MetadataChangedEvent)):
+            # These events change the executable inventory or its semantic
+            # metadata.  They are the only event kinds that justify a full
+            # discovery; state/transport diagnostics must not turn into a
+            # repeated read of every device.
             await self.discovery.refresh()
         elif isinstance(event, AdapterDiagnosticEvent) and event.code == "source_unavailable":
             source_adapter_id = event.source_adapter_id or self.adapter.adapter_id
@@ -318,13 +337,6 @@ class RuntimeEventConsumer:
             if source_ref.adapter_id == adapter_id
         ]
 
-    async def _mark_degraded_components(self, health: AdapterHealth) -> None:
-        """Project composite health failures into source-owned state."""
-
-        for component in health.components or []:
-            if not component.connected:
-                await self.state_store.mark_source_unavailable(component.adapter_id)
-
     async def _mark_unavailable(self, error: Exception) -> None:
         await self._mark_source_unavailable(
             event_type="source_event_stream_unavailable", error=error
@@ -353,9 +365,13 @@ class RuntimeEventConsumer:
                 for child in getattr(self.adapter, "adapters", ())
                 if str(child.adapter_id) not in source_ids
             )
-            stale = []
+            stale: list[StateSnapshot] = []
             for source_id in source_ids:
-                stale.extend(await self.state_store.mark_source_unavailable(source_id))
+                stale.extend(
+                    await self.discovery.apply_source_availability(
+                        source_id, available=False
+                    )
+                )
         except Exception as stale_error:
             stale = []
             error = RuntimeError(f"{error}; stale-state marking failed: {stale_error}")

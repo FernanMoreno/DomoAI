@@ -285,6 +285,33 @@ def test_approval_persists_scope_bundle_and_lifetime() -> None:
     assert approval.expires_at is not None
 
 
+def test_approval_id_round_trips_through_serialization() -> None:
+    approval = Approval(
+        status="approved",
+        approved_by="operator",
+        approved_at=datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+        validation_digest="sha256:validation",
+        approval_id="approval-round-trip-1",
+    )
+
+    restored = Approval.model_validate(approval.model_dump())
+
+    assert restored.approval_id == "approval-round-trip-1"
+
+
+def test_approval_without_identifier_still_parses_as_legacy_evidence() -> None:
+    legacy_payload = {
+        "status": "approved",
+        "approved_by": "operator",
+        "approved_at": datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+        "validation_digest": "sha256:validation",
+    }
+
+    approval = Approval.model_validate(legacy_payload)
+
+    assert approval.approval_id is None
+
+
 def test_bundle_member_normalizes_multiple_predecessors() -> None:
     member = BundleMemberCommit(
         plan_id="p2",

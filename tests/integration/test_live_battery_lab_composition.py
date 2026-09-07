@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -19,7 +21,17 @@ from domoai.adapters.knx.transport import XknxTransport
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.modbus.config import load_mapping as load_modbus_mapping
 from domoai.adapters.modbus.transport import PyModbusTcpTransport
-from domoai.domain.models import Command
+from domoai.application.battery_composition import (
+    compose_home_assistant_dispatchable_battery_binding,
+)
+from domoai.domain.models import Command, SourceRef
+from domoai.domain.provider import MeasurementQuality
+from domoai.optimizer.energy import (
+    BatteryActuator,
+    BatteryCapacityEvidence,
+    BatteryProfile,
+    BatterySocObservation,
+)
 
 
 def _required(name: str) -> str:
@@ -51,12 +63,13 @@ async def test_live_battery_shared_state_across_http_modbus_and_home_assistant()
     if not ha_url or not ha_token:
         pytest.skip("Home Assistant credentials are required for the shared battery test")
 
+    run_id = uuid.uuid4().hex
     async with httpx.AsyncClient(timeout=5) as client:
         stopped = await client.post(
             f"{battery_url}/command",
             json={
                 "command": "stop_battery",
-                "idempotency_key": "live-battery-lab-stop-before",
+                "idempotency_key": f"live-battery-lab-stop-before-{run_id}",
             },
         )
         stopped.raise_for_status()
@@ -66,7 +79,7 @@ async def test_live_battery_shared_state_across_http_modbus_and_home_assistant()
             json={
                 "command": "charge_battery",
                 "value": 1.0,
-                "idempotency_key": "live-battery-lab-http-charge",
+                "idempotency_key": f"live-battery-lab-http-charge-{run_id}",
             },
         )
         charged.raise_for_status()
@@ -100,11 +113,95 @@ async def test_live_battery_shared_state_across_http_modbus_and_home_assistant()
         battery_capacity_bindings=mapping.battery_capacity_bindings,
         battery_dispatch_bindings=mapping.battery_dispatch_bindings,
     )
-    ha = HomeAssistantProviderAdapter(ha_provider)
-    await ha.connect()
+    ha: HomeAssistantProviderAdapter | None = None
     try:
+        # Provider route validation consumes the provider's raw snapshot. The
+        # AdapterPort projection is a later boundary that replaces source
+        # capability names (for example ``value``) with canonical runtime
+        # metrics (for example ``battery.soc``).
+        provider_snapshot = await ha_provider.snapshot()
+        ha_provider.validate_battery_dispatch_routes(provider_snapshot)
+        soc_state = next(
+            state
+            for state in provider_snapshot.source_states
+            if state["entity_id"]
+            == mapping.battery_dispatch_bindings["lab-battery"].soc_entity_id
+        )
+        capacity_state = next(
+            state
+            for state in provider_snapshot.source_states
+            if state["entity_id"]
+            == mapping.battery_dispatch_bindings["lab-battery"].capacity_entity_id
+        )
+        canonical_device_id = str(
+            next(
+                entity["device_id"]
+                for entity in provider_snapshot.source_entities
+                if entity["entity_id"] == soc_state["entity_id"]
+            )
+        )
+        capacity_kwh = float(capacity_state["value"])
+        initial_soc_kwh = float(soc_state["value"]) / 100.0 * capacity_kwh
+        observed_at = datetime.fromisoformat(
+            str(soc_state["observed_at"]).replace("Z", "+00:00")
+        ).astimezone(UTC)
+        profile = BatteryProfile(
+            capacity_kwh=capacity_kwh,
+            initial_soc_kwh=initial_soc_kwh,
+            min_soc_kwh=2.0,
+            max_soc_kwh=9.0,
+            max_charge_kw=4.0,
+            max_discharge_kw=3.0,
+            charge_efficiency=0.9,
+            discharge_efficiency=0.9,
+            actuator=BatteryActuator(
+                device_id=canonical_device_id,
+                capability="battery_control",
+                charge_command="charge_battery",
+                discharge_command="discharge_battery",
+                stop_command="stop_battery",
+                power_feedback_capability="battery.power",
+                power_feedback_tolerance_kw=0.1,
+                soc_reconciliation_capability="battery.soc",
+            ),
+            initial_soc_observation=BatterySocObservation(
+                provider_id="home_assistant",
+                device_id=canonical_device_id,
+                value_kwh=initial_soc_kwh,
+                observed_at=observed_at,
+                received_at=observed_at,
+                quality=MeasurementQuality.GOOD,
+                source_ref=SourceRef(
+                    adapter_id="home_assistant",
+                    external_id=str(soc_state["entity_id"]),
+                ),
+            ),
+        )
+        capacity_evidence = BatteryCapacityEvidence(
+            provider_id="home_assistant",
+            device_id=canonical_device_id,
+            capacity_kwh=capacity_kwh,
+            source_ref=SourceRef(
+                adapter_id="home_assistant",
+                external_id=str(capacity_state["entity_id"]),
+            ),
+            observed_at=observed_at,
+            received_at=observed_at,
+        )
+        binding = compose_home_assistant_dispatchable_battery_binding(
+            ha_provider,
+            provider_snapshot,
+            binding_id="lab-battery",
+            canonical_device_id=canonical_device_id,
+            profile=profile,
+            capacity_evidence=capacity_evidence,
+        )
+        ha = HomeAssistantProviderAdapter(
+            ha_provider,
+            dispatchable_battery_binding=binding,
+        )
+        await ha.connect()
         ha_snapshot = await ha.discover()
-        ha_provider.validate_battery_dispatch_routes(ha_snapshot)
         command_entity = next(
             entity
             for entity in ha_snapshot.source_entities
@@ -134,7 +231,8 @@ async def test_live_battery_shared_state_across_http_modbus_and_home_assistant()
         power_entity = mapping.battery_dispatch_bindings["lab-battery"].power_feedback_entity_id
         assert float(states[power_entity]) == pytest.approx(0.0, abs=0.01)
     finally:
-        await ha.disconnect()
+        if ha is not None:
+            await ha.disconnect()
 
 
 @pytest.mark.asyncio

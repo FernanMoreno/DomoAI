@@ -105,6 +105,7 @@ async def test_live_multi_adapter_command_round_trip(tmp_path: Path) -> None:
             (
                 item
                 for item in runtime.registry.devices
+                if item.availability == "available"
                 if any(ref.adapter_id == "matter" for ref in item.source_refs)
                 and any(
                     capability.name == "power"

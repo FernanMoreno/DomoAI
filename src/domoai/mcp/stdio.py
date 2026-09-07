@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from contextlib import suppress
 
 from mcp.server.fastmcp import FastMCP
 
@@ -28,13 +27,7 @@ from domoai.runtime.state_store import StateStore
 
 
 def require_live_deployment_source(settings: Settings) -> None:
-    """Reject an unconfigured production launcher before fixture fallback.
-
-    ``build_fixture_server`` remains an explicit deterministic test/lab entry
-    point. The stdio executable, however, is the deployment boundary and must
-    never silently expose a simulated home when an operator intended to use
-    live providers.
-    """
+    """Reject an unconfigured deployment before any fixture fallback."""
 
     if not any(
         (
@@ -80,119 +73,15 @@ async def build_fixture_server() -> FastMCP:
     return create_unified_server(UnifiedMcpContext(domotics=context, optimizer=optimizer_context))
 
 
-async def build_configured_server(
-    settings: Settings | None = None,
-    *,
-    operator_principal_provider: OperatorPrincipalProvider | None = None,
-    operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
-) -> tuple[RuntimeComposition, FastMCP]:
-    runtime = await build_runtime(
-        settings,
-        operator_principal_provider=operator_principal_provider,
-        operator_approval_assertion_provider=operator_approval_assertion_provider,
-    )
-    optimization_service = OptimizationService(
-        runtime.registry,
-        runtime.plan_service,
-        CpSatOptimizer(runtime.registry),
-    )
-    # CP-SAT-facing worker: process-backed (spec 150), not thread-backed.
-    # A timed-out solve's OS process is genuinely terminated instead of
-    # merely abandoned -- see specs/150-cp-sat-process-isolation/research.md
-    # for why a thread can't provide that guarantee. optimization_service
-    # itself is still used directly (validate_proposal, not through this
-    # worker) by mcp/ortools_server.py's optimize_scenario tool.
-    worker = runtime.register_blocking_worker(
-        ProcessOptimizationWorker(
-            runtime.registry,
-            WorkerBudget(
-                max_solver_time_seconds=runtime.settings.optimization_max_solver_time_seconds,
-                queue_capacity=runtime.settings.optimization_worker_queue_capacity,
-                max_concurrency=runtime.settings.optimization_worker_concurrency,
-                queue_wait_seconds=runtime.settings.optimization_worker_queue_wait_seconds,
-                provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
-            ),
-            max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
-        )
-    )
-    # A second, separately-scoped worker for the energy-context provider
-    # boundary -- distinct `service`, so it cannot share the optimizer
-    # worker above (see DomoticsMcpContext.blocking_worker / spec 147).
-    # Constructed eagerly and registered here rather than lazily inside the
-    # get_energy_context tool, so `runtime.close()` actually owns it.
-    energy_worker = (
-        runtime.register_blocking_worker(OptimizationWorker(runtime.energy_context_provider))
-        if runtime.energy_context_provider is not None
-        else None
-    )
-    metrics = RuntimeMetricsCollector(
-        adapter=runtime.adapter,
-        registry=runtime.registry,
-        event_consumer=runtime.event_consumer,
-        scheduler=runtime.scheduler,
-        state_store=runtime.state_store,
-        plan_repository=runtime.plan_repository,
-        database=runtime.database,
-        storage=runtime.storage,
-        audit_storage=runtime.audit_storage,
-        audit=runtime.audit,
-        battery_qualification=runtime.battery_qualification,
-        optimization_worker=worker,
-        optimization_service=optimization_service,
-        clock=runtime.clock,
-    )
-    context = DomoticsMcpContext(
-        discovery=runtime.discovery,
-        state_service=StateService(runtime.state_store),
-        facade=runtime.facade,
-        registry=runtime.registry,
-        policies=runtime.plan_service.policy_engine.policies,
-        plan_repository=runtime.plan_repository,
-        approval_store=runtime.approval_store,
-        plans=runtime.plans,
-        energy_context_provider=runtime.energy_context_provider,
-        scheduler=runtime.scheduler,
-        audit_repository=runtime.audit_repository,
-        metrics=metrics,
-        bundle_commit_service=runtime.bundle_commit_service,
-        operator_principal_provider=runtime.operator_principal_provider,
-        operator_approval_assertion_provider=runtime.operator_approval_assertion_provider,
-        blocking_worker=energy_worker,
-        provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
-        clock=runtime.clock,
-    )
-    optimizer_context = OrtoolsMcpContext(
-        registry=runtime.registry,
-        plan_service=runtime.plan_service,
-        optimization_service=optimization_service,
-        optimization_worker=worker,
-        max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
-    )
-    return runtime, create_unified_server(
-        UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
-    )
-
-
 async def run_stdio() -> None:
     settings = Settings.from_environment()
     if os.getenv("DOMOAI_RUNTIME_MODE", "configured").strip().lower() != "fixture":
         require_live_deployment_source(settings)
     runtime, server = await build_configured_server(settings)
-    event_task = asyncio.create_task(runtime.event_consumer.run())
-    scheduler_task = asyncio.create_task(runtime.scheduler.run())
-    battery_supervisor_task = asyncio.create_task(runtime.run_battery_control_supervisor())
+    await runtime.start()
     try:
         await server.run_stdio_async()
     finally:
-        event_task.cancel()
-        scheduler_task.cancel()
-        battery_supervisor_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await event_task
-        with suppress(asyncio.CancelledError):
-            await scheduler_task
-        with suppress(asyncio.CancelledError):
-            await battery_supervisor_task
         await runtime.close()
 
 

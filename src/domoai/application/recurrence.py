@@ -12,14 +12,56 @@ from domoai.domain.models import Command, RecurrenceRule
 _MAX_DAYS_SEARCHED = 8
 
 
-def recurrence_digest(plan_id: str, rule: RecurrenceRule) -> str:
+def recurring_template_digest(commands: list[Command]) -> str:
+    """Digest the exact command template authorized by a standing schedule."""
+
+    payload = {
+        "schema": "standing-automation-template-v1",
+        "commands": [command.model_dump(mode="json") for command in commands],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def recurrence_digest(
+    plan_id: str,
+    rule: RecurrenceRule,
+    *,
+    template_digest: str | None = None,
+) -> str:
     payload = {
         "schema": "standing-automation-v1",
         "plan_id": plan_id,
         "rule": rule.model_dump(mode="json"),
     }
+    if template_digest is not None:
+        payload["template_digest"] = template_digest
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def occurrence_idempotency_key(
+    *,
+    household_id: str,
+    automation_id: str,
+    definition_digest: str,
+    occurrence_id: str,
+    command_id: str,
+    command_index: int,
+) -> str:
+    """Derive one stable adapter key for one authorized occurrence member."""
+
+    payload = {
+        "schema": "automation-occurrence-idempotency-v1",
+        "household_id": household_id,
+        "automation_id": automation_id,
+        "definition_digest": definition_digest,
+        "occurrence_id": occurrence_id,
+        "command_id": command_id,
+        "command_index": command_index,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "automation:v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def next_occurrence(rule: RecurrenceRule, after: datetime) -> datetime:

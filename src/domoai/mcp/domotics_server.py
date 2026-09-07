@@ -23,7 +23,9 @@ from domoai.application.facade import DomoticsFacade
 from domoai.application.local_automation import LocalAutomationEngine
 from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_worker import OptimizationWorker, WorkerOperationError
-from domoai.application.recurrence import recurrence_digest
+from domoai.application.privacy import PrivacyService
+from domoai.application.recurrence import recurrence_digest, recurring_template_digest
+from domoai.application.scene import SceneCommitRequest, scene_commit_digest
 from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.automation import (
@@ -530,6 +532,73 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             return error_envelope(error)
 
     @server.tool(
+        name="get_history",
+        description=(
+            "Read bounded historical semantic state samples without refreshing adapters "
+            "or mutating runtime state."
+        ),
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    @with_request_principal
+    async def get_history(
+        devices: list[str] | None = None,
+        capabilities: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            if context.state_history_repository is None:
+                raise ValueError("State history is unavailable in this deployment")
+            selected_devices = tuple(
+                devices
+                if devices is not None
+                else (device.id for device in _visible_devices(context))
+            )
+            selected_capabilities = tuple(capabilities or ())
+            policy = _authority_policy(context)
+            authority = current_authority() or policy.local_context() if policy else None
+            if authority is not None and authority.capabilities and not selected_capabilities:
+                selected_capabilities = tuple(authority.capabilities)
+            _authorize_read(
+                context,
+                operation="get_history",
+                device_ids=selected_devices,
+                capabilities=selected_capabilities,
+            )
+            parsed_start = _parse_timezone_aware_datetime(start) if start is not None else None
+            parsed_end = _parse_timezone_aware_datetime(end) if end is not None else None
+            records = await context.state_history_repository.list_history(
+                device_ids=selected_devices,
+                capabilities=selected_capabilities,
+                start=parsed_start,
+                end=parsed_end,
+                limit=limit,
+            )
+            household_id = (
+                authority.household_id
+                if authority is not None
+                else policy.household_id
+                if policy is not None
+                else context.state_history_repository.household_id
+            )
+            return {
+                "schema_version": "v1",
+                "household_id": household_id,
+                "count": len(records),
+                "samples": [
+                    {
+                        "history_id": record.history_id,
+                        "snapshot": record.snapshot.model_dump(mode="json"),
+                    }
+                    for record in records
+                ],
+            }
+        except (DomainError, ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
         name="get_energy_context",
         description="Read a complete canonical energy context for one requested horizon.",
         annotations=read_annotations,
@@ -572,6 +641,66 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     details={"worker_code": error.code},
                 )
             )
+        except (DomainError, ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="preview_command",
+        description="Preview one semantic command without invoking an adapter or persisting it.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    @with_request_principal
+    async def preview_command(
+        command: Command, agent_request_id: str | None = None
+    ) -> dict[str, Any]:
+        try:
+            return await _validate_command(context, command, agent_request_id, persist=False)
+        except (DomainError, ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="prepare_command",
+        description="Validate and persist one semantic command for later execution.",
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    @with_request_principal
+    async def prepare_command(
+        command: Command, agent_request_id: str | None = None
+    ) -> dict[str, Any]:
+        try:
+            parsed_command = Command.model_validate(command)
+            _authorize_mutation(context, operation="prepare_command", subject_id=parsed_command.id)
+            return await _validate_command(context, command, agent_request_id, persist=True)
+        except (DomainError, ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="preview_plan",
+        description="Preview a semantic plan without invoking an adapter or persisting it.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    @with_request_principal
+    async def preview_plan(plan: Plan) -> dict[str, Any]:
+        try:
+            return await _validate_plan(context, plan, persist=False)
+        except (DomainError, ValueError, ValidationError) as error:
+            return error_envelope(error)
+
+    @server.tool(
+        name="prepare_plan",
+        description="Validate and persist a semantic plan for later execution.",
+        annotations=mutation_annotations,
+        structured_output=True,
+    )
+    @with_request_principal
+    async def prepare_plan(plan: Plan) -> dict[str, Any]:
+        try:
+            parsed_plan = Plan.model_validate(plan)
+            _authorize_mutation(context, operation="prepare_plan", subject_id=parsed_plan.id)
+            return await _validate_plan(context, plan, persist=True)
         except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
@@ -716,24 +845,17 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             await _admit_mcp_operation(context, plan, AdmissionOperation.EXECUTE)
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
-            if (
-                context.bundle_commit_service is not None
-                and await context.bundle_commit_service.is_member(plan_id)
-            ):
-                raise DomainError(
-                    ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
-                    "Bundle members require execution through the bundle aggregate",
-                )
             if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
                 if approval_id is None:
-                    raise ValueError("Plan requires an approval_id issued via request_approval")
+                    raise DomainError(
+                        ErrorCode.APPROVAL_REQUIRED,
+                        "Plan requires an approval_id issued via request_approval",
+                    )
                 grant = context.approval_store.validate(
                     approval_id, plan, bundle_digest=bundle_digest
                 )
                 if not dry_run:
-                    context.approval_store.consume(
-                        approval_id, plan, bundle_digest=bundle_digest
-                    )
+                    context.approval_store.consume(approval_id, plan, bundle_digest=bundle_digest)
                     plan = context.facade.approve_plan(plan, grant=grant)
                     await _persist_approved_plan(context, plan)
             if dry_run:
@@ -783,14 +905,6 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             await _admit_mcp_operation(context, plan, AdmissionOperation.SCHEDULE)
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
-            if (
-                context.bundle_commit_service is not None
-                and await context.bundle_commit_service.is_member(plan_id)
-            ):
-                raise DomainError(
-                    ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
-                    "Bundle members require scheduling through the bundle aggregate",
-                )
             parsed_execute_at = _parse_timezone_aware_datetime(execute_at)
             if plan.execute_at != parsed_execute_at or plan.execution_window is None:
                 raise DomainError(
@@ -1014,14 +1128,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             plan = await _resolve_plan(context, plan_id)
             if plan is None:
                 raise ValueError(f"Unknown plan: {plan_id}")
-            if (
-                context.bundle_commit_service is not None
-                and await context.bundle_commit_service.is_member(plan_id)
-            ):
-                raise DomainError(
-                    ErrorCode.BUNDLE_MEMBER_CANCEL_FORBIDDEN,
-                    "Bundle members require cancellation through the bundle aggregate",
-                )
+            await _admit_mcp_operation(context, plan, AdmissionOperation.CANCEL)
             cancelled = await context.scheduler.cancel(plan_id)
             if cancelled:
                 cancelled_plan = context.facade.plan_service.cancel(plan)
@@ -1173,27 +1280,9 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     _parse_timezone_aware_datetime(expires_at) if expires_at is not None else None
                 ),
             )
-            expected_recurrence_digest = recurrence_digest(plan.id, rule)
-            grant = None
-            if plan.status in {
-                PlanStatus.REQUIRES_CONFIRMATION,
-                PlanStatus.APPROVED,
-                PlanStatus.READY,
-            }:
-                if approval_id is None:
-                    raise DomainError(
-                        ErrorCode.APPROVAL_REQUIRED,
-                        "Creating a standing automation needs a recurrence-scoped "
-                        "approval_id from request_approval",
-                    )
-                grant = context.approval_store.consume(
-                    approval_id,
-                    plan,
-                    recurrence_digest=expected_recurrence_digest,
-                )
-            schedule_id = f"recurring:{plan_id}:{context.clock.now().isoformat()}"
-            first_occurrence = await context.scheduler.schedule_recurring(
-                schedule_id, plan.commands, rule, plan=plan, approval=grant
+            template_digest = recurring_template_digest(plan.commands)
+            expected_recurrence_digest = recurrence_digest(
+                plan.id, rule, template_digest=template_digest
             )
             await _admit_mcp_operation(context, plan, AdmissionOperation.STANDING_AUTOMATION)
             schedule_id = f"recurring:{plan_id}:{expected_recurrence_digest}"

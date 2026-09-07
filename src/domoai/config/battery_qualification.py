@@ -35,11 +35,7 @@ class BatteryQualificationError(ValueError):
 
 
 class HILIdentityObservation(StrictModel):
-    """Identity read from the exercised device or a trusted test authority.
-
-    The CLI labels are intentionally not enough: qualification needs a
-    structured observation tied to the artifact and its observation time.
-    """
+    """Structured identity evidence attached to a HIL qualification artifact."""
 
     hardware_id: str = Field(min_length=1, max_length=200)
     firmware_version: str = Field(min_length=1, max_length=200)
@@ -81,6 +77,10 @@ class BatteryHILEvidence(StrictModel):
     qualification_expires_at: datetime | None = None
     hardware_identity_observed: bool = False
     firmware_identity_observed: bool = False
+    identity_observed_at: datetime | None = None
+    identity_evidence_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
     manual_check_status: dict[
         str, Literal["verified", "not_verified", "not_exercised", "not_applicable"]
     ] = Field(default_factory=dict)
@@ -102,6 +102,7 @@ class BatteryHILEvidence(StrictModel):
             raise ValueError("battery HIL manual attestations reference unknown checks")
         for field_name, value in (
             ("qualification_expires_at", self.qualification_expires_at),
+            ("identity_observed_at", self.identity_observed_at),
         ):
             if value is not None and value.tzinfo is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
@@ -143,21 +144,23 @@ class BatteryHILEvidence(StrictModel):
             return False
         if not self.hardware_identity_observed or not self.firmware_identity_observed:
             return False
-        identity = self.identity_observation
-        if identity is None or identity.source not in {
-            "adapter_observed",
-            "trusted_attestation",
-        }:
+        if self.identity_observed_at is None:
             return False
-        if (
-            identity.hardware_id != self.hardware_id
-            or identity.firmware_version != self.firmware_version
+        if self.identity_evidence_digest != battery_identity_digest(
+            hardware_id=self.hardware_id,
+            firmware_version=self.firmware_version,
+            provider_id=self.provider_id,
+            profile_digest=self.profile_digest,
+            observed_at=self.identity_observed_at,
         ):
             return False
-        current = now or datetime.now(UTC)
-        if current < identity.observed_at or current - identity.observed_at > max_age:
-            return False
         if any(self.manual_check_status.get(check) != "verified" for check in MANUAL_HIL_CHECKS):
+            return False
+        if any(
+            self.manual_check_status.get(check) != "verified"
+            for check in REQUIRED_HIL_CHECKS
+            if check in self.manual_attestations
+        ):
             return False
         if any(
             marker in note.lower()
@@ -165,7 +168,12 @@ class BatteryHILEvidence(StrictModel):
             for marker in ("not exercised", "not tested", "not verified", "not run")
         ):
             return False
+        current = now or datetime.now(UTC)
         if current < self.completed_at or current - self.completed_at > max_age:
+            return False
+        if current < self.identity_observed_at or current - self.identity_observed_at > max_age:
+            return False
+        if self.identity_observed_at > self.completed_at:
             return False
         if self.qualification_expires_at is not None and current >= self.qualification_expires_at:
             return False
@@ -213,7 +221,6 @@ __all__ = [
     "BatteryHILEvidence",
     "BatteryQualificationError",
     "HILIdentityObservation",
-    "MANUAL_HIL_CHECKS",
     "REQUIRED_HIL_CHECKS",
     "MANUAL_HIL_CHECKS",
     "battery_binding_digest",

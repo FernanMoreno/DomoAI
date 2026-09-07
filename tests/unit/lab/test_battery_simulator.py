@@ -1,3 +1,4 @@
+import ast
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,3 +88,55 @@ def test_lab_profile_cannot_be_used_as_production_dispatch_binding() -> None:
 
     with pytest.raises(ValueError):
         DispatchableBatteryBinding.model_validate(payload)
+
+
+def test_battery_mqtt_reconnect_callback_republishes_discovery_and_state() -> None:
+    source = Path("dev/lab/battery/server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    server_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BatteryLabServer"
+    )
+    helper = next(
+        node
+        for node in server_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_handle_mqtt_connect"
+    )
+    start_mqtt = next(
+        node
+        for node in server_class.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "start_mqtt"
+    )
+    on_connect = next(
+        node
+        for node in ast.walk(start_mqtt)
+        if isinstance(node, ast.FunctionDef) and node.name == "on_connect"
+    )
+
+    helper_calls = {
+        call.func.attr
+        for call in ast.walk(helper)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+    }
+    callback_calls = {
+        call.func.attr
+        for call in ast.walk(on_connect)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+    }
+    current_state = next(
+        node
+        for node in server_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_publish_current_state"
+    )
+    current_state_calls = {
+        call.func.attr
+        for call in ast.walk(current_state)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+    }
+    helper_source = ast.get_source_segment(source, helper)
+    assert helper_source is not None
+    assert "publish_discovery" in helper_calls
+    assert "self._publish_current_state" in helper_source
+    assert "publish" in current_state_calls
+    assert "_handle_mqtt_connect" in callback_calls

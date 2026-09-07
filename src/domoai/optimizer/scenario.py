@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -27,6 +30,12 @@ __all__ = [
 ]
 
 MAX_HORIZON_SLOTS = 7 * 24 * 60
+
+
+def _finite_number(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("numeric scenario values must be finite")
+    return value
 
 
 class Load(StrictModel):
@@ -119,10 +128,12 @@ class Constraint(StrictModel):
     value: float = Field(ge=0)
     unit: str = Field(default="W", min_length=1)
     hard: bool = True
-    # Solver constraints are not automatically physical execution guards.
-    # Callers must opt into the explicit planning-only contract; until a
-    # matching JIT guard exists, ``physical_execution`` is rejected below.
+    # Solver constraints are planning evidence by default. A caller may
+    # request a physical execution guard only when a separate JIT guard
+    # exists; validation rejects that request until such evidence is wired.
     enforcement: Literal["planning_only", "physical_execution"] = "planning_only"
+
+    _finite_values = field_validator("value", mode="before")(_finite_number)
 
 
 class Objective(StrictModel):

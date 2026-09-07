@@ -227,6 +227,36 @@ class ApprovalStore:
             recurrence_digest=recurrence_digest,
         )
 
+    def issue_attended_local(
+        self,
+        plan: Plan,
+        *,
+        operator_id: str,
+        session_id: str,
+    ) -> ApprovalGrant:
+        """Issue a short-lived grant for an explicitly attended local HIL run.
+
+        HIL is a trusted local operator boundary, but its plan still has to be
+        represented in the same durable grant ledger as MCP approvals.  This
+        method is intentionally not exposed as an MCP operation and cannot be
+        used for READY plans or standing recurrences.
+        """
+
+        if not operator_id.strip() or not session_id.strip():
+            raise ValueError("local attended approval identity must be non-empty")
+        self._assert_issueable(plan)
+        now = self._clock.now()
+        return self._issue(
+            plan,
+            approved_by=operator_id,
+            authentication_context="local_attended_hil",
+            session_id=session_id,
+            bundle_digest=None,
+            recurrence_digest=None,
+            approved_at=now,
+            expires_at=now + self.APPROVAL_TTL,
+        )
+
     def issue_assertion(
         self,
         plan: Plan,
@@ -351,6 +381,7 @@ class ApprovalStore:
             assertion_nonce=assertion_nonce,
             approved_at=approved_at,
             expires_at=effective_expiry,
+            authority=plan.authority,
         )
         if self._persistence is not None:
             self._persistence.save_sync(grant)
@@ -365,12 +396,21 @@ class ApprovalStore:
         bundle_digest: str | None = None,
         recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
-        grant = self.validate(
-            approval_id,
-            plan,
-            bundle_digest=bundle_digest,
-            recurrence_digest=recurrence_digest,
-        )
+        try:
+            grant = self.validate(
+                approval_id,
+                plan,
+                bundle_digest=bundle_digest,
+                recurrence_digest=recurrence_digest,
+            )
+        except DomainError:
+            self._record_approval("rejected")
+            raise
+        if self._persistence is not None and not self._persistence.consume_if_pending_sync(
+            approval_id, now=self._clock.now()
+        ):
+            self._record_approval("rejected")
+            raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval has already been consumed")
         self._consumed.add(approval_id)
         self._record_approval("consumed")
         return grant
@@ -629,6 +669,13 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the plan's current validation digest",
             )
+        if grant.authority.tenant_id != plan.authority.tenant_id or (
+            grant.authority.household_id != plan.authority.household_id
+        ):
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the plan authority context",
+            )
         if grant.validation_valid_until != plan.validation.valid_until:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
@@ -653,4 +700,40 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the standing automation recurrence",
             )
-        return grant
+
+    @staticmethod
+    def _validate_projection(approval: Approval, grant: ApprovalGrant) -> None:
+        expected_scope = "+".join(
+            scope
+            for scope, present in (
+                ("bundle", grant.bundle_digest is not None),
+                ("recurrence", grant.recurrence_digest is not None),
+            )
+            if present
+        ) or "plan"
+        expected = {
+            "status": "approved",
+            "approved_by": grant.approved_by,
+            "approved_at": grant.approved_at or grant.issued_at,
+            "validation_digest": grant.validation_digest,
+            "scope": expected_scope,
+            "authentication_context": grant.authentication_context,
+            "session_id": grant.session_id,
+            "bundle_digest": grant.bundle_digest,
+            "recurrence_digest": grant.recurrence_digest,
+            "validation_valid_until": grant.validation_valid_until,
+            "expires_at": grant.expires_at,
+            "window_digest": grant.window_digest,
+            "schedule_revision": grant.schedule_revision,
+            "approval_id": grant.approval_id,
+            "authority": grant.authority,
+        }
+        actual = {
+            field_name: getattr(approval, field_name)
+            for field_name in expected
+        }
+        if actual != expected:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Persisted approval evidence does not match the authoritative grant",
+            )

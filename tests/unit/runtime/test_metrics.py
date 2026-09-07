@@ -120,23 +120,6 @@ async def test_snapshot_publishes_active_providers_writable_routes_and_authority
 
 
 @pytest.mark.asyncio
-async def test_snapshot_publishes_active_providers_writable_routes_and_authority(
-    tmp_path: Path,
-) -> None:
-    collector, registry, *_ = await _build_collector(tmp_path)
-
-    snapshot = await collector.snapshot()
-
-    assert snapshot["active_providers"] == ["fixture"]
-    writable = {
-        (item["device_id"], item["capability"]): item for item in snapshot["writable_capabilities"]
-    }
-    assert any(capability == "power" for _device, capability in writable)
-    assert snapshot["authority"]["semantic_mcp"] is True
-    assert snapshot["authority"]["battery_dispatch"] == "unsupported"
-
-
-@pytest.mark.asyncio
 async def test_snapshot_uses_injected_clock_for_generated_at(tmp_path: Path) -> None:
     collector, *_ = await _build_collector(tmp_path)
     collector.clock = FixedClock(datetime(2026, 8, 23, 12, tzinfo=UTC))

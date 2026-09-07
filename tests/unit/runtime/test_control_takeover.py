@@ -20,7 +20,6 @@ from domoai.runtime.control_takeover import (
     ControlTakeoverRequest,
     EVControlCoordinator,
 )
-from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.state_store import StateStore
 
 
@@ -32,50 +31,7 @@ class FakeControlAdapter:
 
     async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
         self.requests.append(request)
-        return self.result.model_copy(
-            update={"plan_id": request.plan_id, "first_command_id": request.first_command_id}
-        )
-
-
-class SupervisedControlAdapter(FakeControlAdapter):
-    def __init__(
-        self,
-        result: TakeoverResult,
-        *,
-        readback_kw: float,
-        renewal: TakeoverResult | None = None,
-    ) -> None:
-        super().__init__(result)
-        self.readback_kw = readback_kw
-        self.renewal = renewal
-        self.commands: list[Command] = []
-
-    async def renew_control(self, result: TakeoverResult) -> TakeoverResult | None:
-        return self.renewal
-
-    async def execute(
-        self, command: Command, execution_context: ExecutionContext | None = None
-    ) -> AdapterExecutionAck:
-        self.commands.append(command)
-        return AdapterExecutionAck(
-            accepted=True,
-            source_ref=SourceRef(adapter_id="fixture", external_id="battery.power"),
-        )
-
-    async def read_state(self, source_refs: object) -> list[StateSnapshot]:
-        now = datetime(2026, 8, 23, 12, tzinfo=UTC)
-        return [
-            StateSnapshot(
-                device_id="battery.power",
-                capability="battery.power",
-                value=self.readback_kw,
-                unit="kW",
-                observed_at=now,
-                received_at=now,
-                status=StateStatus.CURRENT,
-                source_ref=SourceRef(adapter_id="fixture", external_id="battery.power"),
-            )
-        ]
+        return self.result
 
     async def execute(self, command: Command, execution_context=None) -> AdapterExecutionAck:
         self.executed.append(command)
@@ -583,85 +539,150 @@ async def test_unconfirmed_first_readback_is_not_acquired() -> None:
 
 
 @pytest.mark.asyncio
-async def test_emergency_stop_requires_zero_readback_before_releasing_lease() -> None:
-    adapter = SupervisedControlAdapter(_result(), readback_kw=1.5)
+async def test_supervisor_stops_before_unrenewable_lease_expires() -> None:
+    initial = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    adapter = FakeControlAdapter(_result())
     coordinator = BatteryControlCoordinator(
         adapter,
         BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
-        power_feedback_capability="battery.power",
+        clock=clock,
     )
     command = Command(
         id="command-1",
         device_id="battery.home",
-        command="charge_battery",
+        command="stop_battery",
         idempotency_key="command-key",
     )
     await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
+
+    clock.set(initial + timedelta(minutes=4, seconds=30))
+    stopped = await coordinator.supervise_once()
+
+    assert stopped == ["plan-1"]
+    assert [command.command for command in adapter.executed] == ["stop_battery"]
+    assert await coordinator.assert_still_owned(plan_id="plan-1") is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_stop_requires_zero_power_readback_when_configured() -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter = ReadbackControlAdapter(_result(), readback_kw=0.5)
+    state_store = StateStore(clock=clock)
+    source_ref = SourceRef(adapter_id="fixture", external_id="battery.power")
+    await state_store.save(
+        StateSnapshot(
+            device_id="battery.home",
+            capability="battery.power",
+            value=0.0,
+            observed_at=now,
+            received_at=now,
+            status=StateStatus.CURRENT,
+            source_ref=source_ref,
+        )
+    )
+    coordinator = BatteryControlCoordinator(
+        adapter,
+        BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
+        state_store=state_store,
+        power_feedback_capability="battery.power",
+        power_feedback_tolerance_kw=0.05,
+        clock=clock,
+    )
+    command = Command(
+        id="command-1",
+        device_id="battery.home",
+        command="stop_battery",
+        idempotency_key="command-key",
+    )
+    adapter.readback_kw = 0.0
+    assert await coordinator.reconcile_startup() is True
+    await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
+    adapter.readback_kw = 0.5
 
     assert (
-        await coordinator.emergency_stop(
-            plan_id="plan-1", execution_attempt_id="attempt-1"
-        )
+        await coordinator.emergency_stop(plan_id="plan-1", execution_attempt_id="attempt-1")
         is False
     )
-    result = await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
-
-    assert result is not None
-    assert result.status is not ControlLeaseStatus.RELEASED
-    assert result.failure_code == "emergency_stop_readback_failed"
-    assert [item.command for item in adapter.commands] == ["stop_battery"]
+    assert await coordinator.assert_still_owned(plan_id="plan-1") is False
 
 
 @pytest.mark.asyncio
-async def test_failed_renewal_stops_and_blocks_new_battery_orders() -> None:
+async def test_unconfirmed_release_blocks_new_control_until_reconciliation() -> None:
     now = datetime(2026, 8, 23, 12, tzinfo=UTC)
     clock = FixedClock(now)
-    adapter = SupervisedControlAdapter(_result(), readback_kw=0.0)
-    coordinator = BatteryControlCoordinator(
-        adapter,
-        BatteryControlPolicy(
-            owner="domoai",
-            native_scheduler_status="disabled",
-            lease_seconds=300,
-        ),
-        clock=clock,
+    adapter = ReadbackControlAdapter(
+        _result().model_copy(update={"first_command_id": "battery-command-1"}),
+        readback_kw=0.0,
     )
-    command = Command(
-        id="command-1",
-        device_id="battery.home",
-        command="charge_battery",
-        idempotency_key="command-key",
-    )
-    await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
-    clock.set(now + timedelta(minutes=4, seconds=30))
-
-    assert await coordinator.supervise_once() == ["plan-1"]
-    blocked = await coordinator.acquire_for_plan(plan_id="plan-2", commands=[command])
-
-    assert blocked is not None
-    assert blocked.status is ControlLeaseStatus.REJECTED
-    assert blocked.failure_code == "control_authority_blocked"
-    assert [item.command for item in adapter.commands] == ["stop_battery"]
-
-
-@pytest.mark.asyncio
-async def test_startup_reconciliation_blocks_control_when_zero_readback_is_not_confirmed() -> None:
-    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
-    clock = FixedClock(now)
     state_store = StateStore(clock=clock)
+    source_ref = SourceRef(adapter_id="fixture", external_id="battery.power")
     await state_store.save(
         StateSnapshot(
             device_id="battery.home",
             capability="battery.power",
-            value=2.0,
-            unit="kW",
+            value=0.0,
             observed_at=now,
             received_at=now,
             status=StateStatus.CURRENT,
-            source_ref=SourceRef(adapter_id="fixture", external_id="battery.power"),
+            source_ref=source_ref,
         )
     )
-    adapter = SupervisedControlAdapter(_result(), readback_kw=2.0)
+    coordinator = BatteryControlCoordinator(
+        adapter,
+        BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
+        state_store=state_store,
+        power_feedback_capability="battery.power",
+        clock=clock,
+    )
+    first = _ev_command("charge_battery").model_copy(
+        update={"device_id": "battery.home", "id": "battery-command-1"}
+    )
+    second = first.model_copy(update={"id": "battery-command-2", "idempotency_key": "battery-2"})
+
+    assert await coordinator.reconcile_startup() is True
+    acquired = await coordinator.acquire_for_plan(plan_id="plan-1", commands=[first])
+    assert acquired is not None and acquired.status is ControlLeaseStatus.ACQUIRED
+    adapter.readback_kw = 0.5
+    assert await coordinator.release_for_plan(
+        plan_id="plan-1", execution_attempt_id="release"
+    ) is False
+
+    blocked = await coordinator.acquire_for_plan(plan_id="plan-2", commands=[second])
+
+    assert blocked is not None
+    assert blocked.failure_code == "control_authority_unknown"
+    assert len(adapter.requests) == 1
+
+    adapter.readback_kw = 0.0
+    adapter.result = _result().model_copy(
+        update={"plan_id": "plan-2", "first_command_id": "battery-command-2"}
+    )
+    assert await coordinator.reconcile_startup() is True
+    reacquired = await coordinator.acquire_for_plan(plan_id="plan-2", commands=[second])
+    assert reacquired is not None and reacquired.status is ControlLeaseStatus.ACQUIRED
+    assert len(adapter.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_release_for_plan_stops_and_confirms_zero_feedback() -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    clock = FixedClock(now)
+    adapter = ReadbackControlAdapter(_result(), readback_kw=0.0)
+    state_store = StateStore(clock=clock)
+    source_ref = SourceRef(adapter_id="fixture", external_id="battery.power")
+    await state_store.save(
+        StateSnapshot(
+            device_id="battery.home",
+            capability="battery.power",
+            value=0.0,
+            observed_at=now,
+            received_at=now,
+            status=StateStatus.CURRENT,
+            source_ref=source_ref,
+        )
+    )
     coordinator = BatteryControlCoordinator(
         adapter,
         BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
@@ -676,40 +697,49 @@ async def test_startup_reconciliation_blocks_control_when_zero_readback_is_not_c
         idempotency_key="command-key",
     )
 
-    assert await coordinator.reconcile_startup() is False
-    blocked = await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
+    assert await coordinator.reconcile_startup() is True
+    assert await coordinator.acquire_for_plan(plan_id="plan-1", commands=[command])
+    assert (
+        await coordinator.release_for_plan(
+            plan_id="plan-1", execution_attempt_id="release-attempt"
+        )
+        is True
+    )
 
-    assert blocked is not None
-    assert blocked.status is ControlLeaseStatus.REJECTED
-    assert blocked.failure_code == "control_authority_blocked"
-    assert [item.command for item in adapter.commands] == ["stop_battery"]
+    assert [item.intent for item in adapter.executed] == [
+        "control_supervisor_emergency_stop"
+    ]
+    assert await coordinator.assert_still_owned(plan_id="plan-1") is False
 
 
 @pytest.mark.asyncio
-async def test_startup_reconciliation_persists_confirmed_zero_readback() -> None:
+async def test_startup_reconciliation_stops_nonzero_latched_feedback() -> None:
     now = datetime(2026, 8, 23, 12, tzinfo=UTC)
     clock = FixedClock(now)
+    adapter = ReadbackControlAdapter(_result(), readback_kw=0.0)
     state_store = StateStore(clock=clock)
+    source_ref = SourceRef(adapter_id="fixture", external_id="battery.power")
     await state_store.save(
         StateSnapshot(
             device_id="battery.home",
             capability="battery.power",
-            value=2.0,
-            unit="kW",
+            value=1.0,
             observed_at=now,
             received_at=now,
             status=StateStatus.CURRENT,
-            source_ref=SourceRef(adapter_id="fixture", external_id="battery.power"),
+            source_ref=source_ref,
         )
     )
     coordinator = BatteryControlCoordinator(
-        SupervisedControlAdapter(_result(), readback_kw=0.0),
+        adapter,
         BatteryControlPolicy(owner="domoai", native_scheduler_status="disabled"),
         state_store=state_store,
         power_feedback_capability="battery.power",
+        power_feedback_tolerance_kw=0.05,
         clock=clock,
     )
 
     assert await coordinator.reconcile_startup() is True
-    snapshot = state_store.peek("battery.home", "battery.power")
-    assert snapshot is not None and snapshot.value == 0.0
+    assert [command.intent for command in adapter.executed] == [
+        "control_supervisor_startup_reconciliation"
+    ]

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timedelta
@@ -63,7 +65,7 @@ class KnxAdapter:
         self._clock = clock or SystemClock()
         self.mapper = KnxMapper()
         self._connected = False
-        self._available = True
+        self._available = False
         self._event_stream_active = False
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
         self._canonical_by_source = {
@@ -170,12 +172,11 @@ class KnxAdapter:
             if entity.entity_id in wanted
             for binding in entity.capabilities
         ]
-        self._available = await self.transport.health()
+        if not await self.transport.health():
+            self._available = False
         cached_entities = {
             entity_id for entity_id, _capability in self._states if entity_id in wanted
         }
-        if self._event_stream_active and cached_entities:
-            return self._snapshots_for(wanted)
         for group_address in {binding.state_group_address for _entity, binding in bindings}:
             group_bindings = self._bindings_by_state_address[group_address]
             dpt = group_bindings[0][1].dpt
@@ -410,12 +411,18 @@ class KnxAdapter:
                     # idle time as stream termination makes the composite mark a
                     # perfectly healthy route unavailable and reconnect forever.
                     continue
-                self._available = True
                 event: SourceEvent | None
                 try:
                     event = self._ingest_value(value)
                 except ValueError as error:
                     event = self._diagnostic(value.group_address, str(error))
+                else:
+                    # A valid, mapped telegram is physical bus evidence.  It
+                    # may be the only evidence available for KNX Virtual or
+                    # devices that publish state but do not answer reads.
+                    self._available = True
+                    for state in self._states.values():
+                        state["available"] = True
                 if event is not None:
                     yield event
         finally:
@@ -531,7 +538,14 @@ class KnxAdapter:
             if binding is None or binding.command_group_address is None:
                 return None
             if command.command == "stop_battery":
-                if command.value is not None or command.unit is not None:
+                if command.unit not in {None, "kW"}:
+                    return None
+                if command.value is not None and (
+                    isinstance(command.value, bool)
+                    or not isinstance(command.value, (int, float))
+                    or not math.isfinite(float(command.value))
+                    or float(command.value) != 0.0
+                ):
                     return None
                 value = 0.0
             else:

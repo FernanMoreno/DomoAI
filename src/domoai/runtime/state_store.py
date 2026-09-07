@@ -304,23 +304,46 @@ class StateStore:
             self._snapshots[key] = stale
 
     async def save(self, snapshot: StateSnapshot) -> None:
-        key = (snapshot.device_id, snapshot.capability)
-        source_key = (
-            snapshot.device_id,
-            snapshot.capability,
-            snapshot.source_ref.adapter_id,
-            snapshot.source_ref.external_id,
-        )
-        previous = self._snapshots.get(key)
-        self._source_snapshots[source_key] = snapshot
-        snapshot = self._resolve_sources(snapshot.device_id, snapshot.capability)
-        startup_value = self._startup_reconfirmation.pop(key, None)
-        if startup_value is not None:
-            changed = (snapshot.value, snapshot.status) != startup_value
-        else:
-            changed = previous is None or (previous.value, previous.status) != (
-                snapshot.value,
-                snapshot.status,
+        await self.save_many([snapshot])
+
+    async def save_many(self, snapshots: Sequence[StateSnapshot]) -> None:
+        async with self._mutation_lock:
+            await self._save_many_unlocked(snapshots)
+
+    async def _save_many_unlocked(self, snapshots: Sequence[StateSnapshot]) -> None:
+        normalized = [self._normalize_snapshot(snapshot) for snapshot in snapshots]
+        candidate = self._candidate()
+        if not normalized:
+            await self._commit_candidate(candidate, ())
+            return
+
+        grouped: dict[tuple[str, str], list[StateSnapshot]] = {}
+        cursor_for_stream: dict[tuple[str, str], SourceCursor] = {}
+        for snapshot in normalized:
+            cursor = snapshot.source_cursor
+            if cursor is None:
+                policy_key = (
+                    snapshot.source_ref.adapter_id,
+                    self._UNORDERED_STREAM_ID,
+                )
+                candidate.source_ordering_policies[policy_key] = SourceOrderingPolicy.UNORDERED
+                continue
+            stream_key = (cursor.source_id, cursor.stream_id)
+            grouped.setdefault(stream_key, []).append(snapshot)
+            previous_cursor = cursor_for_stream.get(stream_key)
+            if previous_cursor is not None and (
+                previous_cursor.epoch != cursor.epoch or previous_cursor.sequence != cursor.sequence
+            ):
+                raise ValueError("a state batch must use one cursor per source stream")
+            cursor_for_stream[stream_key] = cursor
+
+        rejected = False
+        for stream_key, cursor in cursor_for_stream.items():
+            decision = self._ordered_cursor_decision(
+                stream_key,
+                cursor,
+                candidate.source_cursors,
+                candidate.resync_required,
             )
             if decision == "reject":
                 if self.operational_metrics is not None:
@@ -511,29 +534,6 @@ class StateStore:
                 _adapter,
                 _external,
             ), observation in source_snapshots.items()
-            if source_device == device_id and source_capability == capability
-        ]
-        if not observations:
-            raise KeyError(f"missing source observation for {device_id}/{capability}")
-        invalid = [item for item in observations if item.status is StateStatus.INVALID]
-        if invalid:
-            return max(invalid, key=lambda item: item.received_at)
-        current = [item for item in observations if item.status is StateStatus.CURRENT]
-        if len(current) >= 2 and len({repr(item.value) for item in current}) > 1:
-            latest = max(current, key=lambda item: item.received_at)
-            return latest.model_copy(update={"value": None, "status": StateStatus.INVALID})
-        candidates = current or observations
-        return max(candidates, key=lambda item: item.received_at)
-
-    def _resolve_sources(self, device_id: str, capability: str) -> StateSnapshot:
-        observations = [
-            observation
-            for (
-                source_device,
-                source_capability,
-                _adapter,
-                _external,
-            ), observation in self._source_snapshots.items()
             if source_device == device_id and source_capability == capability
         ]
         if not observations:
@@ -748,63 +748,85 @@ class StateStore:
         )
 
     async def mark_stale(self, now: datetime | None = None) -> list[StateSnapshot]:
-        current_time = now or self.clock.now()
-        stale: list[StateSnapshot] = []
-        for key, snapshot in list(self._snapshots.items()):
-            if (
-                snapshot.status is StateStatus.CURRENT
-                and current_time - snapshot.observed_at > self.stale_after
-            ):
-                updated = snapshot.model_copy(update={"status": StateStatus.STALE})
-                self._snapshots[key] = updated
-                self._version_counter += 1
-                self._state_versions[key] = self._version_counter
-                for source_key, source_snapshot in list(self._source_snapshots.items()):
-                    if source_key[:2] == key and source_snapshot.source_ref == snapshot.source_ref:
-                        self._source_snapshots[source_key] = updated
-                stale.append(updated)
-        await self._persist(stale)
-        return stale
+        async with self._mutation_lock:
+            current_time = now or self.clock.now()
+            candidate = self._candidate()
+            stale: list[StateSnapshot] = []
+            for key, snapshot in list(candidate.snapshots.items()):
+                if (
+                    snapshot.status is StateStatus.CURRENT
+                    and self.effective_status(snapshot, current_time) is StateStatus.STALE
+                ):
+                    updated = snapshot.model_copy(update={"status": StateStatus.STALE})
+                    candidate.snapshots[key] = updated
+                    candidate.version_counter += 1
+                    candidate.state_versions[key] = candidate.version_counter
+                    for source_key, source_snapshot in list(candidate.source_snapshots.items()):
+                        if (
+                            source_key[:2] == key
+                            and source_snapshot.source_ref == snapshot.source_ref
+                        ):
+                            candidate.source_snapshots[source_key] = updated
+                    stale.append(updated)
+            await self._commit_candidate(candidate, stale)
+            return stale
 
-    async def mark_source_unavailable(self, adapter_id: str) -> list[StateSnapshot]:
-        """Degrade only observations owned by one disconnected source."""
+    async def mark_source_unavailable(
+        self, adapter_id: str, external_id: str | None = None
+    ) -> list[StateSnapshot]:
+        """Degrade observations owned by a source or one source entity.
 
-        changed: list[StateSnapshot] = []
-        affected: set[tuple[str, str]] = set()
-        for source_key, snapshot in list(self._source_snapshots.items()):
-            if source_key[2] != adapter_id or snapshot.status is StateStatus.UNAVAILABLE:
-                continue
-            self._source_snapshots[source_key] = snapshot.model_copy(
-                update={"status": StateStatus.UNAVAILABLE, "value": None}
-            )
-            affected.add(source_key[:2])
-        for key in affected:
-            resolved = self._resolve_sources(*key)
-            self._snapshots[key] = resolved
-            self._version_counter += 1
-            self._state_versions[key] = self._version_counter
-            changed.append(resolved)
-        await self._persist(changed)
-        return changed
+        Provider availability events can describe either an entire transport
+        (for example, a KNX tunnel) or one entity (for example, a Zigbee
+        device).  Keeping the optional entity boundary here prevents a
+        single device outage from degrading every healthy observation from
+        the same adapter.
+        """
+
+        async with self._mutation_lock:
+            changed: list[StateSnapshot] = []
+            candidate = self._candidate()
+            affected: set[tuple[str, str]] = set()
+            for source_key, snapshot in list(candidate.source_snapshots.items()):
+                if (
+                    source_key[2] != adapter_id
+                    or (external_id is not None and source_key[3] != external_id)
+                    or snapshot.status is StateStatus.UNAVAILABLE
+                ):
+                    continue
+                candidate.source_snapshots[source_key] = snapshot.model_copy(
+                    update={"status": StateStatus.UNAVAILABLE, "value": None}
+                )
+                affected.add(source_key[:2])
+            for key in affected:
+                resolved = self._resolve_sources(*key, candidate.source_snapshots)
+                candidate.snapshots[key] = resolved
+                candidate.version_counter += 1
+                candidate.state_versions[key] = candidate.version_counter
+                changed.append(resolved)
+            await self._commit_candidate(candidate, changed)
+            return changed
 
     async def mark_all_stale(self) -> list[StateSnapshot]:
         """Mark every current cached value stale after source loss."""
 
-        stale: list[StateSnapshot] = []
-        for key, snapshot in list(self._snapshots.items()):
-            if snapshot.status is StateStatus.CURRENT:
-                updated = snapshot.model_copy(update={"status": StateStatus.STALE})
-                self._snapshots[key] = updated
-                for source_key, source_snapshot in list(self._source_snapshots.items()):
-                    if source_key[:2] == key and source_snapshot.status is StateStatus.CURRENT:
-                        self._source_snapshots[source_key] = source_snapshot.model_copy(
-                            update={"status": StateStatus.STALE}
-                        )
-                self._version_counter += 1
-                self._state_versions[key] = self._version_counter
-                stale.append(updated)
-        await self._persist(stale)
-        return stale
+        async with self._mutation_lock:
+            candidate = self._candidate()
+            stale: list[StateSnapshot] = []
+            for key, snapshot in list(candidate.snapshots.items()):
+                if snapshot.status is StateStatus.CURRENT:
+                    updated = snapshot.model_copy(update={"status": StateStatus.STALE})
+                    candidate.snapshots[key] = updated
+                    for source_key, source_snapshot in list(candidate.source_snapshots.items()):
+                        if source_key[:2] == key and source_snapshot.status is StateStatus.CURRENT:
+                            candidate.source_snapshots[source_key] = source_snapshot.model_copy(
+                                update={"status": StateStatus.STALE}
+                            )
+                    candidate.version_counter += 1
+                    candidate.state_versions[key] = candidate.version_counter
+                    stale.append(updated)
+            await self._commit_candidate(candidate, stale)
+            return stale
 
     async def persist_metadata(self) -> None:
         """Flush revision-only changes such as inventory fingerprints."""

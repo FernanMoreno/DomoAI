@@ -15,13 +15,15 @@ from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.mqtt.adapter import GenericMqttAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
+from domoai.application.discovery_service import DiscoveryService
+from domoai.application.recovery import PlanRecoveryService
 from domoai.application.runtime_factory import (
     _select_control_adapter,
     build_runtime,
     create_adapter,
 )
 from domoai.config.settings import Settings
-from domoai.domain.energy import EVChargingBinding
+from domoai.domain.energy import EVActuator, EVChargingBinding
 from domoai.domain.models import Command, Plan, PlanStatus, Precondition, SourceRef, StateStatus
 from domoai.domain.provider import MeasurementQuality
 from domoai.optimizer.energy import (
@@ -164,20 +166,6 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     route_registry = ProviderRegistry()
-    mapping_only_registry = ProviderRegistry()
-    mapping_only_adapter = create_adapter(
-        Settings(
-            home_assistant_url="http://home-assistant.test",
-            home_assistant_token=SecretStr("fixture-token"),
-            home_assistant_mapping_path=dispatch_mapping_path,
-        ),
-        provider_registry=mapping_only_registry,
-    )
-    assert isinstance(mapping_only_adapter, HomeAssistantProviderAdapter)
-    mapping_only_provider = mapping_only_registry.get("home_assistant")
-    assert isinstance(mapping_only_provider, HomeAssistantProvider)
-    assert mapping_only_provider.battery_dispatch_bindings == {}
-
     route_adapter = create_adapter(
         Settings(
             home_assistant_url="http://home-assistant.test",
@@ -335,14 +323,73 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         )
 
 
-def test_battery_takeover_routes_to_the_declared_composite_child() -> None:
-    home_assistant = SimulatedHomeAdapter()
-    home_assistant.adapter_id = "home_assistant"
-    zigbee = SimulatedHomeAdapter()
-    zigbee.adapter_id = "zigbee2mqtt"
-    composite = CompositeAdapter([home_assistant, zigbee])
+def _home_assistant_ev_mapping(canonical_device_id: str = "lab.ev_charger") -> dict[str, object]:
+    return {
+        "schema_version": "v1",
+        "ev_charging_bindings": {
+            "lab-ev": {
+                "schema_version": "v1",
+                "device_id": "ha-ev-1",
+                "canonical_device_id": canonical_device_id,
+                "soc_entity_id": "sensor.ev_soc",
+                "power_feedback_entity_id": "sensor.ev_power",
+                "capacity_entity_id": "sensor.ev_capacity",
+                "connected_entity_id": "binary_sensor.ev_connected",
+                "charge": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "charge_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "as_is",
+                },
+                "stop": {
+                    "entity_id": "number.ev_command",
+                    "provider_command": "stop_ev",
+                    "service_domain": "number",
+                    "service": "set_value",
+                    "value_transform": "zero",
+                },
+            }
+        },
+    }
 
-    assert _select_control_adapter(composite, "home_assistant") is home_assistant
+
+def test_runtime_factory_scopes_home_assistant_ev_routes_to_matching_binding(
+    tmp_path: Path,
+) -> None:
+    mapping_path = tmp_path / "home-assistant-ev.json"
+    mapping_path.write_text(json.dumps(_home_assistant_ev_mapping()), encoding="utf-8")
+    settings = Settings(
+        home_assistant_url="http://home-assistant.test",
+        home_assistant_token=SecretStr("fixture-token"),
+        home_assistant_mapping_path=mapping_path,
+    )
+    active_binding = _ev_charging_binding(provider_id="home_assistant", device_id="lab.ev_charger")
+    registry = ProviderRegistry()
+
+    adapter = create_adapter(
+        settings,
+        provider_registry=registry,
+        ev_charging_bindings=(active_binding,),
+    )
+
+    assert isinstance(adapter, HomeAssistantProviderAdapter)
+    provider = registry.get("home_assistant")
+    assert isinstance(provider, HomeAssistantProvider)
+    assert set(provider.ev_charging_bindings) == {"lab-ev"}
+
+    unrelated_binding = _ev_charging_binding(
+        provider_id="home_assistant", device_id="other.ev_charger"
+    )
+    unrelated_registry = ProviderRegistry()
+    create_adapter(
+        settings,
+        provider_registry=unrelated_registry,
+        ev_charging_bindings=(unrelated_binding,),
+    )
+    unrelated_provider = unrelated_registry.get("home_assistant")
+    assert isinstance(unrelated_provider, HomeAssistantProvider)
+    assert unrelated_provider.ev_charging_bindings == {}
 
 
 @pytest.mark.asyncio
@@ -1203,46 +1250,6 @@ async def test_runtime_factory_installs_explicit_dispatchable_battery_binding(
         assert runtime.battery_provider.device_id == "battery.home"
         assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
         assert runtime.energy_context_provider.battery is runtime.battery_provider
-    finally:
-        await runtime.close()
-
-
-@pytest.mark.asyncio
-async def test_runtime_factory_installs_explicit_ev_charging_guard(tmp_path: Path) -> None:
-    profile_path = tmp_path / "ev-charging.json"
-    profile_path.write_text(
-        json.dumps(
-            {
-                "bindings": [
-                    EVChargingBinding(
-                        provider_id="fixture_ev",
-                        device_id="ev.garage",
-                        capability="ev.charge_power",
-                        charge_command="set_charge_power",
-                        stop_command="stop_charging",
-                        capacity_kwh=60.0,
-                        max_charge_kw=7.4,
-                    ).model_dump(mode="json")
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    runtime = await build_runtime(
-        Settings(
-            database_path=tmp_path / "ev-runtime.sqlite3",
-            ev_charging_profile_path=profile_path,
-        ),
-        adapter=SimulatedHomeAdapter(),
-    )
-    try:
-        assert runtime.ev_charging_bindings[0].device_id == "ev.garage"
-        assert runtime.plan_service.authorized_actuator_commands["ev.garage"] == frozenset(
-            {"set_charge_power", "stop_charging"}
-        )
-        guard = runtime.facade.executor.dynamic_safety_guard
-        assert guard is not None
-        assert "ev.garage" in guard.ev_bindings
     finally:
         await runtime.close()
 

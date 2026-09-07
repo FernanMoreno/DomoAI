@@ -49,19 +49,20 @@ class DeviceRegistry:
             self._devices[device.id] = device
             for source_ref in device.source_refs:
                 self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = device.id
-                # Preserve stable provider claims independently from the last
-                # external entity id. Providers such as Home Assistant can
-                # rename an entity while keeping the device identifiers and
-                # connections unchanged; the next live discovery must be able
-                # to recover the same canonical device without rehydrating an
-                # executable route.
-                for identity_key in device.identity_keys:
-                    self._identity_to_canonical[
-                        f"source-identity:{source_ref.adapter_id}:{identity_key}"
+                if source_ref.source_device_id:
+                    self._source_device_ids[
+                        (source_ref.adapter_id, source_ref.source_device_id)
                     ] = device.id
-                for connection in device.connections:
                     self._identity_to_canonical[
-                        f"source-connection:{source_ref.adapter_id}:{connection}"
+                        f"source:{source_ref.adapter_id}:{source_ref.source_device_id}"
+                    ] = device.id
+                if device.identity_keys:
+                    self._identity_to_canonical[
+                        f"source-identity:{source_ref.adapter_id}:{'|'.join(sorted(device.identity_keys))}"
+                    ] = device.id
+                if device.connections:
+                    self._identity_to_canonical[
+                        f"source-connection:{source_ref.adapter_id}:{'|'.join(sorted(device.connections))}"
                     ] = device.id
 
     def apply_snapshot(

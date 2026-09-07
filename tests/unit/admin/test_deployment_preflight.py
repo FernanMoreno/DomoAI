@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.contract.test_deployment_preflight import _write_deployment
+from tests.fixtures.deployment_preflight import write_deployment
 
 from domoai.admin.deployment_preflight import run_preflight
 
@@ -14,7 +14,7 @@ from domoai.admin.deployment_preflight import run_preflight
 async def test_static_preflight_does_not_open_dependency_connections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    request, _ = _write_deployment(tmp_path)
+    request, _ = write_deployment(tmp_path)
 
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("static preflight must not perform network I/O")
@@ -32,7 +32,7 @@ async def test_network_preflight_connects_only_when_explicitly_requested(
 ) -> None:
     probe_server = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
     port = probe_server.sockets[0].getsockname()[1]
-    request, _ = _write_deployment(tmp_path)
+    request, _ = write_deployment(tmp_path)
     request.env_file.write_text(
         request.env_file.read_text(encoding="utf-8").replace(
             "http://homeassistant:8123", f"http://127.0.0.1:{port}"
@@ -65,7 +65,7 @@ async def test_network_preflight_connects_only_when_explicitly_requested(
 async def test_network_failure_is_stable_and_does_not_include_exception_text(
     tmp_path: Path,
 ) -> None:
-    request, _ = _write_deployment(tmp_path)
+    request, _ = write_deployment(tmp_path)
     request.env_file.write_text(
         request.env_file.read_text(encoding="utf-8").replace(
             "http://homeassistant:8123", "http://127.0.0.1:1"

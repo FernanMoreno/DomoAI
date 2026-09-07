@@ -49,6 +49,7 @@ default-groups = ["dev"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "composition: cross-boundary tests against real disposable dependencies (Testcontainers); requires Docker",

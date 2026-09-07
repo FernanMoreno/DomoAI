@@ -54,7 +54,6 @@ class Settings(StrictModel):
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, gt=0)
     database_path: Path = Path("data/domoai.sqlite3")
     audit_database_path: Path | None = None
-    backup_encryption_key_file: Path | None = None
     policy_config_path: Path | None = None
     risk_overrides_path: Path | None = None
     safety_limits_path: Path | None = None
@@ -70,7 +69,6 @@ class Settings(StrictModel):
     matter_server_url: str | None = None
     knx_gateway_host: str | None = None
     knx_gateway_port: int = Field(default=3671, ge=1, le=65535)
-    knx_virtual_host: str | None = None
     knx_gateway_route_back: bool = False
     knx_config_path: Path | None = None
     knx_timeout_seconds: float = Field(default=5.0, gt=0)
@@ -118,7 +116,7 @@ class Settings(StrictModel):
     solar_timezone: str = Field(default="Europe/Madrid", min_length=1)
     solar_profile_path: Path | None = None
     battery_dispatch_profile_path: Path | None = None
-    ev_charging_binding_paths: tuple[Path, ...] = ()
+    ev_charging_profile_path: Path | None = None
     battery_hil_evidence_path: Path | None = None
     battery_dispatch_production: bool = False
     battery_hil_power_ceiling_kw: float | None = Field(default=None, gt=0)
@@ -133,23 +131,13 @@ class Settings(StrictModel):
 
     @model_validator(mode="after")
     def validate_source_selection(self) -> Settings:
-        self._validate_mcp_configuration()
-        self._validate_storage_isolation()
-        if self.household_queue_max_per_household > self.household_queue_max_total:
+        if (
+            self.audit_database_path is not None
+            and self.audit_database_path.absolute() == self.database_path.absolute()
+        ):
             raise ValueError(
-                "household_queue_max_per_household cannot exceed household_queue_max_total"
+                "audit database must be separate from the authority database"
             )
-        if self.active_active_enabled:
-            raise ValueError("active-active production mode is not supported")
-        if self.multi_host_production_enabled:
-            if not self.multi_host_enabled:
-                raise ValueError("multi-host production mode requires multi-host to be enabled")
-            if self.multi_host_qualification_evidence_path is None:
-                raise ValueError(
-                    "multi-host production mode requires qualification evidence"
-                )
-            if self.multi_host_gateway_identity is None:
-                raise ValueError("multi-host production mode requires a gateway identity")
         knx_settings = (self.knx_gateway_host is not None, self.knx_config_path is not None)
         if knx_settings[0] != knx_settings[1]:
             raise ValueError(
@@ -350,11 +338,6 @@ class Settings(StrictModel):
                 if (audit_path := os.getenv("DOMOAI_AUDIT_DATABASE_PATH"))
                 else None
             ),
-            backup_encryption_key_file=(
-                Path(key_path)
-                if (key_path := os.getenv("DOMOAI_BACKUP_ENCRYPTION_KEY_FILE"))
-                else None
-            ),
             policy_config_path=(
                 Path(policy_path)
                 if (policy_path := os.getenv("DOMOAI_POLICY_CONFIG_PATH"))
@@ -392,7 +375,6 @@ class Settings(StrictModel):
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
             knx_gateway_port=int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3671")),
-            knx_virtual_host=os.getenv("DOMOAI_KNX_KV_HOST"),
             knx_gateway_route_back=boolean("DOMOAI_KNX_GATEWAY_ROUTE_BACK"),
             knx_config_path=(
                 Path(config_path) if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH")) else None
@@ -498,17 +480,10 @@ class Settings(StrictModel):
                 if (profile_path := os.getenv("DOMOAI_BATTERY_DISPATCH_PROFILE_PATH"))
                 else None
             ),
-            ev_charging_binding_paths=(
-                tuple(
-                    Path(entry.strip())
-                    for entry in os.getenv("DOMOAI_EV_CHARGING_BINDING_PATHS", "").split(",")
-                    if entry.strip()
-                )
-                or (
-                    (Path(legacy_profile_path),)
-                    if (legacy_profile_path := os.getenv("DOMOAI_EV_CHARGING_PROFILE_PATH"))
-                    else ()
-                )
+            ev_charging_profile_path=(
+                Path(profile_path)
+                if (profile_path := os.getenv("DOMOAI_EV_CHARGING_PROFILE_PATH"))
+                else None
             ),
             battery_hil_evidence_path=(
                 Path(evidence_path)

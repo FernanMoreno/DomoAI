@@ -178,9 +178,6 @@ services:
       TZ: Europe/Madrid
     volumes:
       - homeassistant-data:/config
-    depends_on:
-      mqtt:
-        condition: service_healthy
 
   matter-server:
     profiles: ["matter"]

@@ -53,62 +53,35 @@ class BatteryActuator(StrictModel):
         return self
 
 
-class EVActuator(StrictModel):
-    """Explicit server-owned binding for a latched EV charge surface."""
-
-    schema_version: Literal["v1"] = "v1"
-    device_id: str = Field(min_length=1)
-    capability: str = Field(min_length=1)
-    charge_command: str = Field(min_length=1)
-    stop_command: str = Field(min_length=1)
-    connected_capability: str = Field(default="ev.connected", min_length=1)
-    departure_capability: str | None = Field(default="ev.departure_at", min_length=1)
-    max_charge_kw: float = Field(gt=0)
-    power_unit: Literal["kW"] = "kW"
-
-    @model_validator(mode="after")
-    def validate_commands(self) -> EVActuator:
-        if self.charge_command == self.stop_command:
-            raise ValueError("EV actuator charge and stop commands must be distinct")
-        if self.connected_capability == self.capability:
-            raise ValueError("EV connected state must not use the writable command capability")
-        if self.departure_capability == self.capability:
-            raise ValueError("EV departure state must not use the writable command capability")
-        return self
-
-
 class EVChargingBinding(StrictModel):
-    """Explicit server-owned binding required to supply EV charging state.
-
-    Deliberately lighter than `DispatchableBatteryBinding`: `EVState.
-    capacity_kwh` is an ordinary observed value describing the connected
-    vehicle, not a regulatory nominal-capacity claim, so no capacity
-    attestation/trust-policy ceremony applies here (spec 162, research.md
-    Decision 1).
-    """
+    """Server-owned route and state contract for one EV charger."""
 
     schema_version: Literal["v1"] = "v1"
     provider_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64)
     device_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9_.-]*$")
-    actuator: EVActuator
-    control_policy: BatteryControlPolicy = Field(default_factory=BatteryControlPolicy)
+    capability: str = Field(min_length=1)
+    charge_command: str = Field(min_length=1)
+    stop_command: str = Field(min_length=1)
+    connected_capability: str = Field(default="ev.connected", min_length=1)
     soc_capability: str = Field(default="ev.soc", min_length=1)
-    capacity_capability: str = Field(default="ev.capacity", min_length=1)
+    power_feedback_capability: str = Field(default="ev.power", min_length=1)
+    departure_capability: str = Field(default="ev.departure_at", min_length=1)
+    capacity_kwh: float = Field(gt=0)
+    max_charge_kw: float = Field(gt=0)
+    power_unit: Literal["kW"] = "kW"
 
     @model_validator(mode="after")
     def validate_binding(self) -> EVChargingBinding:
-        if self.actuator.device_id != self.device_id:
-            raise ValueError("EV actuator device must match binding device")
-        roles = [
+        if self.charge_command == self.stop_command:
+            raise ValueError("EV charge and stop commands must be distinct")
+        capabilities = {
+            self.connected_capability,
             self.soc_capability,
-            self.capacity_capability,
-            self.actuator.capability,
-            self.actuator.connected_capability,
-        ]
-        if self.actuator.departure_capability is not None:
-            roles.append(self.actuator.departure_capability)
-        if len(set(roles)) != len(roles):
-            raise ValueError("EV binding capability roles must be distinct")
+            self.power_feedback_capability,
+            self.departure_capability,
+        }
+        if len(capabilities) != 4:
+            raise ValueError("EV state capabilities must be distinct")
         return self
 
 
@@ -376,10 +349,7 @@ class ThermalProfile(StrictModel):
 __all__ = [
     "SOC_OBSERVATION_TOLERANCE_KWH",
     "BatteryActuator",
-    "EVActuator",
     "EVChargingBinding",
-    "HVACActuator",
-    "ThermalProfile",
     "BatteryCapacityEvidence",
     "BatteryControlPolicy",
     "BatteryProfile",

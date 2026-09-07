@@ -605,6 +605,7 @@ class Approval(StrictModel):
             raise ValueError("approval lifetime must not outlive validation evidence")
         return self
 
+
 class ExecutionOutcome(StrictModel):
     authority: AuthorityContext = Field(default_factory=AuthorityContext)
     plan_id: str = Field(min_length=1)

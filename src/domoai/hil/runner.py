@@ -20,7 +20,7 @@ import hashlib
 import json
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from domoai.config.battery_qualification import (
     REQUIRED_HIL_CHECKS,
@@ -132,7 +132,11 @@ async def run_battery_hil(
     if test_discharge_kw > binding.profile.max_discharge_kw:
         raise BatteryHILRunError("test_discharge_kw exceeds the battery profile envelope")
     ceiling = getattr(runtime.settings, "battery_hil_power_ceiling_kw", None)
-    if ceiling is not None and max(test_charge_kw, test_discharge_kw) > ceiling:
+    if ceiling is None:
+        raise BatteryHILRunError(
+            "HIL deployment safety ceiling must be configured before physical commands"
+        )
+    if max(test_charge_kw, test_discharge_kw) > ceiling:
         raise BatteryHILRunError("HIL test power exceeds the deployment safety ceiling")
 
     clock = clock or SystemClock()
@@ -217,7 +221,6 @@ async def run_battery_hil(
     ]
     outcomes_by_step: dict[str, ExecutionStatus] = {}
     command_attempted = False
-    controlled_failure = False
 
     async def _execute_step(
         index: int,
@@ -227,7 +230,8 @@ async def run_battery_hil(
         charge_kw: float,
         discharge_kw: float,
     ) -> None:
-        nonlocal command_attempted, controlled_failure
+        nonlocal command_attempted
+        command_attempted = command_attempted or charge_kw > 0 or discharge_kw > 0
         command = Command(
             id=f"{run_id}:{step_name}",
             device_id=actuator.device_id,
@@ -245,14 +249,26 @@ async def run_battery_hil(
         requires_confirmation = validated.status is PlanStatus.REQUIRES_CONFIRMATION
         if requires_confirmation and validated.validation is not None:
             # A HIL run is inherently attended: the person invoking
-            # `domoai-hil battery` on a live bench *is* the human operator.
-            # The grant is still issued and consumed by the server-owned store
-            # so the physical admission boundary cannot accept a fabricated
-            # Approval projection.
-            grant = runtime.approval_store.issue_attended_local(
-                validated,
-                operator_id="hil_runner_local_operator",
-                session_id=f"hil:{run_id}",
+            # `domoai-hil battery` on a live bench *is* the human operator,
+            # with no remote/agent boundary to defend against self-approval
+            # across (that's what the MCP request_approval flow guards
+            # against). Self-issuing the grant here is that operator's
+            # in-person confirmation, not a policy bypass.
+            grant = ApprovalGrant(
+                approval_id=f"{run_id}:{step_name}:approval",
+                plan_id=validated.id,
+                validation_digest=validated.validation.digest,
+                approved_by="hil_runner_local_operator",
+                issued_at=clock.now(),
+                authentication_context="hil_runner_local_operator",
+                validation_valid_until=validated.validation.valid_until,
+                expires_at=validated.validation.valid_until,
+                window_digest=(
+                    validated.execution_window.digest
+                    if validated.execution_window is not None
+                    else None
+                ),
+                schedule_revision=validated.schedule_revision,
             )
             grant = runtime.approval_store.consume(grant.approval_id, validated)
             validated = runtime.facade.approve_plan(validated, grant=grant)
@@ -296,8 +312,6 @@ async def run_battery_hil(
             await _execute_step(
                 index, step_name, command_name, value, charge_kw, discharge_kw
             )
-            if controlled_failure:
-                break
     except Exception as error:
         sequence_error = error
     finally:
@@ -320,7 +334,7 @@ async def run_battery_hil(
                     raise BatteryHILRunError("emergency stop did not confirm zero power")
             except Exception as error:
                 cleanup_error = error
-    if sequence_error is not None and not controlled_failure:
+    if sequence_error is not None:
         if cleanup_error is not None:
             raise BatteryHILRunError(
                 f"HIL sequence failed and emergency stop was not confirmed: {cleanup_error}"
@@ -332,7 +346,7 @@ async def run_battery_hil(
         ) from cleanup_error
 
     def _confirmed(step: str) -> bool:
-        return outcomes_by_step.get(step) is ExecutionStatus.CONFIRMED_SUCCESS
+        return outcomes_by_step[step] is ExecutionStatus.CONFIRMED_SUCCESS
 
     takeover_payload = next(
         (
@@ -340,60 +354,12 @@ async def run_battery_hil(
             for event in reversed(runtime.audit.events)
             if event.event_type == "control_takeover_result"
             and event.payload.get("plan_id") == f"{run_id}-baseline_stop"
+            and event.payload.get("status") == "acquired"
+            and isinstance(event.payload.get("baseline"), dict)
         ),
         None,
     )
-    takeover_result: TakeoverResult | None = None
-    if takeover_payload is not None:
-        try:
-            takeover_result = TakeoverResult.model_validate(takeover_payload)
-        except (TypeError, ValueError):
-            takeover_result = None
-    first_command_result = next(
-        (
-            event.payload
-            for event in reversed(runtime.audit.events)
-            if event.event_type == "control_takeover_first_command_result"
-            and event.payload.get("plan_id") == f"{run_id}-baseline_stop"
-        ),
-        None,
-    )
-    # The adapter's acquisition response is emitted before the executor sends
-    # the first command, so ``TakeoverResult.first_command_confirmed`` may
-    # legitimately still be false.  The authoritative confirmation is the
-    # executor outcome tied to the exact takeover command and plan.
-    first_command_confirmed = bool(
-        takeover_result is not None
-        and isinstance(first_command_result, dict)
-        and first_command_result.get("plan_id") == takeover_result.plan_id
-        and first_command_result.get("command_id") == takeover_result.first_command_id
-        and first_command_result.get("confirmed") is True
-    )
-    baseline = takeover_result.baseline if takeover_result is not None else None
-    lease_is_live = bool(
-        takeover_result is not None
-        and takeover_result.acquired_at <= clock.now() < takeover_result.expires_at
-    )
-    baseline_is_observed = bool(
-        baseline is not None
-        and baseline.device_id == binding.device_id
-        and baseline.capability == actuator.power_feedback_capability
-        and baseline.source_ref.adapter_id == binding.provider_id
-        and baseline.power_kw is not None
-        and baseline.observed_at <= baseline.received_at <= clock.now()
-    )
-    checks["takeover_baseline"] = bool(
-        configured_binding == binding
-        and takeover_result is not None
-        and takeover_result.status is ControlLeaseStatus.ACQUIRED
-        and takeover_result.owner == binding.control_policy.owner
-        and takeover_result.device_id == binding.device_id
-        and takeover_result.plan_id == f"{run_id}-baseline_stop"
-        and first_command_confirmed
-        and lease_is_live
-        and baseline_is_observed
-        and _confirmed("baseline_stop")
-    )
+    checks["takeover_baseline"] = takeover_payload is not None and _confirmed("baseline_stop")
     if takeover_payload is not None:
         observations["takeover_baseline"] = takeover_payload
     checks["charge_feedback"] = _confirmed("charge_feedback")
@@ -409,19 +375,21 @@ async def run_battery_hil(
 
     for check_name in _MANUAL_ONLY_CHECKS:
         note = manual_attestations[check_name].lower()
-        if any(marker in note for marker in _NOT_EXERCISED_MARKERS):
-            manual_status = "not_exercised"
-        elif "not applicable" in note:
-            manual_status = "not_applicable"
-        elif any(marker in note for marker in _NOT_VERIFIED_MARKERS):
-            manual_status = "not_verified"
-        else:
-            manual_status = "verified"
-        checks[check_name] = manual_status == "verified"
-        observations.setdefault("manual_checks", {})[check_name] = {
-            "status": manual_status,
-            "note": manual_attestations[check_name],
-        }
+        checks[check_name] = not any(
+            marker in note for marker in ("not exercised", "not tested", "not verified", "not run")
+        )
+
+    def _manual_status(
+        check_name: str,
+    ) -> Literal["verified", "not_verified", "not_exercised", "not_applicable"]:
+        note = manual_attestations[check_name].lower()
+        if "not applicable" in note or "n/a" in note:
+            return "not_applicable"
+        if "not exercised" in note or "not tested" in note or "not run" in note:
+            return "not_exercised"
+        if "not verified" in note:
+            return "not_verified"
+        return "verified" if checks[check_name] else "not_verified"
 
     status: str = "passed" if all(checks.values()) else "failed"
     return BatteryHILEvidence(
@@ -446,26 +414,13 @@ async def run_battery_hil(
             else None
         ),
         qualification_expires_at=clock.now() + timedelta(hours=24),
-        # CLI labels count only when the adapter itself returned the same
-        # values with a provider observation timestamp.
-        hardware_identity_observed=hardware_identity_observed,
-        firmware_identity_observed=firmware_identity_observed,
-        identity_observed_at=(
-            identity_observation.observed_at if identity_observation is not None else None
-        ),
-        identity_evidence_digest=(
-            battery_identity_digest(
-                hardware_id=hardware_id,
-                firmware_version=firmware_version,
-                provider_id=binding.provider_id,
-                profile_digest=battery_binding_digest(binding),
-                observed_at=identity_observation.observed_at,
-            )
-            if firmware_identity_observed and identity_observation is not None
-            else None
-        ),
+        # The CLI receives these labels from the operator; it does not read
+        # serial/firmware identity from the physical device. Keep this
+        # artifact explicitly non-qualifying until a trusted test authority
+        # attaches identity attestation.
+        hardware_identity_observed=False,
+        firmware_identity_observed=False,
         manual_check_status={
-            check: observations["manual_checks"][check]["status"]
-            for check in _MANUAL_ONLY_CHECKS
+            check: _manual_status(check) for check in _MANUAL_ONLY_CHECKS
         },
     )

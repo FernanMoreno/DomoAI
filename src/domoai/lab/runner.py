@@ -17,35 +17,20 @@ class LabRunnerError(RuntimeError):
     """Raised for invalid local-lab configuration or command execution."""
 
 
-class BridgeSupervisorPort(Protocol):
-    def start(self) -> int: ...
-
-    def status(self) -> int: ...
-
-    def stop(self) -> int: ...
-
-
 SERVICE_NAMES = frozenset(
     {
         "mqtt",
         "zigbee2mqtt",
         "modbus",
         "battery",
-        "ev-charger",
-        "water-meter",
-        "thermal",
         "knx-gateway",
         "homeassistant",
         "matter-server",
-        "knx-bridge",
     }
 )
 DEFAULT_UP_SERVICES = ("mqtt", "zigbee2mqtt", "modbus")
 SERVICE_PROFILES = {
     "battery": "battery",
-    "ev-charger": "ev-charger",
-    "water-meter": "water-meter",
-    "thermal": "thermal",
     "homeassistant": "homeassistant",
     "matter-server": "matter",
 }
@@ -56,9 +41,6 @@ FIXTURE_SMOKE_TESTS = (
     "tests/integration/test_zigbee2mqtt_fixture.py",
     "tests/integration/test_modbus_fixture.py",
     "tests/unit/lab/test_battery_simulator.py",
-    "tests/unit/lab/test_ev_charging_simulator.py",
-    "tests/unit/lab/test_water_consumption_simulator.py",
-    "tests/unit/lab/test_thermal_simulator.py",
     "tests/integration/test_matter_server_fixture.py",
     "tests/integration/test_knx_fixture.py",
     "tests/integration/test_home_assistant_provider_runtime.py",

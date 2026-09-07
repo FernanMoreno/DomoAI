@@ -103,7 +103,7 @@ class HomeAssistantProviderAdapter:
                 StateSnapshot(
                     device_id=str(state["entity_id"]),
                     capability=str(state["capability"]),
-                    value=state.get("value") if state.get("available", True) else None,
+                    value=state.get("value"),
                     unit=state.get("unit"),
                     observed_at=observed_at,
                     received_at=received_at,
@@ -210,7 +210,7 @@ class HomeAssistantProviderAdapter:
             return self._takeover_rejected(request, now, "baseline_unavailable")
         observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
         received_at = max(
-            now,
+            observed_at,
             _parse_source_timestamp(state.get("received_at"), fallback=now),
         )
         baseline = PhysicalBaseline(

@@ -325,61 +325,16 @@ class Scheduler:
                     predecessor_plan_ids=predecessor_ids,
                 )
             evidence = predecessor.details.get("dependency_evidence")
-            try:
-                dependency_evidence = ExecutionDependencyEvidence.model_validate(evidence)
-            except Exception:
-                return _PredecessorGateResult(
-                    allowed=False,
-                    predecessor_plan_id=predecessor_plan_id,
-                    predecessor_plan_ids=predecessor_ids,
-                )
-
-            if (
-                dependency_evidence.bundle_id != bundle.id
-                or dependency_evidence.member_plan_id != predecessor_plan_id
-                or dependency_evidence.predecessor_plan_id != predecessor_plan_id
-                or dependency_evidence.status is not ExecutionStatus.CONFIRMED_SUCCESS
+            if not isinstance(evidence, dict) or (
+                evidence.get("status") != ExecutionStatus.CONFIRMED_SUCCESS.value
             ):
                 return _PredecessorGateResult(
                     allowed=False,
                     predecessor_plan_id=predecessor_plan_id,
                     predecessor_plan_ids=predecessor_ids,
                 )
-
-            predecessor_plan_repository = self._plan_repository()
-            if predecessor_plan_repository is None:
-                return _PredecessorGateResult(
-                    allowed=False,
-                    predecessor_plan_id=predecessor_plan_id,
-                    predecessor_plan_ids=predecessor_ids,
-                )
-            persisted_predecessor = await predecessor_plan_repository.get(predecessor_plan_id)
-            if persisted_predecessor is None or persisted_predecessor.execution is None:
-                return _PredecessorGateResult(
-                    allowed=False,
-                    predecessor_plan_id=predecessor_plan_id,
-                    predecessor_plan_ids=predecessor_ids,
-                )
-            outcomes = persisted_predecessor.execution.outcomes
-            if (
-                [outcome.command_id for outcome in outcomes]
-                != dependency_evidence.predecessor_command_ids
-                or [command.id for command in persisted_predecessor.commands]
-                != dependency_evidence.predecessor_command_ids
-                or any(
-                    outcome.status is not ExecutionStatus.CONFIRMED_SUCCESS
-                    for outcome in outcomes
-                )
-                or execution_outcome_digest(outcomes) != dependency_evidence.outcome_digest
-            ):
-                return _PredecessorGateResult(
-                    allowed=False,
-                    predecessor_plan_id=predecessor_plan_id,
-                    predecessor_plan_ids=predecessor_ids,
-                )
-
-            versions = dependency_evidence.state_versions
-            if dependencies is not None:
+            versions = evidence.get("state_versions")
+            if isinstance(versions, dict) and dependencies is not None:
                 overrides.update(
                     {
                         key: value
@@ -557,28 +512,13 @@ class Scheduler:
                     continue
                 execution_kwargs: dict[str, Any] = {}
                 if gate.state_version_overrides:
-                    execution_kwargs["state_version_overrides"] = gate.state_version_overrides
-                bundle = (
-                    await self.bundle_repository.get_for_plan(plan.id)
-                    if self.bundle_repository is not None
-                    else None
-                )
-                if (
-                    bundle is not None
-                    and self.execution_admission is not None
-                    and any(member.plan_id == plan.id for member in bundle.members)
-                ):
-                    execution_kwargs["aggregate_capability"] = (
-                        await self.execution_admission.issue_aggregate_capability(
-                            bundle.id, plan.id
-                        )
+                    execution = await self.executor.execute(
+                        plan,
+                        state_version_overrides=gate.state_version_overrides,
+                        aggregate_owner=True,
                     )
-                elif self.execution_admission is None:
-                    # Isolated scheduler fakes may omit admission. They can
-                    # exercise scheduling bookkeeping, but no production
-                    # composition can use this branch for physical execution.
-                    pass
-                execution = await self.executor.execute(plan, **execution_kwargs)
+                else:
+                    execution = await self.executor.execute(plan, aggregate_owner=True)
                 statuses = {outcome.status for outcome in execution.outcomes}
                 if ExecutionStatus.UNKNOWN in statuses:
                     self.execution_unknown_total += 1
@@ -838,19 +778,8 @@ class Scheduler:
                     continue
                 validated = self.executor.plan_service.validate(plan)
                 if validated.status is PlanStatus.READY:
-                    execution = await self.executor.execute(validated)
-                    outcome, outcome_reason = project_execution_summary(execution)
-                    if outcome != "executed":
-                        self.audit.append(
-                            event_type="recurring_occurrence_result",
-                            actor="runtime",
-                            subject_id=plan.id,
-                            payload={
-                                "schedule_id": schedule_id,
-                                "outcome": outcome,
-                                "reason": outcome_reason,
-                            },
-                        )
+                    await self.executor.execute(validated, aggregate_owner=True)
+                    outcome = "executed"
                 else:
                     reason = (
                         "requires_confirmation"

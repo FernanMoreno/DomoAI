@@ -10,7 +10,6 @@ coverage.xml
 dist/
 build/
 .lab-tools/
-.lab-state/
 *.db
 *.sqlite
 *.sqlite3

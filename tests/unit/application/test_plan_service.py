@@ -24,11 +24,7 @@ from domoai.domain.models import (
     StateSnapshot,
     StateStatus,
 )
-from domoai.runtime.approval_store import (
-    ApprovalAssertion,
-    ApprovalStore,
-    OperatorPrincipal,
-)
+from domoai.runtime.approval_store import ApprovalStore
 from domoai.runtime.clock import FixedClock
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
@@ -86,31 +82,101 @@ def _semantic_command(*, value: object, unit: str | None = None) -> Command:
     )
 
 
-def test_battery_capability_requires_binding_even_when_source_is_misclassified() -> None:
-    service = _semantic_service(
-        Capability(
-            name="battery.power",
-            kind=CapabilityKind.NUMBER,
-            unit="kW",
-            readable=True,
-            writable=True,
-            commands=["charge_battery"],
+async def _confirmation_context() -> tuple[FixedClock, PlanService, Plan]:
+    initial = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore(clock=clock)
+    audit = AuditLog()
+    await DiscoveryService(adapter, registry, state_store, audit, clock=clock).refresh()
+    service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    validated = service.validate(
+        Plan(
+            id="approval-evidence-plan",
+            commands=[
+                Command(
+                    id="approval-evidence-command",
+                    device_id=device_id,
+                    command="open",
+                    risk_class=RiskClass.CONFIRM,
+                    idempotency_key="approval-evidence-intent",
+                )
+            ],
         )
     )
+    assert validated.status is PlanStatus.REQUIRES_CONFIRMATION
+    grant = ApprovalStore(
+        clock=clock, operator_token="operator", allow_legacy_token=True
+    ).issue(validated, approved_by="operator", operator_token="operator")
+    return clock, service, service.approve(validated, grant=grant)
 
-    validation = service.validate_command_semantics(
-        Command(
-            id="battery-unbound-command",
-            device_id="fixture.semantic",
-            command="charge_battery",
-            value=1.0,
-            unit="kW",
-            idempotency_key="battery-unbound-intent",
-        )
+
+@pytest.mark.asyncio
+async def test_assert_executable_rejects_an_expired_persisted_approval() -> None:
+    clock, service, approved = await _confirmation_context()
+    assert approved.approval is not None
+    assert approved.approval.expires_at is not None
+
+    clock.set(approved.approval.expires_at + timedelta(seconds=1))
+
+    with pytest.raises(DomainError) as error:
+        service.assert_executable(approved)
+
+    assert error.value.code is ErrorCode.APPROVAL_ASSERTION_EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_assert_executable_rejects_changed_execution_window_evidence() -> None:
+    _clock, service, approved = await _confirmation_context()
+    assert approved.approval is not None
+    tampered = approved.model_copy(
+        update={
+            "approval": approved.approval.model_copy(
+                update={"window_digest": "sha256:tampered-window"}
+            )
+        }
     )
 
-    assert validation.errors
-    assert validation.errors[0].code == ErrorCode.ACTUATOR_AUTHORIZATION_REQUIRED.value
+    with pytest.raises(DomainError) as error:
+        service.assert_executable(tampered)
+
+    assert error.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_legacy_approved_evidence_without_approval_id_fails_closed() -> None:
+    _clock, service, approved = await _confirmation_context()
+    payload = approved.model_dump(mode="python")
+    payload["approval"].pop("approval_id", None)
+    legacy = Plan.model_validate(payload)
+
+    with pytest.raises(DomainError) as error:
+        service.assert_executable(legacy)
+
+    assert error.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_assert_executable_rejects_standing_approval_as_one_shot_authority() -> None:
+    _clock, service, approved = await _confirmation_context()
+    assert approved.approval is not None
+    standing = approved.model_copy(
+        update={
+            "approval": approved.approval.model_copy(
+                update={
+                    "scope": "recurrence",
+                    "recurrence_digest": "sha256:standing-rule",
+                }
+            )
+        }
+    )
+
+    with pytest.raises(DomainError) as error:
+        service.assert_executable(standing)
+
+    assert error.value.code is ErrorCode.APPROVAL_REQUIRED
 
 
 def test_validate_plan_rejects_unit_kind_bounds_step_and_writable_mismatches() -> None:
@@ -276,6 +342,62 @@ async def test_create_plan_rejects_incompatible_unit() -> None:
 
     with pytest.raises(DomainError, match="unit"):
         service.create_plan("plan-unit-1", [command])
+
+
+def test_energy_binding_must_match_the_authorized_provider_route() -> None:
+    registry = DeviceRegistry()
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "battery.route",
+                    "device_id": "physical-battery-1",
+                    "canonical_id": "energy.battery",
+                    "name": "Battery",
+                    "domain": "energy",
+                    "semantic_type": "energy",
+                    "capabilities": [
+                        {
+                            "name": "battery.power",
+                            "kind": "number",
+                            "unit": "kW",
+                            "readable": True,
+                            "writable": True,
+                            "commands": ["charge_battery"],
+                        }
+                    ],
+                    "identity_keys": ["fixture:battery"],
+                    "connections": ["fixture:battery"],
+                    "available": True,
+                }
+            ],
+            source_states=[],
+        ),
+        "wrong_provider",
+    )
+    service = PlanService(
+        registry,
+        StateStore(),
+        PolicyEngine([]),
+        AuditLog(),
+        authorized_actuator_commands={"energy.battery": frozenset({"charge_battery"})},
+        authorized_actuator_providers={"energy.battery": "authorized_provider"},
+    )
+
+    result = service.validate_command_semantics(
+        Command(
+            id="provider-route-check",
+            device_id="energy.battery",
+            command="charge_battery",
+            value=1.0,
+            unit="kW",
+            idempotency_key="provider-route-check-key",
+        )
+    )
+
+    assert any(
+        error.code == ErrorCode.ACTUATOR_AUTHORIZATION_REQUIRED for error in result.errors
+    )
 
 
 @pytest.mark.asyncio

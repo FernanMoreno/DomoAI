@@ -25,14 +25,6 @@ ModbusCapabilityName = Literal[
     "battery.soc",
     "battery.power",
     "battery.capacity",
-    "ev.soc",
-    "ev_charging",
-    "ev.capacity",
-    "ev.connected",
-    "water.flow_rate",
-    "water.total_volume",
-    "thermal.indoor_temperature",
-    "thermal.hvac_power",
 ]
 
 _SAFE_ID_PATTERN = r"^[a-z0-9][a-z0-9_.-]*$"
@@ -99,18 +91,19 @@ class ModbusCapabilityBinding(StrictModel):
             "battery.soc",
             "battery.power",
             "battery.capacity",
-            "ev.soc",
-            "ev_charging",
-            "ev.capacity",
-            "water.flow_rate",
-            "water.total_volume",
-            "thermal.indoor_temperature",
-            "thermal.hvac_power",
         }:
             if state.area not in {"input_register", "holding_register"}:
                 raise ValueError(f"{self.name} requires an input or holding register")
             if state.data_type == "bool":
                 raise ValueError(f"{self.name} is read-only and numeric")
+            if self.command is not None:
+                if self.name != "battery.power":
+                    raise ValueError(f"{self.name} is read-only and numeric")
+                if self.command.area != "holding_register" or self.command.data_type == "bool":
+                    raise ValueError("battery.power command requires a numeric holding register")
+        elif self.name == "occupancy":
+            if state.data_type != "bool" or state.area not in {"coil", "discrete_input"}:
+                raise ValueError("occupancy requires a boolean coil or discrete input")
             if self.command is not None:
                 if self.name not in {"battery.power", "ev_charging", "thermal.hvac_power"}:
                     raise ValueError(f"{self.name} is read-only and numeric")
@@ -143,19 +136,7 @@ class ModbusEntityConfig(StrictModel):
             "light": {"power", "brightness"},
             "switch": {"power"},
             "sensor": {"temperature", "humidity", "occupancy"},
-            "energy": {
-                "battery.soc",
-                "battery.power",
-                "battery.capacity",
-                "ev.soc",
-                "ev_charging",
-                "ev.capacity",
-                "ev.connected",
-                "water.flow_rate",
-                "water.total_volume",
-                "thermal.indoor_temperature",
-                "thermal.hvac_power",
-            },
+            "energy": {"battery.soc", "battery.power", "battery.capacity"},
         }[self.semantic_type]
         unsupported = set(names) - allowed
         if unsupported:

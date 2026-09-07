@@ -287,7 +287,7 @@ async def test_composite_state_changed_event_from_non_primary_adapter_is_applied
 
 
 @pytest.mark.asyncio
-async def test_incremental_cross_source_conflict_becomes_invalid_canonical_state() -> None:
+async def test_incremental_conflicting_sources_resolve_to_invalid_canonical_state() -> None:
     home_assistant = RecordingAdapter(
         "home_assistant", source_snapshot(adapter_id="home_assistant")
     )
@@ -300,14 +300,13 @@ async def test_incremental_cross_source_conflict_becomes_invalid_canonical_state
 
     await composite.connect()
     await discovery.refresh()
-    modbus_state = next(
-        state
-        for state in modbus.snapshot.source_states
-        if state["entity_id"] == "light.main_power"
-    )
-    modbus_state["value"] = True
-    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+    initial = await state_store.get("living_room.main_light", "power")
+    assert initial is not None and initial.status is StateStatus.CURRENT
 
+    for state in modbus.snapshot.source_states:
+        if state["entity_id"] == "light.main_power" and state["capability"] == "power":
+            state["value"] = True
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
     await consumer._apply_event(
         StateChangedEvent(
             source_adapter_id="modbus",
@@ -316,90 +315,70 @@ async def test_incremental_cross_source_conflict_becomes_invalid_canonical_state
         )
     )
 
-    canonical = await state_store.get("living_room.main_light", "power")
-    assert canonical is not None
-    assert canonical.status is StateStatus.INVALID
-    assert canonical.value is None
+    conflicted = await state_store.get("living_room.main_light", "power")
+    assert conflicted is not None
+    assert conflicted.status is StateStatus.INVALID
+    assert conflicted.value is None
 
 
 @pytest.mark.asyncio
-async def test_composite_source_diagnostic_degrades_only_that_source_state() -> None:
-    healthy = RecordingAdapter(
-        "healthy", source_snapshot(adapter_id="healthy", include_shared_device=False)
+async def test_composite_child_failure_degrades_only_that_source() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
     )
-    failing = RecordingAdapter(
-        "failing", source_snapshot(adapter_id="failing", include_shared_device=False)
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
     )
     registry = DeviceRegistry()
-    composite = CompositeAdapter([healthy, failing], registry=registry)
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
     state_store = StateStore()
     audit = AuditLog()
     discovery = DiscoveryService(composite, registry, state_store, audit)
 
     await composite.connect()
     await discovery.refresh()
+    composite._connected.discard("modbus")
     consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
 
     await consumer._apply_event(
         AdapterDiagnosticEvent(
-            source_adapter_id="failing",
-            code="source_unavailable",
-            message="failing source disconnected",
+            source_adapter_id="modbus",
+            payload={"event": "adapter_event_stream_failed", "reason": "broker down"},
         )
     )
 
-    failed_state = await state_store.get("failing.environment", "temperature")
-    healthy_state = await state_store.get("healthy.environment", "temperature")
-    assert failed_state is not None
-    assert failed_state.status is StateStatus.UNAVAILABLE
-    assert failed_state.value is None
-    assert healthy_state is not None
-    assert healthy_state.status is StateStatus.CURRENT
+    healthy = await state_store.get("home_assistant.environment", "temperature")
+    unavailable = await state_store.get("modbus.environment", "temperature")
+    assert healthy is not None and healthy.status is StateStatus.CURRENT
+    assert unavailable is not None and unavailable.status is StateStatus.UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_composite_source_reconnection_recovers_only_that_source_state() -> None:
-    healthy = RecordingAdapter(
-        "healthy", source_snapshot(adapter_id="healthy", include_shared_device=False)
+async def test_composite_health_degradation_marks_only_failed_component() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
     )
-    recovered = RecordingAdapter(
-        "recovered", source_snapshot(adapter_id="recovered", include_shared_device=False)
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
     )
     registry = DeviceRegistry()
-    composite = CompositeAdapter([healthy, recovered], registry=registry)
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
     state_store = StateStore()
     audit = AuditLog()
     discovery = DiscoveryService(composite, registry, state_store, audit)
 
     await composite.connect()
     await discovery.refresh()
+    modbus.available = False
+    health = await composite.health()
     consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
-    await consumer._apply_event(
-        AdapterDiagnosticEvent(
-            source_adapter_id="recovered",
-            code="source_unavailable",
-            message="recovered source disconnected",
-        )
-    )
 
-    unavailable = await state_store.get("recovered.environment", "temperature")
-    assert unavailable is not None
-    assert unavailable.status is StateStatus.UNAVAILABLE
+    await consumer._mark_degraded_components(health)
 
-    await consumer._apply_event(
-        AdapterDiagnosticEvent(
-            source_adapter_id="recovered",
-            code="source_reconnected",
-            message="recovered source connected",
-        )
-    )
-
-    recovered_state = await state_store.get("recovered.environment", "temperature")
-    healthy_state = await state_store.get("healthy.environment", "temperature")
-    assert recovered_state is not None
-    assert recovered_state.status is StateStatus.CURRENT
-    assert healthy_state is not None
-    assert healthy_state.status is StateStatus.CURRENT
+    healthy = await state_store.get("home_assistant.environment", "temperature")
+    unavailable = await state_store.get("modbus.environment", "temperature")
+    assert healthy is not None and healthy.status is StateStatus.CURRENT
+    assert unavailable is not None and unavailable.status is StateStatus.UNAVAILABLE
 
 
 class DisconnectedAdapter(SimulatedHomeAdapter):

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from domoai.domain.models import StateSnapshot, StateStatus
 from domoai.runtime.state_store import StateStore
 
@@ -56,28 +54,20 @@ class StateService:
         allow_stale: bool = True,
     ) -> StateReadResult:
         wanted_capabilities = set(capabilities or [])
-        states: list[StateSnapshot] = []
-        diagnostics: list[StateReadDiagnostic] = []
+        result: list[StateSnapshot] = []
         now = self.state_store.clock.now()
         for snapshot in await self.state_store.all():
             if snapshot.device_id not in device_ids:
                 continue
             if wanted_capabilities and snapshot.capability not in wanted_capabilities:
                 continue
-            snapshot = self.state_store.effective_snapshot(snapshot, now)
-            if not allow_stale and snapshot.status in {
-                StateStatus.STALE,
-                StateStatus.UNAVAILABLE,
-                StateStatus.INVALID,
-            }:
-                diagnostics.append(
-                    StateReadDiagnostic(
-                        device_id=snapshot.device_id,
-                        capability=snapshot.capability,
-                        reason=snapshot.status.value,
-                        status=snapshot.status,
-                    )
-                )
+            expired = (
+                snapshot.status.value == "current"
+                and now - snapshot.observed_at > self.state_store.stale_after
+            )
+            if expired:
+                snapshot = snapshot.model_copy(update={"status": StateStatus.STALE})
+            if not allow_stale and snapshot.status.value in {"stale", "unavailable"}:
                 continue
             states.append(snapshot)
         return StateReadResult(tuple(states), tuple(diagnostics))

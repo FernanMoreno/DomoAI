@@ -64,6 +64,7 @@ class PlanService:
         *,
         clock: Clock | None = None,
         authorized_actuator_commands: dict[str, frozenset[str]] | None = None,
+        authorized_actuator_providers: dict[str, str] | None = None,
     ) -> None:
         self.registry = registry
         self.state_store = state_store
@@ -71,6 +72,7 @@ class PlanService:
         self.audit = audit
         self.clock = clock or SystemClock()
         self.authorized_actuator_commands = authorized_actuator_commands or {}
+        self.authorized_actuator_providers = authorized_actuator_providers or {}
 
     @property
     def current_revision(self) -> str:
@@ -136,13 +138,8 @@ class PlanService:
 
         errors: list[ErrorDetail] = []
         normalized = command
-        requires_actuator_binding = (
-            device.type.value in {"energy", "ev_charger"}
-            or capability.name in _PHYSICAL_ACTUATOR_CAPABILITY_NAMES
-            or capability.name.startswith(("battery.", "ev."))
-        )
         if (
-            requires_actuator_binding
+            device.type.value in {"energy", "ev_charger"}
             and capability.writable
             and command.command not in self.authorized_actuator_commands.get(
                 device.id, frozenset()
@@ -156,6 +153,26 @@ class PlanService:
                     field="actuator_authorization",
                 )
             )
+        authorized_provider = self.authorized_actuator_providers.get(device.id)
+        if (
+            authorized_provider is not None
+            and command.command in self.authorized_actuator_commands.get(device.id, frozenset())
+        ):
+            route = self.registry.resolve_command_route(device.id, command.command)
+            resolved_provider = route.route.source_ref.adapter_id if route.route else None
+            if resolved_provider != authorized_provider:
+                errors.append(
+                    self._make_error(
+                        ErrorCode.ACTUATOR_AUTHORIZATION_REQUIRED,
+                        "Energy actuator route does not match its server-owned provider binding",
+                        command,
+                        field="actuator_authorization",
+                        details={
+                            "expected_provider": authorized_provider,
+                            "resolved_provider": resolved_provider,
+                        },
+                    )
+                )
         if capability.unit is not None and command.unit is None:
             normalized = normalized.model_copy(update={"unit": capability.unit})
         elif command.unit != capability.unit:
@@ -445,8 +462,8 @@ class PlanService:
             status="approved",
             approved_by=grant.approved_by,
             approved_at=grant.approved_at or grant.issued_at,
+            approval_id=grant.approval_id,
             validation_digest=plan.validation.digest,
-            scope="+".join(scope_parts) if scope_parts else "plan",
             bundle_digest=grant.bundle_digest,
             recurrence_digest=grant.recurrence_digest,
             validation_valid_until=grant.validation_valid_until,
@@ -532,25 +549,27 @@ class PlanService:
             if plan.approval.approval_id is None:
                 raise DomainError(
                     ErrorCode.APPROVAL_REQUIRED,
-                    "Approval evidence is missing its identifier; obtain a new approval",
+                    "Approval evidence is missing its server-issued identifier",
+                )
+            if plan.approval.scope != "plan" or plan.approval.recurrence_digest is not None:
+                raise DomainError(
+                    ErrorCode.APPROVAL_REQUIRED,
+                    "Standing automation approval cannot authorize one-shot execution",
                 )
             if plan.approval.validation_digest != plan.validation.digest:
                 raise DomainError(
                     ErrorCode.APPROVAL_REQUIRED,
                     "Approval does not match the validated plan",
                 )
-            if (
-                plan.approval.expires_at is not None
-                and plan.approval.expires_at <= self.clock.now()
-            ):
-                raise DomainError(
-                    ErrorCode.APPROVAL_ASSERTION_EXPIRED,
-                    "Approval evidence has expired; obtain a new approval",
-                )
             if plan.approval.validation_valid_until != plan.validation.valid_until:
                 raise DomainError(
                     ErrorCode.APPROVAL_REQUIRED,
                     "Approval does not match the validation evidence lifetime",
+                )
+            if plan.approval.expires_at is None or plan.approval.expires_at <= self.clock.now():
+                raise DomainError(
+                    ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                    "Approval evidence has expired or has no server-owned lifetime",
                 )
             expected_window_digest = (
                 plan.execution_window.digest if plan.execution_window is not None else None

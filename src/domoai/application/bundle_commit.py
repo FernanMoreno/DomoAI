@@ -266,11 +266,13 @@ class BundleCommitService:
             )
             try:
                 if state_version_overrides:
-                    summary = await self._execute_member(
-                        plan, state_version_overrides=state_version_overrides, bundle=bundle
+                    summary = await self.facade.execute_plan(
+                        plan,
+                        state_version_overrides=state_version_overrides,
+                        aggregate_owner=True,
                     )
                 else:
-                    summary = await self._execute_member(plan, bundle=bundle)
+                    summary = await self.facade.execute_plan(plan, aggregate_owner=True)
             except Exception as error:
                 bundle = await self._mark_member(
                     bundle,

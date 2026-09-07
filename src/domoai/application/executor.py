@@ -10,10 +10,8 @@ from datetime import timedelta
 from functools import partial
 from uuid import uuid4
 
-from domoai.application.coordination import FencingGuard
 from domoai.application.dynamic_safety import DynamicSafetyGuard
 from domoai.application.execution_admission import ExecutionAdmission
-from domoai.application.household_queue import HouseholdWorkQueues
 from domoai.application.plan_service import PlanService
 from domoai.domain.coordination import FencingViolation, PhysicalIntent, PhysicalIntentStatus
 from domoai.domain.errors import DomainError, ErrorCode
@@ -83,10 +81,6 @@ class _ControlLeaseExpired(Exception):
     """Internal marker for a lost latched-actuator lease."""
 
 
-class _PhysicalIntentUnknown(Exception):
-    """A previous host left a physical intent uncertain."""
-
-
 class PlanExecutor:
     def __init__(
         self,
@@ -103,10 +97,6 @@ class PlanExecutor:
         control_takeover: ControlTakeoverPort | None = None,
         execution_admission: ExecutionAdmission | None = None,
         dynamic_safety_guard: DynamicSafetyGuard | None = None,
-        operational_metrics: RuntimeOperationalMetrics | None = None,
-        fencing_guard: FencingGuard | None = None,
-        physical_intent_repository: PhysicalIntentPort | None = None,
-        household_work_queues: HouseholdWorkQueues | None = None,
     ) -> None:
         self.adapter = adapter
         self.plan_service = plan_service
@@ -123,10 +113,6 @@ class PlanExecutor:
         self.control_takeover = control_takeover
         self.execution_admission = execution_admission
         self.dynamic_safety_guard = dynamic_safety_guard
-        self.operational_metrics = operational_metrics
-        self.fencing_guard = fencing_guard or getattr(execution_admission, "fencing_guard", None)
-        self.physical_intent_repository = physical_intent_repository
-        self.household_work_queues = household_work_queues
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -144,39 +130,10 @@ class PlanExecutor:
         plan: Plan,
         *,
         state_version_overrides: dict[str, int] | None = None,
-        aggregate_capability: AggregateExecutionCapability | None = None,
-    ) -> ExecutionSummary:
-        """Execute a plan and close any acquired physical authority on failure."""
-
-        attempt = _ExecutionAttempt()
-        try:
-            return await self._execute_impl(
-                plan,
-                state_version_overrides=state_version_overrides,
-                aggregate_capability=aggregate_capability,
-                attempt=attempt,
-            )
-        except BaseException:
-            # A concurrent caller that lost the durable claim must not mark
-            # the winner's executing plan UNKNOWN or release its authority.
-            if attempt.claimed:
-                await self._mark_unknown_after_exception(plan.id)
-                await self._release_after_exception(plan.id)
-            raise
-
-    async def _execute_impl(
-        self,
-        plan: Plan,
-        *,
-        state_version_overrides: dict[str, int] | None = None,
-        aggregate_capability: AggregateExecutionCapability | None = None,
-        attempt: _ExecutionAttempt | None = None,
+        aggregate_owner: bool = False,
     ) -> ExecutionSummary:
         if self.execution_admission is not None:
-            await self.execution_admission.admit(
-                plan,
-                aggregate_capability=aggregate_capability,
-            )
+            await self.execution_admission.admit(plan, aggregate_owner=aggregate_owner)
         if plan.execute_at is not None and plan.execute_at > self.clock.now():
             raise DomainError(
                 ErrorCode.NOT_YET_DUE,
@@ -436,7 +393,6 @@ class PlanExecutor:
                 is not None
             ):
                 outcome = ExecutionOutcome(
-                    authority=plan.authority,
                     plan_id=plan.id,
                     command_id=command.id,
                     execution_attempt_id=execution_attempt_id,
@@ -451,85 +407,10 @@ class PlanExecutor:
                 dispatch_attempted = False
                 physical_intent: PhysicalIntent | None = None
                 try:
-                    fencing_token = None
-                    if self.fencing_guard is not None:
-                        fencing_token = await self.fencing_guard.assert_writable_for_authority(
-                            plan.authority
-                        )
-                    execution_context = ExecutionContext(
-                        agent_request_id=plan.agent_request_id,
-                        plan_id=plan.id,
-                        execution_attempt_id=execution_attempt_id,
-                        adapter_request_id=adapter_request_id,
-                        client_principal_id=current_execution_principal(),
-                        fencing_scope=fencing_token.scope if fencing_token is not None else None,
-                        fencing_epoch=fencing_token.epoch if fencing_token is not None else None,
-                        lease_id=fencing_token.lease_id if fencing_token is not None else None,
-                    )
-                    if self.physical_intent_repository is not None:
-                        if fencing_token is None:
-                            raise FencingViolation(
-                                "physical intent ledger requires a current fencing token"
-                            )
-                        physical_intent = await self.physical_intent_repository.claim(
-                            PhysicalIntent(
-                                tenant_id=plan.authority.tenant_id,
-                                household_id=plan.authority.household_id,
-                                deployment_id=fencing_token.scope.deployment_id,
-                                idempotency_key=command.idempotency_key,
-                                plan_id=plan.id,
-                                command_id=command.id,
-                                fencing_epoch=fencing_token.epoch,
-                                created_at=self.clock.now(),
-                                updated_at=self.clock.now(),
-                            )
-                        )
-                        if physical_intent.status is PhysicalIntentStatus.UNKNOWN:
-                            raise _PhysicalIntentUnknown
                     assert_ownership = getattr(self.control_takeover, "assert_still_owned", None)
-                    if (
-                        takeover_first_command_id is not None
-                        and callable(assert_ownership)
-                        and not await assert_ownership(plan_id=plan.id)
-                    ):
+                    if callable(assert_ownership) and not await assert_ownership(plan_id=plan.id):
                         raise _ControlLeaseExpired
-                    dispatch_started = time.perf_counter()
-                    dispatch_attempted = True
-                    if physical_intent is not None and physical_intent.status in {
-                        PhysicalIntentStatus.ACKNOWLEDGED,
-                        PhysicalIntentStatus.CONFIRMED,
-                    }:
-                        acknowledgement = AdapterExecutionAck(
-                            accepted=True,
-                            message="physical intent replay served from durable ledger",
-                        )
-                    elif (
-                        physical_intent is not None
-                        and physical_intent.status is PhysicalIntentStatus.REJECTED
-                    ):
-                        acknowledgement = AdapterExecutionAck(
-                            accepted=False,
-                            message="physical intent was already rejected",
-                        )
-                    else:
-                        if self.household_work_queues is not None:
-                            acknowledgement = await self.household_work_queues.submit(
-                                plan.authority.household_id,
-                                partial(self.adapter.execute, command, execution_context),
-                            )
-                        else:
-                            acknowledgement = await self.adapter.execute(command, execution_context)
-                        if physical_intent is not None:
-                            assert self.physical_intent_repository is not None
-                            await self.physical_intent_repository.settle(
-                                household_id=physical_intent.household_id,
-                                idempotency_key=physical_intent.idempotency_key,
-                                status=(
-                                    PhysicalIntentStatus.ACKNOWLEDGED
-                                    if acknowledgement.accepted
-                                    else PhysicalIntentStatus.REJECTED
-                                ),
-                            )
+                    acknowledgement = await self.adapter.execute(command, execution_context)
                     after_state = None
                     status = ExecutionStatus.REJECTED
                     error: ErrorDetail | None = None
@@ -622,48 +503,7 @@ class PlanExecutor:
                         completed_at=self.clock.now(),
                         error=error,
                     )
-                except _PhysicalIntentUnknown:
-                    outcome = ExecutionOutcome(
-                        authority=plan.authority,
-                        plan_id=plan.id,
-                        command_id=command.id,
-                        execution_attempt_id=execution_attempt_id,
-                        adapter_request_id=adapter_request_id,
-                        status=ExecutionStatus.UNKNOWN,
-                        before_state=before_state,
-                        completed_at=self.clock.now(),
-                        error=ErrorDetail(
-                            code=ErrorCode.EXECUTION_FAILED,
-                            message=(
-                                "Physical intent has an unknown outcome and needs reconciliation"
-                            ),
-                            retryable=False,
-                        ),
-                    )
-                except FencingViolation as error:
-                    if self.operational_metrics is not None:
-                        self.operational_metrics.record_fencing(
-                            "stale_rejected" if "stale" in str(error) else "lease_lost"
-                        )
-                    outcome = ExecutionOutcome(
-                        authority=plan.authority,
-                        plan_id=plan.id,
-                        command_id=command.id,
-                        execution_attempt_id=execution_attempt_id,
-                        adapter_request_id=adapter_request_id,
-                        status=ExecutionStatus.REJECTED,
-                        before_state=before_state,
-                        completed_at=self.clock.now(),
-                        error=ErrorDetail(
-                            code=ErrorCode.FENCING_VIOLATION,
-                            message="Physical write blocked by stale or missing fencing",
-                            retryable=True,
-                            details={"reason": str(error)},
-                        ),
-                    )
                 except _ControlLeaseExpired:
-                    if self.operational_metrics is not None:
-                        self.operational_metrics.record_lease("expired")
                     emergency_stop = getattr(self.control_takeover, "emergency_stop", None)
                     stop_confirmed = False
                     if callable(emergency_stop):
@@ -678,7 +518,6 @@ class PlanExecutor:
                             payload={"confirmed": stop_confirmed, "reason": "lease_expired"},
                         )
                     outcome = ExecutionOutcome(
-                        authority=plan.authority,
                         plan_id=plan.id,
                         command_id=command.id,
                         execution_attempt_id=execution_attempt_id,

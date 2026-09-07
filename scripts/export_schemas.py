@@ -14,27 +14,8 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantIdentityClaims,
 )
 from domoai.adapters.sdk import AdapterManifest
-from domoai.application.scene import SceneCommitRequest
 from domoai.config.battery_qualification import BatteryHILEvidence, HILIdentityObservation
-from domoai.domain.automation import (
-    AutomationCondition,
-    AutomationConsent,
-    AutomationEvaluation,
-    AutomationEvent,
-    AutomationRule,
-    AutomationTrigger,
-)
-from domoai.domain.commissioning import (
-    CommissioningBlocker,
-    CommissioningCandidate,
-    CommissioningCheck,
-    CommissioningEvidence,
-    CommissioningQualification,
-    CommissioningReport,
-    CommissioningRoute,
-)
-from domoai.domain.coordination import FencingToken, LeaseScope, PhysicalIntent
-from domoai.domain.digital_twin import DigitalTwinEvidence
+from domoai.domain.energy import EVChargingBinding
 from domoai.domain.models import (
     Area,
     AuditEvent,
@@ -172,9 +153,6 @@ MODELS: dict[str, type[BaseModel]] = {
     "battery-state": BatteryState,
     "battery-hil-evidence": BatteryHILEvidence,
     "hil-identity-observation": HILIdentityObservation,
-    "gateway-fencing-probe-request": GatewayFencingProbeRequest,
-    "gateway-fencing-probe-result": GatewayFencingProbeResult,
-    "multihost-qualification-evidence": MultiHostQualificationEvidence,
     "energy-provider-diagnostic": EnergyProviderDiagnostic,
     "open-meteo-solar-config": OpenMeteoSolarConfig,
     "solar-installation-profile": SolarInstallationProfile,

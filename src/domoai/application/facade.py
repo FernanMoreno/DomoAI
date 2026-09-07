@@ -29,10 +29,10 @@ class DomoticsFacade:
         plan: Plan,
         *,
         state_version_overrides: dict[str, int] | None = None,
-        aggregate_capability: AggregateExecutionCapability | None = None,
+        aggregate_owner: bool = False,
     ) -> ExecutionSummary:
         return await self.executor.execute(
             plan,
             state_version_overrides=state_version_overrides,
-            aggregate_capability=aggregate_capability,
+            aggregate_owner=aggregate_owner,
         )

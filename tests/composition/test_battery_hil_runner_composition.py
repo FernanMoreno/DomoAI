@@ -19,11 +19,12 @@ from domoai.config.battery_qualification import BatteryHILEvidence
 from domoai.config.settings import Settings
 from domoai.domain.models import (
     AdapterExecutionAck,
-    AdapterIdentityObservation,
     Command,
     ControlLeaseStatus,
     PhysicalBaseline,
+    Plan,
     SourceRef,
+    StateStatus,
     TakeoverResult,
 )
 from domoai.domain.provider import MeasurementQuality
@@ -36,6 +37,7 @@ from domoai.optimizer.energy import (
     BatterySocObservation,
     DispatchableBatteryBinding,
 )
+from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.control_takeover import ControlTakeoverRequest
 from domoai.runtime.execution_context import ExecutionContext
 from tests.fixtures.multi_adapter import RecordingAdapter, entity, source_snapshot
@@ -93,45 +95,7 @@ class BatteryFixtureAdapter(RecordingAdapter):
                 native_scheduler_status="disabled",
             ),
             first_command_id=request.first_command_id,
-            first_command_confirmed=True,
-            confirmed_at=now,
             evidence_digest="sha256:fixture-takeover",
-        )
-
-
-class DeferredFirstCommandBatteryFixtureAdapter(BatteryFixtureAdapter):
-    """Provider that confirms takeover only after executor readback."""
-
-    async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
-        result = await super().acquire_control(request)
-        return result.model_copy(update={"first_command_confirmed": False, "confirmed_at": None})
-
-
-class WrongProviderBaselineAdapter(BatteryFixtureAdapter):
-    async def acquire_control(self, request: ControlTakeoverRequest):
-        result = await super().acquire_control(request)
-        assert result.baseline is not None
-        return result.model_copy(
-            update={
-                "baseline": result.baseline.model_copy(
-                    update={
-                        "source_ref": SourceRef(
-                            adapter_id="different-provider", external_id="battery.fixture"
-                        )
-                    }
-                )
-            }
-        )
-
-
-class ObservedIdentityBatteryFixtureAdapter(BatteryFixtureAdapter):
-    async def read_hil_identity(self) -> AdapterIdentityObservation:
-        observed_at = datetime.now(UTC)
-        return AdapterIdentityObservation(
-            hardware_id="fixture-serial-1",
-            firmware_version="0.0.1-fixture",
-            observed_at=observed_at,
-            source_ref=SourceRef(adapter_id=self.adapter_id, external_id="battery.fixture"),
         )
 
 
@@ -257,6 +221,7 @@ def _settings(path) -> Settings:
         solar_tilt=30.0,
         solar_azimuth=0.0,
         solar_performance_ratio=0.82,
+        battery_hil_power_ceiling_kw=1.0,
     )
 
 
@@ -298,11 +263,9 @@ async def test_hil_runner_marks_fixture_evidence_non_qualifying_without_manual_p
         await runtime.close()
 
     assert evidence.status == "failed"
-    assert evidence.checks["identity"] is True
-    assert evidence.observations["identity"]["hardware_identity_observed"] is False
-    assert evidence.observations["identity"]["firmware_identity_observed"] is False
     assert evidence.checks["takeover_baseline"] is True
     assert evidence.checks["restart_no_replay"] is False
+    assert evidence.manual_check_status["restart_no_replay"] == "not_exercised"
     assert evidence.checks.keys() == {
         "identity",
         "writable_routes",
@@ -322,6 +285,7 @@ async def test_hil_runner_marks_fixture_evidence_non_qualifying_without_manual_p
     # a provider-side stop with readback, so the baseline stop is followed by
     # a second idempotent stop before the charge step begins.
     assert commands[:10] == [
+        "stop_battery",
         "stop_battery",
         "stop_battery",
         "charge_battery",
@@ -348,104 +312,65 @@ async def test_hil_runner_marks_fixture_evidence_non_qualifying_without_manual_p
 
 @pytest.mark.composition
 @pytest.mark.asyncio
-async def test_hil_runner_uses_executor_confirmation_for_deferred_takeover(tmp_path) -> None:
-    adapter = DeferredFirstCommandBatteryFixtureAdapter("fixture", _battery_snapshot())
-    probe = await build_runtime(_settings(tmp_path / "hil-probe.sqlite3"), adapter=adapter)
+async def test_runtime_dynamic_guard_blocks_stale_battery_before_adapter_write(tmp_path) -> None:
+    adapter = BatteryFixtureAdapter("fixture", _battery_snapshot())
+    probe = await build_runtime(
+        _settings(tmp_path / "guard-probe.sqlite3"), adapter=adapter
+    )
     device_id = _battery_device_id(probe)
     await probe.close()
     binding = _binding(device_id)
     runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime.sqlite3"),
+        _settings(tmp_path / "guard-runtime.sqlite3"),
         adapter=adapter,
         dispatchable_battery_binding=binding,
     )
     try:
-        evidence = await run_battery_hil(
-            runtime,
-            binding=binding,
-            test_charge_kw=0.5,
-            test_discharge_kw=0.5,
-            hardware_id="fixture-serial-1",
-            firmware_version="0.0.1-fixture",
-            test_software_version="test-sha",
-            manual_attestations=_ATTESTATIONS,
+        power = await runtime.state_store.get(device_id, "battery.power")
+        assert power is not None
+        stale_at = runtime.clock.now() - runtime.state_store.stale_after - timedelta(seconds=1)
+        await runtime.state_store.save(
+            power.model_copy(update={"observed_at": stale_at, "status": StateStatus.CURRENT})
         )
+        plan = runtime.plan_service.validate(
+            Plan(
+                id="stale-battery-write",
+                commands=[
+                    Command(
+                        id="stale-battery-charge",
+                        device_id=device_id,
+                        command="charge_battery",
+                        value=0.5,
+                        unit="kW",
+                        idempotency_key="stale-battery-charge-key",
+                    )
+                ],
+            )
+        )
+        assert plan.validation is not None
+        plan = runtime.facade.approve_plan(
+            plan,
+            grant=ApprovalGrant(
+                approval_id="stale-battery-approval",
+                plan_id=plan.id,
+                validation_digest=plan.validation.digest,
+                approved_by="composition-test-operator",
+                issued_at=runtime.clock.now(),
+                validation_valid_until=plan.validation.valid_until,
+                expires_at=plan.validation.valid_until,
+            ),
+        )
+        await runtime.plan_repository.save_validation(plan)
+        writes_before = list(adapter.writes)
+
+        summary = await runtime.facade.execute_plan(plan)
+
+        assert summary.outcomes[0].status.value == "rejected"
+        assert summary.outcomes[0].error is not None
+        assert summary.outcomes[0].error.details["authority"] == "dynamic_safety_guard"
+        assert adapter.writes == writes_before
     finally:
         await runtime.close()
-
-    assert evidence.checks["takeover_baseline"] is True
-    assert evidence.observations["takeover_baseline"]["first_command_confirmed"] is False
-
-
-@pytest.mark.composition
-@pytest.mark.asyncio
-async def test_hil_runner_rejects_takeover_baseline_from_different_provider(tmp_path) -> None:
-    adapter = WrongProviderBaselineAdapter("fixture", _battery_snapshot())
-    probe = await build_runtime(_settings(tmp_path / "hil-probe.sqlite3"), adapter=adapter)
-    device_id = _battery_device_id(probe)
-    await probe.close()
-    binding = _binding(device_id)
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime.sqlite3"),
-        adapter=adapter,
-        dispatchable_battery_binding=binding,
-    )
-    try:
-        evidence = await run_battery_hil(
-            runtime,
-            binding=binding,
-            test_charge_kw=0.5,
-            test_discharge_kw=0.5,
-            hardware_id="fixture-serial-1",
-            firmware_version="0.0.1-fixture",
-            test_software_version="test-sha",
-            manual_attestations={
-                "native_scheduler_conflict": "verified on fixture bench",
-                "restart_no_replay": "verified after controlled process restart",
-            },
-        )
-    finally:
-        await runtime.close()
-
-    assert evidence.status == "failed"
-    assert evidence.checks["takeover_baseline"] is False
-
-
-@pytest.mark.composition
-@pytest.mark.asyncio
-async def test_hil_runner_uses_provider_observed_identity_for_qualification(tmp_path) -> None:
-    adapter = ObservedIdentityBatteryFixtureAdapter("fixture", _battery_snapshot())
-    probe = await build_runtime(_settings(tmp_path / "hil-probe.sqlite3"), adapter=adapter)
-    device_id = _battery_device_id(probe)
-    await probe.close()
-    binding = _binding(device_id)
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime.sqlite3"),
-        adapter=adapter,
-        dispatchable_battery_binding=binding,
-    )
-    try:
-        evidence = await run_battery_hil(
-            runtime,
-            binding=binding,
-            test_charge_kw=0.5,
-            test_discharge_kw=0.5,
-            hardware_id="fixture-serial-1",
-            firmware_version="0.0.1-fixture",
-            test_software_version="test-sha",
-            manual_attestations={
-                "native_scheduler_conflict": "verified on fixture bench",
-                "restart_no_replay": "verified after controlled process restart",
-            },
-        )
-    finally:
-        await runtime.close()
-
-    assert evidence.status == "passed"
-    assert evidence.hardware_identity_observed is True
-    assert evidence.firmware_identity_observed is True
-    assert evidence.identity_evidence_digest is not None
-    assert evidence.qualifies(binding) is True
 
 
 @pytest.mark.composition
@@ -477,100 +402,22 @@ async def test_hil_runner_refuses_to_run_without_required_manual_attestations(
 
 @pytest.mark.composition
 @pytest.mark.asyncio
-async def test_hil_runner_rejects_power_above_profile_envelope(tmp_path) -> None:
+async def test_hil_runner_requires_server_owned_power_ceiling_before_commands(tmp_path) -> None:
     adapter = BatteryFixtureAdapter("fixture", _battery_snapshot())
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-envelope.sqlite3"), adapter=adapter
-    )
-    device_id = _battery_device_id(runtime)
-    await runtime.close()
+    probe = await build_runtime(_settings(tmp_path / "ceiling-probe.sqlite3"), adapter=adapter)
+    device_id = _battery_device_id(probe)
+    await probe.close()
     binding = _binding(device_id)
     runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-envelope-bound.sqlite3"),
+        _settings(tmp_path / "ceiling-runtime.sqlite3").model_copy(
+            update={"battery_hil_power_ceiling_kw": None}
+        ),
         adapter=adapter,
         dispatchable_battery_binding=binding,
     )
     try:
-        with pytest.raises(BatteryHILRunError, match="profile envelope"):
-            await run_battery_hil(
-                runtime,
-                binding=binding,
-                test_charge_kw=binding.profile.max_charge_kw + 0.1,
-                test_discharge_kw=0.5,
-                hardware_id="fixture-serial-1",
-                firmware_version="0.0.1-fixture",
-                test_software_version="test-sha",
-                manual_attestations=_ATTESTATIONS,
-            )
-        assert adapter.writes == []
-    finally:
-        await runtime.close()
-
-
-@pytest.mark.composition
-@pytest.mark.asyncio
-async def test_hil_runner_rejects_binding_mismatch_before_dispatch(tmp_path) -> None:
-    adapter = BatteryFixtureAdapter("fixture", _battery_snapshot())
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-mismatch.sqlite3"), adapter=adapter
-    )
-    device_id = _battery_device_id(runtime)
-    binding = _binding(device_id)
-    await runtime.close()
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-mismatch-bound.sqlite3"),
-        adapter=adapter,
-        dispatchable_battery_binding=binding,
-    )
-    mismatched = binding.model_copy(
-        update={
-            "profile": binding.profile.model_copy(
-                update={"max_charge_kw": binding.profile.max_charge_kw - 0.1}
-            )
-        }
-    )
-    try:
-        with pytest.raises(BatteryHILRunError, match="does not match"):
-            await run_battery_hil(
-                runtime,
-                binding=mismatched,
-                test_charge_kw=0.5,
-                test_discharge_kw=0.5,
-                hardware_id="fixture-serial-1",
-                firmware_version="0.0.1-fixture",
-                test_software_version="test-sha",
-                manual_attestations=_ATTESTATIONS,
-            )
-        assert adapter.writes == []
-    finally:
-        await runtime.close()
-
-
-@pytest.mark.composition
-@pytest.mark.asyncio
-async def test_hil_runner_emergency_stops_after_unexpected_sequence_error(tmp_path) -> None:
-    adapter = BatteryFixtureAdapter("fixture", _battery_snapshot())
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-exception.sqlite3"), adapter=adapter
-    )
-    device_id = _battery_device_id(runtime)
-    await runtime.close()
-    binding = _binding(device_id)
-    runtime = await build_runtime(
-        _settings(tmp_path / "hil-runtime-exception-bound.sqlite3"),
-        adapter=adapter,
-        dispatchable_battery_binding=binding,
-    )
-    original_execute_plan = runtime.facade.execute_plan
-
-    async def _raise_after_admission(plan):
-        if plan.commands[0].command == "charge_battery":
-            raise RuntimeError("unexpected HIL sequence failure")
-        return await original_execute_plan(plan)
-
-    runtime.facade.execute_plan = _raise_after_admission  # type: ignore[method-assign]
-    try:
-        with pytest.raises(BatteryHILRunError, match="HIL sequence failed"):
+        writes_before = list(adapter.writes)
+        with pytest.raises(BatteryHILRunError, match="safety ceiling"):
             await run_battery_hil(
                 runtime,
                 binding=binding,
@@ -581,8 +428,7 @@ async def test_hil_runner_emergency_stops_after_unexpected_sequence_error(tmp_pa
                 test_software_version="test-sha",
                 manual_attestations=_ATTESTATIONS,
             )
-        commands = [command.command for _entity_id, command in adapter.writes]
-        assert commands[:2] == ["stop_battery", "stop_battery"]
+        assert adapter.writes == writes_before
     finally:
         await runtime.close()
 

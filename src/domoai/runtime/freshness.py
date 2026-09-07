@@ -64,12 +64,11 @@ class FreshnessEvaluator:
                 None,
                 source_revision=source_revision,
             )
-        now = self.clock.now()
-        age_seconds = (now - snapshot.received_at).total_seconds()
+        age_seconds = max(0.0, (self.clock.now() - snapshot.observed_at).total_seconds())
         if snapshot.status is StateStatus.UNAVAILABLE:
             return FreshnessDecision(
                 False,
-                "evidence_unavailable",
+                "unavailable_evidence",
                 snapshot,
                 age_seconds=age_seconds,
                 source_revision=source_revision,
@@ -77,15 +76,30 @@ class FreshnessEvaluator:
         if snapshot.status is StateStatus.INVALID:
             return FreshnessDecision(
                 False,
-                "evidence_invalid",
+                "invalid_evidence",
                 snapshot,
                 age_seconds=age_seconds,
                 source_revision=source_revision,
             )
-        if age_seconds < 0 or snapshot.observed_at > now:
+        if snapshot.status is StateStatus.STALE:
+            if (
+                snapshot.value == precondition.expected
+                and precondition.allow_stale
+                and policy_decision is not None
+                and policy_decision.allows_stale
+                and policy_decision.action.value in {"allow", "confirm"}
+            ):
+                return FreshnessDecision(
+                    True,
+                    "stale_evidence_explicitly_allowed",
+                    snapshot,
+                    stale_exception=True,
+                    age_seconds=age_seconds,
+                    source_revision=source_revision,
+                )
             return FreshnessDecision(
                 False,
-                "future_observation",
+                "stale_evidence_not_authorized",
                 snapshot,
                 age_seconds=age_seconds,
                 source_revision=source_revision,
@@ -111,21 +125,6 @@ class FreshnessEvaluator:
                 True,
                 "current_evidence",
                 snapshot,
-                age_seconds=age_seconds,
-                source_revision=source_revision,
-            )
-        if (
-            snapshot.status is StateStatus.STALE
-            and precondition.allow_stale
-            and policy_decision is not None
-            and policy_decision.allows_stale
-            and policy_decision.action.value in {"allow", "confirm"}
-        ):
-            return FreshnessDecision(
-                True,
-                "stale_evidence_explicitly_allowed",
-                snapshot,
-                stale_exception=True,
                 age_seconds=age_seconds,
                 source_revision=source_revision,
             )

@@ -62,8 +62,6 @@ class DiscoveryService:
         # making an observation appear newer merely because the two services
         # were constructed with different clocks.
         self.clock = clock or state_store.clock or SystemClock()
-        self._refresh_lock = asyncio.Lock()
-        self._last_read_results: tuple[EntityReadResult, ...] = ()
 
     @property
     def last_read_results(self) -> tuple[EntityReadResult, ...]:

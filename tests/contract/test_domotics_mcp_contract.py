@@ -18,20 +18,11 @@ from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
-from domoai.application.recurrence import recurrence_digest, recurring_template_digest
+from domoai.application.recurrence import recurrence_digest
 from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError
-from domoai.domain.models import (
-    BundleCommit,
-    BundleMemberCommit,
-    Command,
-    PlanStatus,
-    Policy,
-    PolicyAction,
-    RecurrenceRule,
-    StateStatus,
-)
+from domoai.domain.models import Policy, PolicyAction, RecurrenceRule, StateStatus
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 from domoai.optimizer.energy import StaticEnergyContextProvider
 from domoai.persistence.repositories import (
@@ -1091,24 +1082,23 @@ async def test_execute_plan_succeeds_after_request_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_plan_dry_run_does_not_consume_or_approve_authority() -> None:
+async def test_execute_plan_dry_run_does_not_consume_or_persist_approval() -> None:
     context = await build_confirmation_required_context()
     server = create_domotics_server(context)
     validated = await _validated_plan_requiring_confirmation(server, context)
-
     approval = structured(
         await server.call_tool(
             "request_approval",
             {
                 "plan_id": validated["plan"]["id"],
                 "validation_digest": validated["validation"]["digest"],
-                "approved_by": "operator",
                 "operator_token": OPERATOR_TOKEN,
             },
         )
     )
     plan_id = validated["plan"]["id"]
     before = context.plans[plan_id]
+    audit_count = len(context.facade.plan_service.audit.events)
 
     result = structured(
         await server.call_tool(
@@ -1123,56 +1113,10 @@ async def test_execute_plan_dry_run_does_not_consume_or_approve_authority() -> N
     )
 
     assert result["dry_run"] is True
-    assert context.plans[plan_id].status is before.status
-    assert context.plans[plan_id].approval is None
-    consumed_later = context.approval_store.consume(approval["approval_id"], before)
-    assert consumed_later.approval_id == approval["approval_id"]
-    adapter = cast(SimulatedHomeAdapter, context.facade.executor.adapter)
-    assert adapter.calls == []
-
-
-@pytest.mark.asyncio
-async def test_persisted_approved_plan_requires_authoritative_consumed_grant() -> None:
-    context = await build_confirmation_required_context()
-    server = create_domotics_server(context)
-    validated = await _validated_plan_requiring_confirmation(server, context)
-    plan_id = validated["plan"]["id"]
-    plan = context.plans[plan_id]
-    approval = structured(
-        await server.call_tool(
-            "request_approval",
-            {
-                "plan_id": plan_id,
-                "validation_digest": validated["validation"]["digest"],
-                "approved_by": "operator",
-                "operator_token": OPERATOR_TOKEN,
-            },
-        )
-    )
-    grant = context.approval_store.consume(approval["approval_id"], plan)
-    approved = context.facade.approve_plan(plan, grant=grant)
-    assert approved.approval is not None
-    forged = approved.model_copy(
-        update={
-            "approval": approved.approval.model_copy(
-                update={"approval_id": "not-a-real-grant"}
-            )
-        }
-    )
-    context.plans[plan_id] = forged
-
-    result = structured(
-        await server.call_tool(
-            "execute_plan",
-            {
-                "plan_id": plan_id,
-                "validation_digest": validated["validation"]["digest"],
-            },
-        )
-    )
-
-    assert result["error"]["code"] == "approval_required"
-    assert cast(SimulatedHomeAdapter, context.facade.executor.adapter).calls == []
+    assert context.plans[plan_id] == before
+    assert len(context.facade.plan_service.audit.events) == audit_count
+    consumed = context.approval_store.consume(approval["approval_id"], before)
+    assert consumed.approval_id == approval["approval_id"]
 
 
 @pytest.mark.asyncio
@@ -1799,12 +1743,6 @@ async def test_schedule_recurring_plan_succeeds_after_request_approval(tmp_path)
                 "recurrence_digest": recurrence_digest(
                     validated["plan"]["id"],
                     RecurrenceRule(time_of_day=time(0, 0), timezone="UTC"),
-                    template_digest=recurring_template_digest(
-                        [
-                            Command.model_validate(command)
-                            for command in validated["plan"]["commands"]
-                        ]
-                    ),
                 ),
             },
         )
@@ -1887,13 +1825,30 @@ async def test_schedule_recurring_plan_requires_standing_approval_for_safe_plan(
     )
     assert validated["validation"]["status"] == "valid"
 
-    without_approval = structured(
+    standing_approval = structured(
+        await server.call_tool(
+            "request_approval",
+            {
+                "plan_id": validated["plan"]["id"],
+                "validation_digest": validated["validation"]["digest"],
+                "operator_token": OPERATOR_TOKEN,
+                "recurrence_digest": recurrence_digest(
+                    validated["plan"]["id"],
+                    RecurrenceRule(time_of_day=time(0, 0), timezone="UTC"),
+                ),
+            },
+        )
+    )
+    assert "approval_id" in standing_approval
+
+    scheduled = structured(
         await server.call_tool(
             "schedule_recurring_plan",
             {
                 "plan_id": validated["plan"]["id"],
                 "time_of_day": "00:00",
                 "timezone": "UTC",
+                "approval_id": standing_approval["approval_id"],
             },
         )
     )

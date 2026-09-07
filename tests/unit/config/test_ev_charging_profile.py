@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -5,78 +7,42 @@ import pytest
 
 from domoai.config.ev_charging_profile import (
     EVChargingProfileConfigurationError,
-    load_ev_charging_binding,
     load_ev_charging_bindings,
 )
-from domoai.domain.energy import EVChargingBinding
 
 
-def _binding_payload() -> dict[str, object]:
+def _payload() -> dict[str, object]:
     return {
-        "provider_id": "ev_fixture",
-        "device_id": "ev.home",
-        "actuator": {
-            "device_id": "ev.home",
-            "capability": "ev_charging",
-            "charge_command": "charge_ev",
-            "stop_command": "stop_ev",
-            "connected_capability": "ev.connected",
-            "departure_capability": "ev.departure_at",
-            "max_charge_kw": 7.4,
-        },
+        "schema_version": "v1",
+        "provider_id": "fixture_ev",
+        "device_id": "ev.garage",
+        "capability": "ev.charge_power",
+        "charge_command": "set_charge_power",
+        "stop_command": "stop_charging",
+        "connected_capability": "ev.connected",
         "soc_capability": "ev.soc",
-        "capacity_capability": "ev.capacity",
+        "power_feedback_capability": "ev.power",
+        "departure_capability": "ev.departure_at",
+        "capacity_kwh": 60.0,
+        "max_charge_kw": 7.4,
     }
 
 
-def test_load_ev_charging_binding_round_trips_valid_document(tmp_path: Path) -> None:
-    path = tmp_path / "ev-charging-binding.json"
-    path.write_text(json.dumps(_binding_payload()), encoding="utf-8")
-
-    binding = load_ev_charging_binding(path)
-
-    assert isinstance(binding, EVChargingBinding)
-    assert binding.device_id == "ev.home"
-    assert binding.actuator.max_charge_kw == 7.4
-
-
-def test_load_ev_charging_bindings_accepts_server_owned_collection(tmp_path: Path) -> None:
-    path = tmp_path / "ev-charging-bindings.json"
-    path.write_text(json.dumps({"bindings": [_binding_payload()]}), encoding="utf-8")
+def test_load_ev_charging_binding_from_server_owned_json(tmp_path: Path) -> None:
+    path = tmp_path / "ev-charging.json"
+    path.write_text(json.dumps({"bindings": [_payload()]}), encoding="utf-8")
 
     bindings = load_ev_charging_bindings(path)
 
     assert len(bindings) == 1
-    assert bindings[0].device_id == "ev.home"
+    assert bindings[0].device_id == "ev.garage"
 
 
-def test_load_ev_charging_binding_rejects_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(EVChargingProfileConfigurationError):
-        load_ev_charging_binding(tmp_path / "missing.json")
-
-
-def test_load_ev_charging_binding_rejects_invalid_json(tmp_path: Path) -> None:
-    path = tmp_path / "invalid.json"
-    path.write_text("not json", encoding="utf-8")
+def test_invalid_ev_charging_profile_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "ev-charging-invalid.json"
+    path.write_text(
+        json.dumps({"bindings": [{**_payload(), "max_charge_kw": 0}]}), encoding="utf-8"
+    )
 
     with pytest.raises(EVChargingProfileConfigurationError):
-        load_ev_charging_binding(path)
-
-
-def test_load_ev_charging_binding_rejects_schema_violation(tmp_path: Path) -> None:
-    payload = _binding_payload()
-    del payload["actuator"]
-    path = tmp_path / "incomplete.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(EVChargingProfileConfigurationError):
-        load_ev_charging_binding(path)
-
-
-def test_lab_ev_profile_asset_is_valid_simulation_profile() -> None:
-    from domoai.lab.ev_charging_simulator import EVChargingSimulationProfile
-
-    payload = json.loads(Path("dev/lab/ev-charger/profile.json").read_text(encoding="utf-8"))
-    profile = EVChargingSimulationProfile.from_dict(payload)
-
-    assert profile.device_id == "lab-ev-1"
+        load_ev_charging_bindings(path)

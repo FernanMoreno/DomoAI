@@ -33,7 +33,7 @@ def test_knx_gateway_discovery_and_tunnel_are_live() -> None:
     if os.getenv("DOMOAI_LIVE_BATTERY_KNX_GATEWAY_ENABLE") != "1":
         pytest.skip("set DOMOAI_LIVE_BATTERY_KNX_GATEWAY_ENABLE=1 for the real KNX gateway")
 
-    host = os.getenv("DOMOAI_KNX_GATEWAY_HOST", "127.0.0.1")
+    host = os.getenv("DOMOAI_KNX_GATEWAY_HOST", "172.26.80.1")
     port = int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3672"))
     response = _search_gateway(host, port)
 

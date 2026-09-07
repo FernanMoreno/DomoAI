@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -39,7 +39,6 @@ from domoai.application.commissioning import (
 from domoai.application.coordination import FencingGuard
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.dynamic_safety import DynamicSafetyGuard
-from domoai.application.etcd_coordination import build_external_lease_coordinator
 from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
@@ -59,17 +58,14 @@ from domoai.config.battery_qualification import (
     BatteryQualificationError,
     load_battery_hil_evidence,
 )
-from domoai.config.ev_charging_profile import load_ev_charging_binding
+from domoai.config.ev_charging_profile import load_ev_charging_bindings
 from domoai.config.policy_loader import load_policy_file
 from domoai.config.risk_classification import load_risk_overrides_file
 from domoai.config.safety_kernel_loader import load_safety_limits_file
 from domoai.config.settings import Settings
 from domoai.config.solar_profile import resolve_solar_profile
-from domoai.domain.commissioning import CommissioningReport
-from domoai.domain.coordination import FencingToken, LeaseCoordinator, LeaseScope
-from domoai.domain.energy import DispatchableBatteryBinding, EVActuator, EVChargingBinding
-from domoai.domain.models import AuthorityContext, Plan, PrincipalRole
-from domoai.domain.multihost_qualification import load_multihost_qualification_evidence
+from domoai.domain.energy import DispatchableBatteryBinding, EVChargingBinding
+from domoai.domain.models import Plan
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
     OpenMeteoHttpClient,
@@ -118,13 +114,7 @@ from domoai.runtime.approval_store import (
 )
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.composite_adapter import CompositeAdapter
-from domoai.runtime.control_takeover import (
-    BatteryControlCoordinator,
-    ControlSupervisorPort,
-    ControlTakeoverAdapter,
-    ControlTakeoverGroup,
-    EVControlCoordinator,
-)
+from domoai.runtime.control_takeover import BatteryControlCoordinator, ControlTakeoverAdapter
 from domoai.runtime.events import AuditLog
 from domoai.runtime.instance import InstanceIdentity
 from domoai.runtime.mqtt_transport import AiomqttTransport
@@ -144,15 +134,12 @@ def create_adapter(
     provider_registry: ProviderRegistry | None = None,
     clock: Clock | None = None,
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
-    ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
-    require_configured_adapter: bool = False,
 ) -> AdapterPort:
     adapters = _create_configured_adapters(
         settings,
         provider_registry=provider_registry,
         clock=clock,
         dispatchable_battery_binding=dispatchable_battery_binding,
-        ev_charging_bindings=ev_charging_bindings,
     )
     if not adapters:
         if require_configured_adapter:
@@ -173,146 +160,12 @@ def create_adapter(
 def _select_control_adapter(adapter: AdapterPort, provider_id: str) -> ControlTakeoverAdapter:
     """Route provider-specific takeover through a composite child."""
 
-    candidate = _select_provider_adapter(adapter, provider_id)
-    if not callable(getattr(candidate, "acquire_control", None)):
-        raise ValueError(f"Battery provider {provider_id!r} does not expose the takeover contract")
-    return cast(ControlTakeoverAdapter, candidate)
-
-
-def _select_provider_adapter(adapter: AdapterPort, provider_id: str) -> AdapterPort:
-    """Resolve one concrete adapter for a server-owned provider identity."""
-
-    candidate: object | None = None
     if getattr(adapter, "adapter_id", None) == provider_id:
-        candidate = adapter
+        return cast(ControlTakeoverAdapter, adapter)
     for child in getattr(adapter, "adapters", ()):
         if getattr(child, "adapter_id", None) == provider_id:
-            if candidate is not None:
-                raise ValueError(f"Multiple adapters match battery provider {provider_id!r}")
-            candidate = child
-    if candidate is None:
-        raise ValueError(
-            f"Provider {provider_id!r} is not configured as a concrete runtime adapter"
-        )
-    return cast(AdapterPort, candidate)
-
-
-async def _close_partial_runtime_build(
-    *,
-    adapter: AdapterPort | None,
-    ownership: RuntimeOwnership | None,
-    energy_closers: tuple[Callable[[], None], ...],
-    storage: SerializedStorageExecutor | None,
-    audit_storage: SerializedStorageExecutor | None,
-    database: SQLiteDatabase | None,
-    approval_database: SQLiteDatabase | None,
-    audit_database: SQLiteDatabase | None,
-    lease_coordinator: LeaseCoordinator | None = None,
-    coordination_token: FencingToken | None = None,
-    household_work_queues: HouseholdWorkQueues | None = None,
-) -> None:
-    """Release resources acquired before a runtime build was interrupted."""
-
-    async def attempt(action: Callable[[], object]) -> None:
-        try:
-            result = action()
-            if asyncio.iscoroutine(result):
-                await result
-        except BaseException:
-            # Preserve the original startup failure. Cleanup is best effort
-            # here, while each normal RuntimeComposition.close() path still
-            # reports its own failure to the caller.
-            return
-
-    if adapter is not None:
-        await attempt(adapter.disconnect)
-    if ownership is not None:
-        await attempt(ownership.release)
-    if lease_coordinator is not None and coordination_token is not None:
-        await attempt(lambda: lease_coordinator.release(coordination_token))
-    close_coordinator = getattr(lease_coordinator, "aclose", None)
-    if callable(close_coordinator):
-        await attempt(close_coordinator)
-    if household_work_queues is not None:
-        await attempt(household_work_queues.close)
-    for close in energy_closers:
-        await attempt(close)
-    if storage is not None:
-        await attempt(storage.close)
-    if audit_storage is not None:
-        await attempt(audit_storage.close)
-    if database is not None:
-        await attempt(database.close)
-    if approval_database is not None:
-        await attempt(approval_database.close)
-    if audit_database is not None:
-        await attempt(audit_database.close)
-
-
-@dataclass
-class _PartialRuntimeBuild:
-    """Track every resource acquired before RuntimeComposition takes ownership."""
-
-    adapter: AdapterPort | None = None
-    ownership: RuntimeOwnership | None = None
-    energy_closers: tuple[Callable[[], None], ...] = ()
-    storage: SerializedStorageExecutor | None = None
-    audit_storage: SerializedStorageExecutor | None = None
-    database: SQLiteDatabase | None = None
-    approval_database: SQLiteDatabase | None = None
-    audit_database: SQLiteDatabase | None = None
-    lease_coordinator: LeaseCoordinator | None = None
-    coordination_token: FencingToken | None = None
-    household_work_queues: HouseholdWorkQueues | None = None
-    active: bool = True
-
-    async def close(self) -> None:
-        if not self.active:
-            return
-        self.active = False
-        await _close_partial_runtime_build(
-            adapter=self.adapter,
-            ownership=self.ownership,
-            energy_closers=self.energy_closers,
-            storage=self.storage,
-            audit_storage=self.audit_storage,
-            database=self.database,
-            approval_database=self.approval_database,
-            audit_database=self.audit_database,
-            lease_coordinator=self.lease_coordinator,
-            coordination_token=self.coordination_token,
-            household_work_queues=self.household_work_queues,
-        )
-
-
-async def _close_partial_runtime_build_safely(cleanup: _PartialRuntimeBuild) -> None:
-    """Drain startup cleanup even when cancellation is delivered repeatedly."""
-
-    cleanup_task = asyncio.create_task(cleanup.close())
-    while not cleanup_task.done():
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            continue
-    cleanup_task.result()
-
-
-def _matching_home_assistant_ev_mappings(
-    mapping_document: HomeAssistantMappingDocument,
-    bindings: tuple[EVChargingBinding, ...],
-) -> dict[str, HomeAssistantEVChargingBinding]:
-    """Select only HA route declarations for active canonical EV bindings."""
-
-    mapping_bindings = getattr(mapping_document, "ev_charging_bindings", {})
-    active_device_ids = {
-        binding.device_id for binding in bindings if binding.provider_id == "home_assistant"
-    }
-    return {
-        str(binding_id): binding
-        for binding_id, binding in mapping_bindings.items()
-        if binding.device_id in active_device_ids
-        or binding.canonical_device_id in active_device_ids
-    }
+            return cast(ControlTakeoverAdapter, child)
+    return cast(ControlTakeoverAdapter, adapter)
 
 
 def _create_configured_adapters(
@@ -321,7 +174,6 @@ def _create_configured_adapters(
     provider_registry: ProviderRegistry | None = None,
     clock: Clock | None = None,
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
-    ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
 ) -> list[AdapterPort]:
     adapters: list[AdapterPort] = []
     has_url = settings.home_assistant_url is not None
@@ -348,19 +200,13 @@ def _create_configured_adapters(
             battery_capacity_bindings=(
                 mapping_document.battery_capacity_bindings if mapping_document else None
             ),
-            battery_dispatch_bindings=(
-                mapping_document.battery_dispatch_bindings
-                if mapping_document is not None
-                and dispatchable_battery_binding is not None
-                and dispatchable_battery_binding.provider_id == "home_assistant"
-                else None
-            ),
-            ev_charging_bindings=(
-                _matching_home_assistant_ev_mappings(mapping_document, ev_charging_bindings)
-                if mapping_document is not None
-                and any(binding.provider_id == "home_assistant" for binding in ev_charging_bindings)
-                else None
-            ),
+                battery_dispatch_bindings=(
+                    mapping_document.battery_dispatch_bindings
+                    if mapping_document is not None
+                    and dispatchable_battery_binding is not None
+                    and dispatchable_battery_binding.provider_id == "home_assistant"
+                    else None
+                ),
             clock=clock,
         )
         if provider_registry is not None:
@@ -603,19 +449,9 @@ class RuntimeComposition:
     operator_principal_provider: OperatorPrincipalProvider | None = None
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None
     battery_qualification: str = "unsupported"
-    battery_operational_status: str = "unconfigured"
-    bootstrap_manifest: RuntimeBootstrapManifest | None = None
-    commissioning_service: CommissioningService | None = None
-    commissioning_report: CommissioningReport | None = None
-    qualification_repository: CommissioningQualificationRepository | None = None
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None
-    ev_actuators: tuple[EVActuator, ...] = ()
     battery_control_coordinator: BatteryControlCoordinator | None = None
-    ev_control_coordinators: tuple[EVControlCoordinator, ...] = ()
-    control_supervisor: ControlSupervisorPort | None = None
-    lease_coordinator: LeaseCoordinator | None = None
-    coordination_token: FencingToken | None = None
-    fencing_guard: FencingGuard | None = None
+    ev_charging_bindings: tuple[EVChargingBinding, ...] = ()
     blocking_workers: list[ClosableWorker] = field(default_factory=list)
     ownership: RuntimeOwnership | None = None
     lifecycle: RuntimeLifecycle = field(init=False, repr=False)
@@ -701,48 +537,6 @@ class RuntimeComposition:
                 )
             await asyncio.sleep(interval)
 
-    async def run_control_supervisor(self) -> None:
-        """Supervise every configured latched actuator in this composition."""
-
-        supervisor = self.control_supervisor
-        if supervisor is None:
-            return
-        policies = [
-            getattr(coordinator, "policy", None)
-            for coordinator in getattr(supervisor, "coordinators", (supervisor,))
-        ]
-        lease_seconds = [float(policy.lease_seconds) for policy in policies if policy is not None]
-        interval = min(max(min(lease_seconds, default=300.0) / 4, 0.25), 30.0)
-        while True:
-            stopped = await supervisor.supervise_once()
-            for plan_id in stopped:
-                self.audit.append(
-                    event_type="control_supervisor_lease_stop",
-                    actor="runtime",
-                    subject_id=plan_id,
-                    payload={"reason": "lease_renewal_unavailable_or_failed"},
-                )
-            await asyncio.sleep(interval)
-
-    async def run_coordination_supervisor(self) -> None:
-        coordinator = self.lease_coordinator
-        guard = self.fencing_guard
-        token = self.coordination_token
-        if coordinator is None or guard is None or token is None:
-            return
-        interval = min(max(self.settings.coordination_lease_seconds / 3, 0.25), 30.0)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                token = await coordinator.renew(token)
-                guard.replace_token(token)
-                self.coordination_token = token
-                self.operational_metrics.record_fencing("renewed")
-            except BaseException:
-                guard.mark_lost()
-                self.operational_metrics.record_fencing("renewal_failed")
-                return
-
     async def close(self) -> None:
         await self.lifecycle.close()
         try:
@@ -811,8 +605,7 @@ async def build_runtime(
     adapter: AdapterPort | None = None,
     energy_context_provider: EnergyContextProvider | None = None,
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
-    ev_actuators: tuple[EVActuator, ...] = (),
-    ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
+    ev_charging_bindings: Sequence[EVChargingBinding] | None = None,
     operator_principal_provider: OperatorPrincipalProvider | None = None,
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     clock: Clock | None = None,
@@ -917,29 +710,16 @@ async def _build_runtime(
             "battery dispatch binding must be supplied either by profile path or argument"
         )
     dispatchable_battery_binding = configured_battery_binding or dispatchable_battery_binding
-    # Spec 162 convergence: mirrors the battery pattern above, but plural
-    # (a household can have more than one EV, unlike the single dispatchable
-    # battery) -- loaded bindings are concatenated with any explicitly
-    # supplied ones so mcp/stdio.py's argument-free build_configured_server()
-    # call can reach a configured charger via environment alone.
-    ev_charging_bindings = tuple(ev_charging_bindings) + tuple(
-        load_ev_charging_binding(path) for path in resolved_settings.ev_charging_binding_paths
+    configured_ev_bindings = (
+        load_ev_charging_bindings(resolved_settings.ev_charging_profile_path)
+        if resolved_settings.ev_charging_profile_path is not None
+        else None
     )
-    # An EV charging binding is the server-owned authority for both the
-    # provider-observed planning state and the corresponding physical command
-    # surface.  Keeping the actuator only in the separate optional argument
-    # would let a configured gateway plan an EV while silently omitting the
-    # JIT write guard and command allowlist.  Derive the actuator view from
-    # every binding so settings-driven MCP/stdio deployments cannot lose that
-    # boundary between configuration and execution.
-    ev_actuators = tuple(ev_actuators) + tuple(binding.actuator for binding in ev_charging_bindings)
-    ev_device_ids = [actuator.device_id for actuator in ev_actuators]
-    if len(ev_device_ids) != len(set(ev_device_ids)):
-        raise ValueError("EV actuator bindings must target distinct devices")
-    if dispatchable_battery_binding is not None and (
-        dispatchable_battery_binding.device_id in set(ev_device_ids)
-    ):
-        raise ValueError("a device cannot be bound as both battery and EV actuator")
+    if configured_ev_bindings is not None and ev_charging_bindings is not None:
+        raise ValueError("EV charging bindings must be supplied either by profile path or argument")
+    ev_charging_bindings = tuple(configured_ev_bindings or ev_charging_bindings or ())
+    if len({binding.device_id for binding in ev_charging_bindings}) != len(ev_charging_bindings):
+        raise ValueError("EV charging bindings must identify unique devices")
     battery_qualification = "unsupported"
     if dispatchable_battery_binding is not None:
         battery_qualification = "software-qualified"
@@ -1089,50 +869,12 @@ async def _build_runtime(
     )
     _cleanup.audit_storage = audit_storage
     await storage.run_async(database.initialize)
-    if use_postgres_control_plane and postgres_dsn is not None:
-        audit_database: SQLiteDatabase = PostgresDatabase(postgres_dsn, clock=clock)
-    else:
-        audit_path = resolved_settings.audit_database_path or (
-            resolved_settings.database_path.with_name(
-                f"{resolved_settings.database_path.stem}-audit{resolved_settings.database_path.suffix}"
-            )
-        )
-        audit_database = SQLiteDatabase(
-            audit_path,
-            busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-            clock=clock,
-        )
-    _cleanup.audit_database = audit_database
-    await audit_storage.run_async(audit_database.initialize)
-    approval_database: SQLiteDatabase = (
-        PostgresDatabase(postgres_dsn, clock=clock)
-        if use_postgres_control_plane and postgres_dsn is not None
-        else SQLiteDatabase(
-            resolved_settings.database_path,
-            busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
-            clock=clock,
-        )
+    audit_path = resolved_settings.audit_database_path or resolved_settings.database_path.with_name(
+        f"{resolved_settings.database_path.stem}-audit{resolved_settings.database_path.suffix}"
     )
-    _cleanup.approval_database = approval_database
-    await approval_database.initialize()
-    raw_audit_repository = AuditEventRepository(audit_database)
-    raw_approval_repository = ApprovalGrantRepository(approval_database)
-    approval_store = ApprovalStore(
-        operator_token=(
-            resolved_settings.operator_approval_token.get_secret_value()
-            if resolved_settings.operator_approval_token is not None
-            else None
-        ),
-        allow_legacy_token=resolved_settings.allow_legacy_operator_token,
-        clock=clock,
-        persistence=raw_approval_repository,
-        operational_metrics=operational_metrics,
-    )
-    raw_device_repository = DeviceRepository(database, clock=clock)
-    raw_state_history_repository = StateHistoryRepository(
-        database,
-        household_id=resolved_settings.mcp_household_id,
-        retention_days=resolved_settings.privacy_retention_days,
+    audit_database = SQLiteDatabase(
+        audit_path,
+        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
         clock=clock,
     )
     raw_state_snapshot_repository = StateSnapshotRepository(
@@ -1177,7 +919,10 @@ async def _build_runtime(
     ownership = await RuntimeOwnership.acquire(
         ownership_repository,
         resolved_settings,
-        adapter_id=selected_adapter.adapter_id,
+        registry=registry,
+        provider_registry=provider_registry,
+        clock=clock,
+        dispatchable_battery_binding=dispatchable_battery_binding,
     )
     _cleanup.ownership = ownership
     coordination_token: FencingToken | None = None
@@ -1287,16 +1032,21 @@ async def _build_runtime(
     risk_classifier = RiskClassifier(overrides=tuple(risk_overrides))
     policy_engine = PolicyEngine(policies, risk_classifier)
     authorized_actuator_commands: dict[str, frozenset[str]] = {}
+    authorized_actuator_providers: dict[str, str] = {}
     if dispatchable_battery_binding is not None:
         actuator = dispatchable_battery_binding.profile.actuator
         if actuator is not None:
             authorized_actuator_commands[dispatchable_battery_binding.device_id] = frozenset(
                 {actuator.charge_command, actuator.discharge_command, actuator.stop_command}
             )
-    for ev_actuator in ev_actuators:
-        authorized_actuator_commands[ev_actuator.device_id] = frozenset(
-            {ev_actuator.charge_command, ev_actuator.stop_command}
+            authorized_actuator_providers[dispatchable_battery_binding.device_id] = (
+                dispatchable_battery_binding.provider_id
+            )
+    for binding in ev_charging_bindings:
+        authorized_actuator_commands[binding.device_id] = frozenset(
+            {binding.charge_command, binding.stop_command}
         )
+        authorized_actuator_providers[binding.device_id] = binding.provider_id
     plan_service = PlanService(
         registry,
         state_store,
@@ -1304,6 +1054,7 @@ async def _build_runtime(
         audit,
         clock=clock,
         authorized_actuator_commands=authorized_actuator_commands,
+        authorized_actuator_providers=authorized_actuator_providers,
     )
     plan_repository = cast(
         PlanRepository, SerializedRepositoryProxy(PlanRepository(database, clock=clock), storage)
@@ -1342,32 +1093,15 @@ async def _build_runtime(
         BundleCommitRepository,
         SerializedRepositoryProxy(BundleCommitRepository(database, clock=clock), storage),
     )
-    bundle_recovery = BundleRecoveryService(
-        bundle_repository=bundle_commit_repository,
-        plan_repository=plan_repository,
-        scheduled_repository=scheduled_plan_repository,
-        audit=audit,
-        approval_store=approval_store,
-        operational_metrics=operational_metrics,
-    )
-
-    async def reconcile_runtime() -> None:
-        await plan_recovery.reconcile(reason="periodic_recovery")
-        await bundle_recovery.recover_orphaned_bundles()
-
     battery_control_coordinator = None
     if dispatchable_battery_binding is not None:
         actuator = dispatchable_battery_binding.profile.actuator
         if actuator is not None:
-            if selected_control_adapter is None:
-                raise RuntimeError("battery takeover adapter was not resolved")
-            feedback_routes = registry.routes_for(
-                dispatchable_battery_binding.device_id,
-                actuator.power_feedback_capability,
-            )
             battery_control_coordinator = BatteryControlCoordinator(
-                selected_control_adapter,
-                dispatchable_battery_binding.control_policy,
+                _select_control_adapter(
+                    selected_adapter, dispatchable_battery_binding.provider_id
+                ),
+                dispatchable_battery_binding.control_policy,  # type: ignore[arg-type]
                 device_id=dispatchable_battery_binding.device_id,
                 command_names=frozenset(
                     {
@@ -1380,11 +1114,6 @@ async def _build_runtime(
                 stop_unit=actuator.power_unit,
                 state_store=state_store,
                 power_feedback_capability=actuator.power_feedback_capability,
-                power_feedback_source_ref=(
-                    feedback_routes[0].source_ref
-                    if len(feedback_routes) == 1 and feedback_routes[0].available
-                    else None
-                ),
                 power_feedback_tolerance_kw=actuator.power_feedback_tolerance_kw,
                 clock=clock,
             )
@@ -1395,69 +1124,6 @@ async def _build_runtime(
                 subject_id=dispatchable_battery_binding.device_id,
                 payload={"confirmed": startup_reconciled},
             )
-    ev_control_coordinators: list[EVControlCoordinator] = []
-    for binding in ev_charging_bindings:
-        ev_actuator = binding.actuator
-        ev_adapter = _select_provider_adapter(selected_adapter, binding.provider_id)
-        feedback_routes = registry.routes_for(binding.device_id, ev_actuator.capability)
-        cached_feedback = state_store.peek(binding.device_id, ev_actuator.capability)
-        feedback_source_ref = (
-            next(
-                route.source_ref
-                for route in feedback_routes
-                if route.source_ref.adapter_id == cached_feedback.source_ref.adapter_id
-                and route.source_ref.external_id == cached_feedback.source_ref.external_id
-            )
-            if cached_feedback is not None
-            and any(
-                route.source_ref.adapter_id == cached_feedback.source_ref.adapter_id
-                and route.source_ref.external_id == cached_feedback.source_ref.external_id
-                for route in feedback_routes
-            )
-            else (
-                feedback_routes[0].source_ref
-                if len(feedback_routes) == 1 and feedback_routes[0].available
-                else None
-            )
-        )
-        coordinator = EVControlCoordinator(
-            ev_adapter,
-            binding.control_policy,
-            device_id=binding.device_id,
-            command_names=frozenset({ev_actuator.charge_command, ev_actuator.stop_command}),
-            stop_command=ev_actuator.stop_command,
-            stop_unit=ev_actuator.power_unit,
-            state_store=state_store,
-            power_feedback_capability=ev_actuator.capability,
-            power_feedback_source_ref=feedback_source_ref,
-            clock=clock,
-        )
-        startup_reconciled = await coordinator.reconcile_startup()
-        audit.append(
-            event_type="control_supervisor_startup_reconciliation",
-            actor="runtime",
-            subject_id=binding.device_id,
-            payload={"confirmed": startup_reconciled, "actuator": "ev"},
-        )
-        ev_control_coordinators.append(coordinator)
-    control_coordinators: list[ControlSupervisorPort] = []
-    if battery_control_coordinator is not None:
-        control_coordinators.append(battery_control_coordinator)
-    control_coordinators.extend(ev_control_coordinators)
-    if len(control_coordinators) == 1:
-        control_supervisor: ControlSupervisorPort | None = control_coordinators[0]
-    elif control_coordinators:
-        control_supervisor = ControlTakeoverGroup(control_coordinators)
-    else:
-        control_supervisor = None
-    execution_admission = ExecutionAdmission(
-        bundle_repository=bundle_commit_repository,
-        approval_store=approval_store,
-        audit=audit,
-        clock=clock,
-        fencing_guard=fencing_guard,
-        operational_metrics=operational_metrics,
-    )
     executor = PlanExecutor(
         selected_adapter,
         plan_service,
@@ -1467,43 +1133,26 @@ async def _build_runtime(
         state_snapshot_repository=state_snapshot_repository,
         clock=clock,
         safety_kernel=safety_kernel,
-        control_takeover=control_supervisor,
+        control_takeover=battery_control_coordinator,
         dynamic_safety_guard=(
             DynamicSafetyGuard(
                 state_store,
-                (
-                    dispatchable_battery_binding.profile
-                    if dispatchable_battery_binding is not None
-                    else None
-                ),
-                ev_actuators=ev_actuators,
+                dispatchable_battery_binding.profile if dispatchable_battery_binding else None,
+                ev_bindings=ev_charging_bindings,
                 clock=clock,
             )
             if (
                 dispatchable_battery_binding is not None
                 and dispatchable_battery_binding.profile.actuator is not None
             )
-            or ev_actuators
+            or ev_charging_bindings
             else None
         ),
-        execution_admission=execution_admission,
-        operational_metrics=operational_metrics,
-        fencing_guard=fencing_guard,
-        physical_intent_repository=(
-            physical_intent_repository if fencing_guard is not None else None
-        ),
-        household_work_queues=household_work_queues,
+        execution_admission=ExecutionAdmission(bundle_repository=bundle_commit_repository),
     )
     facade = DomoticsFacade(plan_service, executor)
-    state_refresher = RuntimeStateRefresher(
-        discovery,
-        state_store,
-        audit,
-        interval_seconds=resolved_settings.state_refresh_interval_seconds,
-        inventory_refresh_interval_seconds=resolved_settings.inventory_refresh_interval_seconds,
-        adapter=selected_adapter,
-        clock=clock,
-        retention_maintenance=state_history_repository.purge_expired,
+    event_consumer = RuntimeEventConsumer(
+        selected_adapter, discovery, state_store, audit, clock=clock
     )
     recurring_schedule_repository = cast(
         RecurringScheduleRepository,
@@ -1606,19 +1255,8 @@ async def _build_runtime(
         operator_principal_provider=operator_principal_provider,
         operator_approval_assertion_provider=operator_approval_assertion_provider,
         battery_qualification=battery_qualification,
-        battery_operational_status=battery_operational_status,
-        bootstrap_manifest=bootstrap.manifest,
-        commissioning_service=commissioning_service,
-        commissioning_report=commissioning_report,
-        qualification_repository=qualification_repository,
         dispatchable_battery_binding=dispatchable_battery_binding,
-        ev_actuators=ev_actuators,
         battery_control_coordinator=battery_control_coordinator,
-        ev_control_coordinators=tuple(ev_control_coordinators),
-        control_supervisor=control_supervisor,
-        lease_coordinator=active_lease_coordinator,
-        coordination_token=coordination_token,
-        fencing_guard=fencing_guard,
-        ownership=ownership,
+        ev_charging_bindings=ev_charging_bindings,
     )
     return runtime

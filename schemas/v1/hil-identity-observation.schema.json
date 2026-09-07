@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Structured identity evidence attached to a HIL qualification artifact.",
+  "description": "Identity read from the exercised device or a trusted test authority.\n\nThe CLI labels are intentionally not enough: qualification needs a\nstructured observation tied to the artifact and its observation time.",
   "properties": {
     "hardware_id": {
       "maxLength": 200,

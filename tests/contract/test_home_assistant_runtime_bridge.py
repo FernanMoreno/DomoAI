@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from domoai.adapters.home_assistant.config import HomeAssistantMappingConfigurationError
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
-from domoai.domain.energy import EVActuator, EVChargingBinding
-from domoai.domain.models import (
-    AdapterSnapshot,
-    Command,
-    ControlLeaseStatus,
-    SourceRef,
-    StateStatus,
-)
+from domoai.domain.models import Command, SourceRef, StateStatus
 from domoai.runtime.clock import FixedClock
-from domoai.runtime.control_takeover import ControlTakeoverRequest
 from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.registry import DeviceRegistry
 from tests.composition.test_battery_dispatch_profile_composition import _binding
@@ -53,72 +45,39 @@ async def test_bridge_preserves_entity_routes_and_projects_provider_snapshot() -
 
 
 @pytest.mark.asyncio
-async def test_bridge_preserves_cached_source_observation_and_receipt_timestamps() -> None:
-    now = datetime(2026, 8, 30, 12, tzinfo=UTC)
-    observed_at = now - timedelta(hours=2)
-    received_at = observed_at + timedelta(seconds=3)
-    client = FakeHomeAssistantProviderClient(
-        [
-            {
-                "entity_id": "sensor.cached_temperature",
-                "state": "20",
-                "last_updated": observed_at.isoformat(),
-                "received_at": received_at.isoformat(),
-                "attributes": {
-                    "unit_of_measurement": "°C",
-                    "device_class": "temperature",
-                },
-                "device_id": "ha-cached-temperature",
-            }
-        ]
+async def test_bridge_preserves_source_received_at_instead_of_rejuvenating_cache() -> None:
+    observed_at = datetime(2026, 8, 25, 10, tzinfo=UTC)
+    received_at = datetime(2026, 8, 25, 10, 1, tzinfo=UTC)
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    entities = simulated_home_entities()
+    entities[0].update(
+        {
+            "last_updated": observed_at.isoformat(),
+            "last_changed": observed_at.isoformat(),
+            "received_at": received_at.isoformat(),
+        }
     )
-    clock = FixedClock(now)
-    bridge = HomeAssistantProviderAdapter(HomeAssistantProvider(client, clock=clock), clock=clock)
+    client = FakeHomeAssistantProviderClient(entities)
+    provider = HomeAssistantProvider(client, clock=FixedClock(now))
+    bridge = HomeAssistantProviderAdapter(provider, clock=FixedClock(now))
 
     await bridge.connect()
+    await bridge.discover()
     states = await bridge.read_state(
-        [SourceRef(adapter_id="home_assistant", external_id="sensor.cached_temperature")]
+        [SourceRef(adapter_id="home_assistant", external_id="light.living_room_main")]
     )
+    measurements = await provider.get_measurements()
 
-    assert len(states) == 1
-    assert states[0].observed_at == observed_at
-    assert states[0].received_at == received_at
-
-
-@pytest.mark.asyncio
-async def test_explicit_mapping_does_not_project_unmapped_ha_sensor_values() -> None:
-    states = [
-        {
-            "entity_id": "sensor.mapped_temperature",
-            "state": "20",
-            "last_updated": "2026-08-31T09:00:00+00:00",
-            "attributes": {"unit_of_measurement": "°C", "device_class": "temperature"},
-            "device_id": "ha-sensors-1",
-        },
-        {
-            "entity_id": "sensor.unmapped_timestamp",
-            "state": "2026-08-31T12:00:00+00:00",
-            "last_updated": "2026-08-31T09:00:00+00:00",
-            "attributes": {"device_class": "timestamp"},
-            "device_id": "ha-sensors-1",
-        },
+    light_states = [state for state in states if state.capability == "power"]
+    light_measurements = [
+        item for item in measurements if item.source_ref.external_id == "light.living_room_main"
     ]
-    client = FakeHomeAssistantProviderClient(states)
-    provider = HomeAssistantProvider(
-        client,
-        metric_mappings={"sensor.mapped_temperature": {"temperature": "temperature"}},
-    )
-    bridge = HomeAssistantProviderAdapter(provider)
-
-    await bridge.connect()
-    snapshot = await bridge.discover()
-
-    assert "sensor.unmapped_timestamp" not in {
-        entity["entity_id"] for entity in snapshot.source_entities
-    }
-    assert "sensor.unmapped_timestamp" not in {
-        state["entity_id"] for state in snapshot.source_states
-    }
+    assert light_states
+    assert light_measurements
+    assert light_states[0].observed_at == observed_at
+    assert light_states[0].received_at == received_at
+    assert light_measurements[0].observed_at == observed_at
+    assert light_measurements[0].received_at == received_at
 
 
 @pytest.mark.asyncio

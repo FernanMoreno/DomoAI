@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time as _time
 from collections.abc import AsyncIterator, Sequence
@@ -116,6 +117,7 @@ class SimulatedHomeAdapter:
         self._entities = deepcopy(entities if entities is not None else default_entities())
         self._clock = clock or SystemClock()
         self._events: list[SourceEvent] = []
+        self._events_available = asyncio.Event()
         self._connected = False
         self.calls: list[Command] = []
         self._executed_idempotency_keys: set[str] = set()
@@ -189,9 +191,12 @@ class SimulatedHomeAdapter:
 
     async def connect(self) -> None:
         self._connected = True
+        if self._events:
+            self._events_available.set()
 
     async def disconnect(self) -> None:
         self._connected = False
+        self._events_available.set()
 
     async def discover(self) -> AdapterSnapshot:
         for entity in self._entities:
@@ -250,8 +255,28 @@ class SimulatedHomeAdapter:
         return AdapterExecutionAck(accepted=True, message="Fixture command accepted")
 
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
-        while self._events:
-            yield self._events.pop(0)
+        """Keep the fixture stream live until the adapter disconnects.
+
+        Production adapters expose long-lived subscriptions. Ending an empty
+        fixture buffer immediately makes the runtime interpret normal fixture
+        idleness as source loss, which mutates the shared inventory revision.
+        The short timeout also observes tests that append directly to the
+        legacy buffer instead of using the notification helpers.
+        """
+
+        while self._connected or self._events:
+            if self._events:
+                yield self._events.pop(0)
+                continue
+            if not self._connected:
+                return
+            self._events_available.clear()
+            if self._events:
+                continue
+            try:
+                await asyncio.wait_for(self._events_available.wait(), timeout=0.1)
+            except TimeoutError:
+                continue
 
     async def health(self) -> AdapterHealth:
         return AdapterHealth(adapter_id=self.adapter_id, connected=self._connected)
@@ -264,11 +289,13 @@ class SimulatedHomeAdapter:
                 payload={"entity_id": entity_id, "available": available},
             )
         )
+        self._events_available.set()
 
     def rename(self, entity_id: str, name: str) -> None:
         entity = self._find(entity_id)
         entity["name"] = name
         self._events.append(MetadataChangedEvent(payload={"entity_id": entity_id, "name": name}))
+        self._events_available.set()
 
     def _find(self, entity_id: str) -> dict[str, Any]:
         for entity in self._entities:

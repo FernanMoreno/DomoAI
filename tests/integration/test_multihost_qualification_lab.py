@@ -42,6 +42,8 @@ def test_lab_runner_uses_a_local_ephemeral_image_without_a_venv_mount() -> None:
     assert ".venv" not in shell
     assert "wait_for_replica_members" in shell
     assert 'patroni_primary_status "$service" replica' in shell
+    assert 'patroni_primary_status "$service" sync' in shell
+    assert "sync_ready" in shell
 
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker daemon is unavailable")

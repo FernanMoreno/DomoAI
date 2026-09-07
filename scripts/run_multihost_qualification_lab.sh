@@ -215,10 +215,11 @@ wait_for_new_primary() {
 
 wait_for_replica_members() {
     local readiness_deadline=$(( $(date +%s) + deadline_seconds ))
-    local primary service status ready
+    local primary service status ready sync_ready
     while :; do
         primary="$(primary_service || true)"
         ready=1
+        sync_ready=0
         if [[ "$primary" =~ ^postgres-[123]$ ]]; then
             for service in postgres-1 postgres-2 postgres-3; do
                 [[ "$service" == "$primary" ]] && continue
@@ -226,13 +227,19 @@ wait_for_replica_members() {
                 if [[ "$status" != http_200 ]]; then
                     ready=0
                 fi
+                # Synchronous mode is strict in this lab. A healthy replica
+                # may still be asynchronously catching up and cannot promote
+                # safely when the current primary is stopped.
+                if [[ "$(patroni_primary_status "$service" sync || true)" == http_200 ]]; then
+                    sync_ready=1
+                fi
             done
         else
             ready=0
         fi
-        (( ready != 0 )) && return 0
+        (( ready != 0 && sync_ready != 0 )) && return 0
         if (( $(date +%s) >= readiness_deadline )); then
-            echo "DomoAI lab replicas did not become ready before the failover exercise" >&2
+            echo "DomoAI lab replicas and synchronous member did not become ready before the failover exercise" >&2
             failover_diagnostics
             return 1
         fi

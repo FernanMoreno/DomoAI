@@ -39,6 +39,7 @@ class StateStore:
         self.stale_after = stale_after
         self.clock = clock or SystemClock()
         self._snapshots: dict[tuple[str, str], StateSnapshot] = {}
+        self._source_snapshots: dict[tuple[str, str, str, str], StateSnapshot] = {}
         self._revision = 0
         self._state_versions: dict[tuple[str, str], int] = {}
         self._version_counter = 0
@@ -98,6 +99,13 @@ class StateStore:
 
         for snapshot in snapshots:
             stale = snapshot.model_copy(update={"status": StateStatus.STALE})
+            source_key = (
+                stale.device_id,
+                stale.capability,
+                stale.source_ref.adapter_id,
+                stale.source_ref.external_id,
+            )
+            self._source_snapshots[source_key] = stale
             key = (stale.device_id, stale.capability)
             if key not in self._state_versions:
                 self._version_counter += 1
@@ -107,7 +115,15 @@ class StateStore:
 
     async def save(self, snapshot: StateSnapshot) -> None:
         key = (snapshot.device_id, snapshot.capability)
+        source_key = (
+            snapshot.device_id,
+            snapshot.capability,
+            snapshot.source_ref.adapter_id,
+            snapshot.source_ref.external_id,
+        )
         previous = self._snapshots.get(key)
+        self._source_snapshots[source_key] = snapshot
+        snapshot = self._resolve_sources(snapshot.device_id, snapshot.capability)
         startup_value = self._startup_reconfirmation.pop(key, None)
         if startup_value is not None:
             changed = (snapshot.value, snapshot.status) != startup_value
@@ -121,6 +137,29 @@ class StateStore:
             self._state_versions[key] = self._version_counter
         self._snapshots[key] = snapshot
         await self._persist([snapshot])
+
+    def _resolve_sources(self, device_id: str, capability: str) -> StateSnapshot:
+        observations = [
+            observation
+            for (
+                source_device,
+                source_capability,
+                _adapter,
+                _external,
+            ), observation in self._source_snapshots.items()
+            if source_device == device_id and source_capability == capability
+        ]
+        if not observations:
+            raise KeyError(f"missing source observation for {device_id}/{capability}")
+        invalid = [item for item in observations if item.status is StateStatus.INVALID]
+        if invalid:
+            return max(invalid, key=lambda item: item.received_at)
+        current = [item for item in observations if item.status is StateStatus.CURRENT]
+        if len(current) >= 2 and len({repr(item.value) for item in current}) > 1:
+            latest = max(current, key=lambda item: item.received_at)
+            return latest.model_copy(update={"value": None, "status": StateStatus.INVALID})
+        candidates = current or observations
+        return max(candidates, key=lambda item: item.received_at)
 
     async def delete(self, device_id: str) -> None:
         for key in [key for key in self._snapshots if key[0] == device_id]:
@@ -161,15 +200,39 @@ class StateStore:
         for key, snapshot in list(self._snapshots.items()):
             if (
                 snapshot.status is StateStatus.CURRENT
-                and current_time - snapshot.received_at > self.stale_after
+                and current_time - snapshot.observed_at > self.stale_after
             ):
                 updated = snapshot.model_copy(update={"status": StateStatus.STALE})
                 self._snapshots[key] = updated
                 self._version_counter += 1
                 self._state_versions[key] = self._version_counter
+                for source_key, source_snapshot in list(self._source_snapshots.items()):
+                    if source_key[:2] == key and source_snapshot.source_ref == snapshot.source_ref:
+                        self._source_snapshots[source_key] = updated
                 stale.append(updated)
         await self._persist(stale)
         return stale
+
+    async def mark_source_unavailable(self, adapter_id: str) -> list[StateSnapshot]:
+        """Degrade only observations owned by one disconnected source."""
+
+        changed: list[StateSnapshot] = []
+        affected: set[tuple[str, str]] = set()
+        for source_key, snapshot in list(self._source_snapshots.items()):
+            if source_key[2] != adapter_id or snapshot.status is StateStatus.UNAVAILABLE:
+                continue
+            self._source_snapshots[source_key] = snapshot.model_copy(
+                update={"status": StateStatus.UNAVAILABLE, "value": None}
+            )
+            affected.add(source_key[:2])
+        for key in affected:
+            resolved = self._resolve_sources(*key)
+            self._snapshots[key] = resolved
+            self._version_counter += 1
+            self._state_versions[key] = self._version_counter
+            changed.append(resolved)
+        await self._persist(changed)
+        return changed
 
     async def mark_all_stale(self) -> list[StateSnapshot]:
         """Mark every current cached value stale after source loss."""
@@ -179,6 +242,11 @@ class StateStore:
             if snapshot.status is StateStatus.CURRENT:
                 updated = snapshot.model_copy(update={"status": StateStatus.STALE})
                 self._snapshots[key] = updated
+                for source_key, source_snapshot in list(self._source_snapshots.items()):
+                    if source_key[:2] == key and source_snapshot.status is StateStatus.CURRENT:
+                        self._source_snapshots[source_key] = source_snapshot.model_copy(
+                            update={"status": StateStatus.STALE}
+                        )
                 self._version_counter += 1
                 self._state_versions[key] = self._version_counter
                 stale.append(updated)

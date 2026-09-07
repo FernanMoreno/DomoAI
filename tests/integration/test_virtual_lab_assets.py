@@ -26,9 +26,13 @@ def _load_bridge_module() -> Any:
 def test_lab_mappings_are_valid_and_use_explicit_addresses() -> None:
     modbus = load_modbus_mapping(LAB / "configs" / "modbus.json")
     knx = load_knx_mapping(LAB / "configs" / "knx-virtual.json")
+    battery_modbus = load_modbus_mapping(LAB / "configs" / "modbus-battery.json")
+    battery_knx = load_knx_mapping(LAB / "configs" / "knx-battery-virtual.json")
 
     assert len(modbus.entities) >= 3
     assert len(knx.entities) >= 2
+    assert battery_modbus.entities[0].semantic_type == "energy"
+    assert battery_knx.entities[0].semantic_type == "energy"
     assert all(
         binding.state.address >= 0 for entity in modbus.entities for binding in entity.capabilities
     )
@@ -43,7 +47,15 @@ def test_lab_compose_references_only_local_secret_free_profiles() -> None:
     compose = (LAB / "compose.yaml").read_text(encoding="utf-8")
     example = (LAB / ".env.example").read_text(encoding="utf-8")
 
-    for service in ("mqtt:", "zigbee2mqtt:", "modbus:", "homeassistant:", "matter-server:"):
+    for service in (
+        "mqtt:",
+        "zigbee2mqtt:",
+        "modbus:",
+        "battery:",
+        "knx-gateway:",
+        "homeassistant:",
+        "matter-server:",
+    ):
         assert service in compose
     assert "allow_anonymous true" in (LAB / "mqtt" / "mosquitto.conf").read_text(encoding="utf-8")
     assert "<secret>" not in compose

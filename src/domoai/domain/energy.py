@@ -53,6 +53,38 @@ class BatteryActuator(StrictModel):
         return self
 
 
+class EVChargingBinding(StrictModel):
+    """Server-owned route and state contract for one EV charger."""
+
+    schema_version: Literal["v1"] = "v1"
+    provider_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]*$", max_length=64)
+    device_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9_.-]*$")
+    capability: str = Field(min_length=1)
+    charge_command: str = Field(min_length=1)
+    stop_command: str = Field(min_length=1)
+    connected_capability: str = Field(default="ev.connected", min_length=1)
+    soc_capability: str = Field(default="ev.soc", min_length=1)
+    power_feedback_capability: str = Field(default="ev.power", min_length=1)
+    departure_capability: str = Field(default="ev.departure_at", min_length=1)
+    capacity_kwh: float = Field(gt=0)
+    max_charge_kw: float = Field(gt=0)
+    power_unit: Literal["kW"] = "kW"
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> EVChargingBinding:
+        if self.charge_command == self.stop_command:
+            raise ValueError("EV charge and stop commands must be distinct")
+        capabilities = {
+            self.connected_capability,
+            self.soc_capability,
+            self.power_feedback_capability,
+            self.departure_capability,
+        }
+        if len(capabilities) != 4:
+            raise ValueError("EV state capabilities must be distinct")
+        return self
+
+
 class NominalCapacityTrustPolicy(StrictModel):
     """Server-owned exact allowlist for measured nominal capacity evidence."""
 
@@ -257,6 +289,7 @@ class DispatchableBatteryBinding(StrictModel):
 __all__ = [
     "SOC_OBSERVATION_TOLERANCE_KWH",
     "BatteryActuator",
+    "EVChargingBinding",
     "BatteryCapacityEvidence",
     "BatteryControlPolicy",
     "BatteryProfile",

@@ -118,7 +118,14 @@ async def _run_battery(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    runtime = await build_runtime(settings)
+    # The CLI-selected profile is the exact binding under test. Remove the
+    # settings path so the composition root cannot silently build profile A
+    # while the runner exercises profile B.
+    runtime_settings = settings.model_copy(update={"battery_dispatch_profile_path": None})
+    runtime = await build_runtime(
+        runtime_settings,
+        dispatchable_battery_binding=binding,
+    )
     try:
         evidence = await run_battery_hil(
             runtime,

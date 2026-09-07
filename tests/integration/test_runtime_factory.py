@@ -12,8 +12,13 @@ from domoai.adapters.knx.adapter import KnxAdapter
 from domoai.adapters.matter.adapter import MatterServerAdapter
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
-from domoai.application.runtime_factory import build_runtime, create_adapter
+from domoai.application.runtime_factory import (
+    _select_control_adapter,
+    build_runtime,
+    create_adapter,
+)
 from domoai.config.settings import Settings
+from domoai.domain.energy import EVChargingBinding
 from domoai.domain.models import Command, Plan, PlanStatus, Precondition, SourceRef, StateStatus
 from domoai.domain.provider import MeasurementQuality
 from domoai.optimizer.energy import (
@@ -141,6 +146,20 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     route_registry = ProviderRegistry()
+    mapping_only_registry = ProviderRegistry()
+    mapping_only_adapter = create_adapter(
+        Settings(
+            home_assistant_url="http://home-assistant.test",
+            home_assistant_token=SecretStr("fixture-token"),
+            home_assistant_mapping_path=dispatch_mapping_path,
+        ),
+        provider_registry=mapping_only_registry,
+    )
+    assert isinstance(mapping_only_adapter, HomeAssistantProviderAdapter)
+    mapping_only_provider = mapping_only_registry.get("home_assistant")
+    assert isinstance(mapping_only_provider, HomeAssistantProvider)
+    assert mapping_only_provider.battery_dispatch_bindings == {}
+
     route_adapter = create_adapter(
         Settings(
             home_assistant_url="http://home-assistant.test",
@@ -148,6 +167,7 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
             home_assistant_mapping_path=dispatch_mapping_path,
         ),
         provider_registry=route_registry,
+        dispatchable_battery_binding=_runtime_dispatchable_battery_binding(),
     )
     assert isinstance(route_adapter, HomeAssistantProviderAdapter)
     route_provider = route_registry.get("home_assistant")
@@ -249,6 +269,16 @@ def test_create_adapter_selects_fixture_or_home_assistant(tmp_path: Path) -> Non
         )
 
 
+def test_battery_takeover_routes_to_the_declared_composite_child() -> None:
+    home_assistant = SimulatedHomeAdapter()
+    home_assistant.adapter_id = "home_assistant"
+    zigbee = SimulatedHomeAdapter()
+    zigbee.adapter_id = "zigbee2mqtt"
+    composite = CompositeAdapter([home_assistant, zigbee])
+
+    assert _select_control_adapter(composite, "home_assistant") is home_assistant
+
+
 @pytest.mark.asyncio
 async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Path) -> None:
     database_path = tmp_path / "runtime.sqlite3"
@@ -280,7 +310,10 @@ async def test_runtime_factory_wires_sqlite_repositories_and_audit(tmp_path: Pat
     await database.initialize()
     recovered_plan = await PlanRepository(database).get(plan.id)
     recovered_outcomes = await ExecutionOutcomeRepository(database).list_for_plan(plan.id)
-    audit_events = await AuditEventRepository(database).list_all()
+    audit_database = SQLiteDatabase(database_path.with_name("runtime-audit.sqlite3"))
+    await audit_database.initialize()
+    audit_events = await AuditEventRepository(audit_database).list_all()
+    await audit_database.close()
 
     assert recovered_plan is not None
     assert recovered_plan.execution is not None
@@ -318,7 +351,10 @@ async def test_build_runtime_recovers_plans_orphaned_by_a_crash(tmp_path: Path) 
     database = SQLiteDatabase(database_path)
     await database.initialize()
     recovered_plan = await PlanRepository(database).get(orphaned_plan.id)
-    audit_events = await AuditEventRepository(database).list_all()
+    audit_database = SQLiteDatabase(database_path.with_name("runtime-audit.sqlite3"))
+    await audit_database.initialize()
+    audit_events = await AuditEventRepository(audit_database).list_all()
+    await audit_database.close()
 
     assert recovered_plan is not None
     assert recovered_plan.status is PlanStatus.UNKNOWN
@@ -746,6 +782,46 @@ async def test_runtime_factory_installs_explicit_dispatchable_battery_binding(
         assert runtime.battery_provider.device_id == "battery.home"
         assert isinstance(runtime.energy_context_provider, ComposedEnergyContextProvider)
         assert runtime.energy_context_provider.battery is runtime.battery_provider
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_installs_explicit_ev_charging_guard(tmp_path: Path) -> None:
+    profile_path = tmp_path / "ev-charging.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "bindings": [
+                    EVChargingBinding(
+                        provider_id="fixture_ev",
+                        device_id="ev.garage",
+                        capability="ev.charge_power",
+                        charge_command="set_charge_power",
+                        stop_command="stop_charging",
+                        capacity_kwh=60.0,
+                        max_charge_kw=7.4,
+                    ).model_dump(mode="json")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = await build_runtime(
+        Settings(
+            database_path=tmp_path / "ev-runtime.sqlite3",
+            ev_charging_profile_path=profile_path,
+        ),
+        adapter=SimulatedHomeAdapter(),
+    )
+    try:
+        assert runtime.ev_charging_bindings[0].device_id == "ev.garage"
+        assert runtime.plan_service.authorized_actuator_commands["ev.garage"] == frozenset(
+            {"set_charge_power", "stop_charging"}
+        )
+        guard = runtime.facade.executor.dynamic_safety_guard
+        assert guard is not None
+        assert "ev.garage" in guard.ev_bindings
     finally:
         await runtime.close()
 

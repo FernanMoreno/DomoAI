@@ -7,6 +7,7 @@ services:
       - "1883:1883"
     volumes:
       - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/version' -C 1 -W 2 >/dev/null"]
       interval: 5s
@@ -67,7 +68,7 @@ services:
     environment:
       TZ: Europe/Madrid
     volumes:
-      - ./homeassistant:/config
+      - homeassistant-data:/config
 
   matter-server:
     profiles: ["matter"]
@@ -91,5 +92,11 @@ services:
       - matter-device-data:/data
 
 volumes:
+  mqtt-data:
+    name: domoai-lab-mqtt-data
+    external: true
+  homeassistant-data:
+    name: domoai-lab-homeassistant-data
+    external: true
   matter-data:
   matter-device-data:

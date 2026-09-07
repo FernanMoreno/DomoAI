@@ -10,6 +10,7 @@ from domoai.adapters.matter.transport import InMemoryMatterTransport
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterHealth,
     AdapterSnapshot,
     SourceEvent,
@@ -91,6 +92,101 @@ async def test_composite_state_changed_event_from_non_primary_adapter_is_applied
     assert state.value == 42.0
 
 
+@pytest.mark.asyncio
+async def test_incremental_conflicting_sources_resolve_to_invalid_canonical_state() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
+    )
+    modbus = RecordingAdapter("modbus", source_snapshot(adapter_id="modbus"))
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    initial = await state_store.get("living_room.main_light", "power")
+    assert initial is not None and initial.status is StateStatus.CURRENT
+
+    for state in modbus.snapshot.source_states:
+        if state["entity_id"] == "light.main_power" and state["capability"] == "power":
+            state["value"] = True
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+    await consumer._apply_event(
+        StateChangedEvent(
+            source_adapter_id="modbus",
+            external_id="light.main_power",
+            capability="power",
+        )
+    )
+
+    conflicted = await state_store.get("living_room.main_light", "power")
+    assert conflicted is not None
+    assert conflicted.status is StateStatus.INVALID
+    assert conflicted.value is None
+
+
+@pytest.mark.asyncio
+async def test_composite_child_failure_degrades_only_that_source() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
+    )
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    composite._connected.discard("modbus")
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+
+    await consumer._apply_event(
+        AdapterDiagnosticEvent(
+            source_adapter_id="modbus",
+            payload={"event": "adapter_event_stream_failed", "reason": "broker down"},
+        )
+    )
+
+    healthy = await state_store.get("home_assistant.environment", "temperature")
+    unavailable = await state_store.get("modbus.environment", "temperature")
+    assert healthy is not None and healthy.status is StateStatus.CURRENT
+    assert unavailable is not None and unavailable.status is StateStatus.UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_composite_health_degradation_marks_only_failed_component() -> None:
+    home_assistant = RecordingAdapter(
+        "home_assistant", source_snapshot(adapter_id="home_assistant")
+    )
+    modbus = RecordingAdapter(
+        "modbus", source_snapshot(adapter_id="modbus", include_shared_device=False)
+    )
+    registry = DeviceRegistry()
+    composite = CompositeAdapter([home_assistant, modbus], registry=registry)
+    state_store = StateStore()
+    audit = AuditLog()
+    discovery = DiscoveryService(composite, registry, state_store, audit)
+
+    await composite.connect()
+    await discovery.refresh()
+    modbus.available = False
+    health = await composite.health()
+    consumer = RuntimeEventConsumer(composite, discovery, state_store, audit)
+
+    await consumer._mark_degraded_components(health)
+
+    healthy = await state_store.get("home_assistant.environment", "temperature")
+    unavailable = await state_store.get("modbus.environment", "temperature")
+    assert healthy is not None and healthy.status is StateStatus.CURRENT
+    assert unavailable is not None and unavailable.status is StateStatus.UNAVAILABLE
+
+
 class DisconnectedAdapter(SimulatedHomeAdapter):
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         raise ConnectionError("Home Assistant event stream disconnected")
@@ -98,7 +194,7 @@ class DisconnectedAdapter(SimulatedHomeAdapter):
 
 
 @pytest.mark.asyncio
-async def test_disconnected_source_marks_cached_state_stale_and_audits() -> None:
+async def test_disconnected_source_marks_cached_state_unavailable_and_audits() -> None:
     adapter = DisconnectedAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -112,7 +208,7 @@ async def test_disconnected_source_marks_cached_state_stale_and_audits() -> None
     assert event is None
     snapshots = await state_store.all()
     assert snapshots
-    assert all(snapshot.status is StateStatus.STALE for snapshot in snapshots)
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in snapshots)
     assert audit.events[-1].event_type == "source_event_stream_unavailable"
 
 
@@ -300,7 +396,7 @@ async def test_health_exception_is_supervised_and_retried(
 
     assert adapter.health_calls == 2
     assert recorded_delays == [1.0]
-    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in await state_store.all())
     assert audit.events[-1].event_type == "source_event_stream_unavailable"
 
 
@@ -343,7 +439,7 @@ async def test_clean_stream_end_is_audited_and_reconnected(
 
     assert adapter.subscribe_calls == 2
     assert recorded_delays == [1.0]
-    assert all(snapshot.status is StateStatus.STALE for snapshot in await state_store.all())
+    assert all(snapshot.status is StateStatus.UNAVAILABLE for snapshot in await state_store.all())
     assert any(event.event_type == "source_event_stream_ended" for event in audit.events)
 
 

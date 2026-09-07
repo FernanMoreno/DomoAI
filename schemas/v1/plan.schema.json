@@ -18,6 +18,18 @@
           "title": "Approved At",
           "type": "string"
         },
+        "approval_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Id"
+        },
         "validation_digest": {
           "minLength": 1,
           "title": "Validation Digest",
@@ -51,6 +63,56 @@
           ],
           "default": null,
           "title": "Session Id"
+        },
+        "bundle_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bundle Digest"
+        },
+        "recurrence_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recurrence Digest"
+        },
+        "validation_valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation Valid Until"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
         },
         "window_digest": {
           "anyOf": [
@@ -795,6 +857,19 @@
           "minLength": 1,
           "title": "Digest",
           "type": "string"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
         },
         "dependencies": {
           "anyOf": [

@@ -16,6 +16,7 @@ from domoai.application.discovery_service import DiscoveryService
 from domoai.application.facade import DomoticsFacade
 from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_worker import OptimizationWorker, WorkerOperationError
+from domoai.application.recurrence import recurrence_digest
 from domoai.application.scheduler import Scheduler
 from domoai.application.state_service import StateService
 from domoai.domain.errors import DomainError, ErrorCode
@@ -136,7 +137,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 refreshed_at=context.last_refreshed_at,
                 devices=selected,
             )
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -161,7 +162,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 "runtime_revision": context.discovery.state_store.runtime_revision,
                 "states": [state.model_dump(mode="json") for state in states],
             }
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -205,7 +206,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     details={"worker_code": error.code},
                 )
             )
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -286,6 +287,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         validation_digest: str,
         operator_token: str | None = None,
         bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> dict[str, Any]:
         try:
             plan = await _resolve_plan(context, plan_id)
@@ -314,6 +316,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     principal=principal,
                     assertion=assertion,
                     bundle_digest=bundle_digest,
+                    recurrence_digest=recurrence_digest,
                 )
             elif principal is not None:
                 raise DomainError(
@@ -322,7 +325,10 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 )
             else:
                 grant = context.approval_store.issue_legacy(
-                    plan, operator_token=operator_token, bundle_digest=bundle_digest
+                    plan,
+                    operator_token=operator_token,
+                    bundle_digest=bundle_digest,
+                    recurrence_digest=recurrence_digest,
                 )
             return {
                 "schema_version": "v1",
@@ -330,9 +336,15 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 "plan_id": grant.plan_id,
                 "validation_digest": grant.validation_digest,
                 "bundle_digest": grant.bundle_digest,
+                "recurrence_digest": grant.recurrence_digest,
+                "validation_valid_until": (
+                    grant.validation_valid_until.isoformat()
+                    if grant.validation_valid_until is not None
+                    else None
+                ),
                 "issued_at": grant.issued_at.isoformat(),
             }
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -354,14 +366,26 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 raise ValueError(f"Unknown plan: {plan_id}")
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
+            if (
+                context.bundle_commit_service is not None
+                and await context.bundle_commit_service.is_member(plan_id)
+            ):
+                raise DomainError(
+                    ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
+                    "Bundle members require execution through the bundle aggregate",
+                )
             if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
                 if approval_id is None:
                     raise ValueError("Plan requires an approval_id issued via request_approval")
-                grant = context.approval_store.consume(
+                grant = context.approval_store.validate(
                     approval_id, plan, bundle_digest=bundle_digest
                 )
-                plan = context.facade.approve_plan(plan, grant=grant)
-                await _persist_approved_plan(context, plan)
+                if not dry_run:
+                    context.approval_store.consume(
+                        approval_id, plan, bundle_digest=bundle_digest
+                    )
+                    plan = context.facade.approve_plan(plan, grant=grant)
+                    await _persist_approved_plan(context, plan)
             if dry_run:
                 return {
                     "schema_version": "v1",
@@ -378,7 +402,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 "plan_id": plan.id,
                 "outcomes": [outcome.model_dump(mode="json") for outcome in execution.outcomes],
             }
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -406,6 +430,14 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 raise ValueError(f"Unknown plan: {plan_id}")
             if plan.validation is None or plan.validation.digest != validation_digest:
                 raise ValueError("Validation digest does not match the stored plan")
+            if (
+                context.bundle_commit_service is not None
+                and await context.bundle_commit_service.is_member(plan_id)
+            ):
+                raise DomainError(
+                    ErrorCode.BUNDLE_MEMBER_EXECUTION_FORBIDDEN,
+                    "Bundle members require scheduling through the bundle aggregate",
+                )
             parsed_execute_at = _parse_timezone_aware_datetime(execute_at)
             if plan.execute_at != parsed_execute_at or plan.execution_window is None:
                 raise DomainError(
@@ -500,12 +532,20 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             plan = await _resolve_plan(context, plan_id)
             if plan is None:
                 raise ValueError(f"Unknown plan: {plan_id}")
+            if (
+                context.bundle_commit_service is not None
+                and await context.bundle_commit_service.is_member(plan_id)
+            ):
+                raise DomainError(
+                    ErrorCode.BUNDLE_MEMBER_CANCEL_FORBIDDEN,
+                    "Bundle members require cancellation through the bundle aggregate",
+                )
             cancelled = await context.scheduler.cancel(plan_id)
             if cancelled:
                 cancelled_plan = context.facade.plan_service.cancel(plan)
                 await _persist_plan(context, cancelled_plan)
             return {"schema_version": "v1", "plan_id": plan_id, "cancelled": cancelled}
-        except (ValueError, ValidationError) as error:
+        except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
 
     @server.tool(
@@ -646,15 +686,6 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             plan = await _resolve_plan(context, plan_id)
             if plan is None:
                 raise ValueError(f"Unknown plan: {plan_id}")
-            grant = None
-            if plan.status is PlanStatus.REQUIRES_CONFIRMATION:
-                if approval_id is None:
-                    raise DomainError(
-                        ErrorCode.APPROVAL_REQUIRED,
-                        "Creating a recurring automation from a plan that requires "
-                        "confirmation needs an approval_id from request_approval",
-                    )
-                grant = context.approval_store.consume(approval_id, plan)
             hour, minute = (int(part) for part in time_of_day.split(":"))
             rule = RecurrenceRule(
                 time_of_day=time(hour=hour, minute=minute),
@@ -664,6 +695,24 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     _parse_timezone_aware_datetime(expires_at) if expires_at is not None else None
                 ),
             )
+            expected_recurrence_digest = recurrence_digest(plan.id, rule)
+            grant = None
+            if plan.status in {
+                PlanStatus.REQUIRES_CONFIRMATION,
+                PlanStatus.APPROVED,
+                PlanStatus.READY,
+            }:
+                if approval_id is None:
+                    raise DomainError(
+                        ErrorCode.APPROVAL_REQUIRED,
+                        "Creating a standing automation needs a recurrence-scoped "
+                        "approval_id from request_approval",
+                    )
+                grant = context.approval_store.consume(
+                    approval_id,
+                    plan,
+                    recurrence_digest=expected_recurrence_digest,
+                )
             schedule_id = f"recurring:{plan_id}:{context.clock.now().isoformat()}"
             first_occurrence = await context.scheduler.schedule_recurring(
                 schedule_id, plan.commands, rule, plan=plan, approval=grant

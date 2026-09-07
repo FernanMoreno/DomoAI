@@ -54,7 +54,11 @@ class DiscoveryService:
         self.device_repository = device_repository
         self.state_snapshot_repository = state_snapshot_repository
         self.runtime_state_metadata_repository = runtime_state_metadata_repository
-        self.clock = clock or SystemClock()
+        # Keep discovery timestamps on the same server-owned clock as the
+        # state store.  This matters for deterministic validation and avoids
+        # making an observation appear newer merely because the two services
+        # were constructed with different clocks.
+        self.clock = clock or state_store.clock or SystemClock()
 
     async def refresh(self) -> DiscoveryResult:
         snapshot = await self.adapter.discover()

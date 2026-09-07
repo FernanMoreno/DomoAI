@@ -12,6 +12,7 @@ from domoai.domain.models import StrictModel
 
 class Settings(StrictModel):
     database_path: Path = Path("data/domoai.sqlite3")
+    audit_database_path: Path | None = None
     policy_config_path: Path | None = None
     risk_overrides_path: Path | None = None
     safety_limits_path: Path | None = None
@@ -24,6 +25,8 @@ class Settings(StrictModel):
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
     matter_server_url: str | None = None
     knx_gateway_host: str | None = None
+    knx_gateway_port: int = Field(default=3671, ge=1, le=65535)
+    knx_gateway_route_back: bool = False
     knx_config_path: Path | None = None
     knx_timeout_seconds: float = Field(default=5.0, gt=0)
     modbus_host: str | None = None
@@ -43,6 +46,7 @@ class Settings(StrictModel):
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
     scheduler_grace_window_seconds: int = Field(default=900, gt=0)
     optimization_max_solver_time_seconds: float = Field(default=30.0, gt=0)
+    optimization_max_horizon_slots: int = Field(default=10080, gt=0)
     optimization_worker_queue_capacity: int = Field(default=2, ge=0)
     optimization_worker_concurrency: int = Field(default=1, gt=0)
     optimization_worker_queue_wait_seconds: float = Field(default=0.25, gt=0)
@@ -66,13 +70,22 @@ class Settings(StrictModel):
     solar_timezone: str = Field(default="Europe/Madrid", min_length=1)
     solar_profile_path: Path | None = None
     battery_dispatch_profile_path: Path | None = None
+    ev_charging_profile_path: Path | None = None
     battery_hil_evidence_path: Path | None = None
     battery_dispatch_production: bool = False
+    battery_hil_power_ceiling_kw: float | None = Field(default=None, gt=0)
     solar_timeout_seconds: float = Field(default=10.0, gt=0)
     energy_max_age_seconds: float | None = Field(default=900.0, ge=0)
 
     @model_validator(mode="after")
     def validate_source_selection(self) -> Settings:
+        if (
+            self.audit_database_path is not None
+            and self.audit_database_path.absolute() == self.database_path.absolute()
+        ):
+            raise ValueError(
+                "audit database must be separate from the authority database"
+            )
         knx_settings = (self.knx_gateway_host is not None, self.knx_config_path is not None)
         if knx_settings[0] != knx_settings[1]:
             raise ValueError(
@@ -152,6 +165,11 @@ class Settings(StrictModel):
 
         return cls(
             database_path=Path(os.getenv("DOMOAI_DATABASE_PATH", "data/domoai.sqlite3")),
+            audit_database_path=(
+                Path(audit_path)
+                if (audit_path := os.getenv("DOMOAI_AUDIT_DATABASE_PATH"))
+                else None
+            ),
             policy_config_path=(
                 Path(policy_path)
                 if (policy_path := os.getenv("DOMOAI_POLICY_CONFIG_PATH"))
@@ -182,6 +200,8 @@ class Settings(StrictModel):
             zigbee2mqtt_base_topic=os.getenv("DOMOAI_ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
+            knx_gateway_port=int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3671")),
+            knx_gateway_route_back=boolean("DOMOAI_KNX_GATEWAY_ROUTE_BACK"),
             knx_config_path=(
                 Path(config_path) if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH")) else None
             ),
@@ -205,6 +225,9 @@ class Settings(StrictModel):
             ),
             optimization_max_solver_time_seconds=float(
                 os.getenv("DOMOAI_OPTIMIZATION_MAX_SOLVER_TIME_SECONDS", "30")
+            ),
+            optimization_max_horizon_slots=int(
+                os.getenv("DOMOAI_OPTIMIZATION_MAX_HORIZON_SLOTS", "10080")
             ),
             optimization_worker_queue_capacity=int(
                 os.getenv("DOMOAI_OPTIMIZATION_WORKER_QUEUE_CAPACITY", "2")
@@ -272,12 +295,18 @@ class Settings(StrictModel):
                 if (profile_path := os.getenv("DOMOAI_BATTERY_DISPATCH_PROFILE_PATH"))
                 else None
             ),
+            ev_charging_profile_path=(
+                Path(profile_path)
+                if (profile_path := os.getenv("DOMOAI_EV_CHARGING_PROFILE_PATH"))
+                else None
+            ),
             battery_hil_evidence_path=(
                 Path(evidence_path)
                 if (evidence_path := os.getenv("DOMOAI_BATTERY_HIL_EVIDENCE_PATH"))
                 else None
             ),
             battery_dispatch_production=boolean("DOMOAI_BATTERY_DISPATCH_PRODUCTION"),
+            battery_hil_power_ceiling_kw=optional_float("DOMOAI_BATTERY_HIL_POWER_CEILING_KW"),
             solar_timeout_seconds=float(os.getenv("DOMOAI_SOLAR_TIMEOUT_SECONDS", "10")),
             energy_max_age_seconds=optional_float("DOMOAI_ENERGY_MAX_AGE_SECONDS")
             if os.getenv("DOMOAI_ENERGY_MAX_AGE_SECONDS") is not None

@@ -123,6 +123,44 @@ def test_rehydrated_identity_does_not_merge_replacement_with_same_local_name() -
     assert len(registry.devices) == 1
 
 
+def test_live_rediscovery_with_renamed_entity_reuses_persisted_identity_claim() -> None:
+    registry = DeviceRegistry()
+    registry.load_persisted(
+        [
+            Device(
+                id="energy.battery",
+                type=DeviceType.ENERGY,
+                name="Battery",
+                protocol="fixture",
+                capabilities=[_power_capability()],
+                source_refs=[SourceRef(adapter_id="fixture", external_id="old-battery")],
+                identity_keys=["fixture:device:battery-1"],
+                connections=["fixture:battery-1"],
+            )
+        ]
+    )
+
+    registry.apply_snapshot(
+        AdapterSnapshot(
+            source_entities=[
+                {
+                    "entity_id": "renamed-battery",
+                    "device_id": "battery-1",
+                    "name": "Battery",
+                    "semantic_type": "energy",
+                    "identity_keys": ["fixture:device:battery-1"],
+                    "connections": ["fixture:battery-1"],
+                    "capabilities": [_power_capability().model_dump(mode="json")],
+                }
+            ]
+        ),
+        "fixture",
+    )
+
+    assert registry.canonical_id_for_source("fixture", "renamed-battery") == "energy.battery"
+    assert registry.get("energy.battery") is not None
+
+
 @pytest.mark.asyncio
 async def test_restart_and_rediscover_does_not_duplicate_devices() -> None:
     adapter = SimulatedHomeAdapter()

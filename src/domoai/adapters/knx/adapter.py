@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ class KnxAdapter:
         self.mapper = KnxMapper()
         self._connected = False
         self._available = True
+        self._event_stream_active = False
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
         self._canonical_by_source = {
             entity.entity_id: canonical_device_id(entity) for entity in self.mapping.entities
@@ -124,6 +126,11 @@ class KnxAdapter:
             for binding in entity.capabilities
         ]
         self._available = await self.transport.health()
+        cached_entities = {
+            entity_id for entity_id, _capability in self._states if entity_id in wanted
+        }
+        if self._event_stream_active and cached_entities:
+            return self._snapshots_for(wanted)
         for group_address in {binding.state_group_address for _entity, binding in bindings}:
             group_bindings = self._bindings_by_state_address[group_address]
             dpt = group_bindings[0][1].dpt
@@ -132,12 +139,23 @@ class KnxAdapter:
                     self.transport.read_group(group_address, dpt), self.discovery_timeout
                 )
             except (ConnectionError, OSError, TimeoutError) as error:
-                raise ConnectionError(f"KNX state read failed: {error}") from error
+                # Some KNX devices (including KNX Virtual's basic functions)
+                # publish a valid group-value response after a write but do
+                # not answer a subsequent GroupValueRead.  The event stream
+                # has already populated _states in that case, so preserve
+                # that evidence while the transport itself remains healthy.
+                # A read with no cached observation still fails closed.
+                if not self._available or not cached_entities:
+                    raise ConnectionError(f"KNX state read failed: {error}") from error
+                continue
             if value is not None:
                 try:
                     self._ingest_value(value)
                 except ValueError:
                     continue
+        return self._snapshots_for(wanted)
+
+    def _snapshots_for(self, wanted: set[str]) -> list[StateSnapshot]:
         snapshots: list[StateSnapshot] = []
         for (entity_id, capability), state in self._states.items():
             if entity_id not in wanted:
@@ -208,27 +226,36 @@ class KnxAdapter:
 
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         self._require_connected()
-        while True:
-            try:
-                value = await self.transport.receive(1.0)
-            except (ConnectionError, OSError, TimeoutError) as error:
-                self._available = False
-                raise ConnectionError(f"KNX event stream failed: {error}") from error
-            if value is None:
-                if not await self.transport.health() and self._available:
+        self._event_stream_active = True
+        try:
+            while True:
+                try:
+                    value = await self.transport.receive(1.0)
+                except (ConnectionError, OSError, TimeoutError) as error:
                     self._available = False
-                    yield AvailabilityChangedEvent(
-                        payload={"available": False},
-                    )
-                return
-            self._available = True
-            event: SourceEvent | None
-            try:
-                event = self._ingest_value(value)
-            except ValueError as error:
-                event = self._diagnostic(value.group_address, str(error))
-            if event is not None:
-                yield event
+                    raise ConnectionError(f"KNX event stream failed: {error}") from error
+                if value is None:
+                    if not await self.transport.health() and self._available:
+                        self._available = False
+                        yield AvailabilityChangedEvent(
+                            payload={"available": False},
+                        )
+                        return
+                    # A healthy KNX bus may simply have no telegram during the
+                    # polling interval.  Keep the subscription alive; treating
+                    # idle time as stream termination makes the composite mark a
+                    # perfectly healthy route unavailable and reconnect forever.
+                    continue
+                self._available = True
+                event: SourceEvent | None
+                try:
+                    event = self._ingest_value(value)
+                except ValueError as error:
+                    event = self._diagnostic(value.group_address, str(error))
+                if event is not None:
+                    yield event
+        finally:
+            self._event_stream_active = False
 
     async def health(self) -> AdapterHealth:
         connected = self._connected and await self.transport.health()
@@ -307,6 +334,28 @@ class KnxAdapter:
                 binding.dpt,
                 int(command.value),
             )
+        if command.command in {"charge_battery", "discharge_battery", "stop_battery"}:
+            binding = bindings.get("battery.power")
+            if binding is None or binding.command_group_address is None:
+                return None
+            if command.command == "stop_battery":
+                if command.value is not None or command.unit is not None:
+                    return None
+                value = 0.0
+            else:
+                if (
+                    command.value is None
+                    or isinstance(command.value, bool)
+                    or not isinstance(command.value, (int, float))
+                    or not math.isfinite(float(command.value))
+                    or command.value <= 0
+                    or command.unit not in {None, "kW"}
+                ):
+                    return None
+                value = float(command.value)
+                if command.command == "discharge_battery":
+                    value = -value
+            return binding.command_group_address, binding.dpt, value
         return None
 
     @staticmethod

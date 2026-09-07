@@ -16,14 +16,29 @@ class LabRunnerError(RuntimeError):
     """Raised for invalid local-lab configuration or command execution."""
 
 
-SERVICE_NAMES = frozenset({"mqtt", "zigbee2mqtt", "modbus", "homeassistant", "matter-server"})
+SERVICE_NAMES = frozenset(
+    {
+        "mqtt",
+        "zigbee2mqtt",
+        "modbus",
+        "battery",
+        "knx-gateway",
+        "homeassistant",
+        "matter-server",
+    }
+)
 DEFAULT_UP_SERVICES = ("mqtt", "zigbee2mqtt", "modbus")
-SERVICE_PROFILES = {"homeassistant": "homeassistant", "matter-server": "matter"}
+SERVICE_PROFILES = {
+    "battery": "battery",
+    "homeassistant": "homeassistant",
+    "matter-server": "matter",
+}
 FIXTURE_SMOKE_TESTS = (
     "tests/integration/test_virtual_lab_assets.py",
     "tests/integration/test_virtual_lab_smoke_configuration.py",
     "tests/integration/test_zigbee2mqtt_fixture.py",
     "tests/integration/test_modbus_fixture.py",
+    "tests/unit/lab/test_battery_simulator.py",
     "tests/integration/test_matter_server_fixture.py",
     "tests/integration/test_knx_fixture.py",
     "tests/integration/test_home_assistant_provider_runtime.py",

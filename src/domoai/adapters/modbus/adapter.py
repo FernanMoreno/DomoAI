@@ -311,6 +311,28 @@ class ModbusAdapter:
             ):
                 return None
             return binding.command, encode_point(binding.command, int(command.value))
+        if command.command in {"charge_battery", "discharge_battery", "stop_battery"}:
+            binding = bindings.get("battery.power")
+            if binding is None or binding.command is None:
+                return None
+            if command.command == "stop_battery":
+                if command.value is not None or command.unit is not None:
+                    return None
+                value = 0.0
+            else:
+                if (
+                    command.value is None
+                    or isinstance(command.value, bool)
+                    or not isinstance(command.value, (int, float))
+                    or not math.isfinite(float(command.value))
+                    or command.value <= 0
+                    or command.unit not in {None, "kW"}
+                ):
+                    return None
+                value = float(command.value)
+                if command.command == "discharge_battery":
+                    value = -value
+            return binding.command, encode_point(binding.command, value)
         return None
 
     @staticmethod

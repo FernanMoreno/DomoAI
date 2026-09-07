@@ -67,25 +67,35 @@ class HomeAssistantProviderAdapter:
         wanted = {source_ref.external_id for source_ref in source_refs}
         snapshot = await self.provider.snapshot()
         now = self._clock.now()
-        return [
-            StateSnapshot(
-                device_id=str(state["entity_id"]),
-                capability=str(state["capability"]),
-                value=state.get("value"),
-                unit=state.get("unit"),
-                observed_at=now,
-                received_at=now,
-                status=(
-                    StateStatus.CURRENT if state.get("available", True) else StateStatus.UNAVAILABLE
-                ),
-                source_ref=SourceRef(
-                    adapter_id=self.adapter_id,
-                    external_id=str(state["entity_id"]),
-                ),
+        states: list[StateSnapshot] = []
+        for state in snapshot.source_states:
+            if str(state["entity_id"]) not in wanted:
+                continue
+            observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
+            received_at = max(
+                observed_at,
+                _parse_source_timestamp(state.get("received_at"), fallback=now),
             )
-            for state in snapshot.source_states
-            if str(state["entity_id"]) in wanted
-        ]
+            states.append(
+                StateSnapshot(
+                    device_id=str(state["entity_id"]),
+                    capability=str(state["capability"]),
+                    value=state.get("value"),
+                    unit=state.get("unit"),
+                    observed_at=observed_at,
+                    received_at=received_at,
+                    status=(
+                        StateStatus.CURRENT
+                        if state.get("available", True)
+                        else StateStatus.UNAVAILABLE
+                    ),
+                    source_ref=SourceRef(
+                        adapter_id=self.adapter_id,
+                        external_id=str(state["entity_id"]),
+                    ),
+                )
+            )
+        return states
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None
@@ -181,17 +191,22 @@ class HomeAssistantProviderAdapter:
             return self._takeover_rejected(request, now, "baseline_unavailable")
         if state is None or not state.get("available", True):
             return self._takeover_rejected(request, now, "baseline_unavailable")
+        observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
+        received_at = max(
+            observed_at,
+            _parse_source_timestamp(state.get("received_at"), fallback=now),
+        )
         baseline = PhysicalBaseline(
             device_id=request.device_id,
             capability=binding.power_feedback_capability,
             power_kw=float(value),
-            observed_at=now,
-            received_at=now,
+            observed_at=observed_at,
+            received_at=received_at,
             source_ref=SourceRef(
                 adapter_id=self.adapter_id,
                 external_id=binding.power_feedback_entity_id,
             ),
-            state_revision=f"ha:{now.isoformat()}",
+            state_revision=f"ha:{observed_at.isoformat()}",
             native_scheduler_status=cast(
                 Literal["disabled", "inactive", "active", "unknown"],
                 request.native_scheduler_status,
@@ -277,6 +292,18 @@ class HomeAssistantProviderAdapter:
                     self._source_by_command.setdefault((canonical_id, str(command)), []).append(
                         entity_id
                     )
+
+
+def _parse_source_timestamp(value: object, *, fallback: datetime) -> datetime:
+    if value is None:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+    if parsed.tzinfo is None:
+        return fallback
+    return parsed.astimezone(fallback.tzinfo)
 
 
 def _slug(value: str) -> str:

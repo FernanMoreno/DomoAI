@@ -45,6 +45,7 @@ class ApprovalAssertion:
     plan_id: str | None = None
     validation_digest: str | None = None
     bundle_digest: str | None = None
+    recurrence_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not self.nonce.strip():
@@ -76,6 +77,8 @@ class ApprovalGrant:
     authentication_context: str = "legacy_bearer_token"
     session_id: str | None = None
     bundle_digest: str | None = None
+    recurrence_digest: str | None = None
+    validation_valid_until: datetime | None = None
     window_digest: str | None = None
     schedule_revision: int = 0
     assertion_nonce: str | None = None
@@ -85,6 +88,8 @@ class ApprovalGrant:
 
 class ApprovalStore:
     """In-process store of pending and consumed approval grants."""
+
+    APPROVAL_TTL = timedelta(minutes=5)
 
     def __init__(
         self,
@@ -110,6 +115,7 @@ class ApprovalStore:
         approved_by: str,
         operator_token: str | None,
         bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
         if (
             not self._allow_legacy_token
@@ -121,21 +127,23 @@ class ApprovalStore:
                 ErrorCode.OPERATOR_AUTHENTICATION_FAILED,
                 "Operator approval is not configured or the supplied token is incorrect",
             )
-        if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
-            raise DomainError(
-                ErrorCode.APPROVAL_REQUIRED,
-                "Only a validated plan requiring confirmation can receive an approval grant",
-            )
+        self._assert_issueable(plan, recurrence_digest=recurrence_digest)
         return self._issue(
             plan,
             approved_by=approved_by,
             authentication_context="legacy_bearer_token",
             session_id=None,
             bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
         )
 
     def issue_legacy(
-        self, plan: Plan, *, operator_token: str | None, bundle_digest: str | None = None
+        self,
+        plan: Plan,
+        *,
+        operator_token: str | None,
+        bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
         """Issue local/dev compatibility approval with server-owned identity."""
 
@@ -144,6 +152,7 @@ class ApprovalStore:
             approved_by=self._legacy_operator_id,
             operator_token=operator_token,
             bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
         )
 
     def issue_authenticated(
@@ -153,6 +162,7 @@ class ApprovalStore:
         principal: OperatorPrincipal,
         assertion: ApprovalAssertion | None = None,
         bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
         """Issue a grant only after a trusted host supplies a human assertion."""
 
@@ -170,6 +180,7 @@ class ApprovalStore:
             plan,
             assertion=assertion,
             bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
         )
 
     def issue_assertion(
@@ -178,10 +189,11 @@ class ApprovalStore:
         *,
         assertion: ApprovalAssertion,
         bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
         """Issue a digest-bound, expiring, one-nonce approval grant."""
 
-        self._assert_issueable(plan)
+        self._assert_issueable(plan, recurrence_digest=recurrence_digest)
         now = self._clock.now()
         if assertion.expires_at <= now:
             raise DomainError(
@@ -217,6 +229,11 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_ASSERTION_INVALID,
                 "Approval assertion does not match the bundle digest",
             )
+        if assertion.recurrence_digest != recurrence_digest:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_INVALID,
+                "Approval assertion does not match the recurrence digest",
+            )
 
         grant = self._issue(
             plan,
@@ -224,6 +241,7 @@ class ApprovalStore:
             authentication_context=assertion.principal.authentication_context,
             session_id=assertion.principal.session_id,
             bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
             assertion_nonce=assertion.nonce,
             approved_at=assertion.approved_at,
             expires_at=assertion.expires_at,
@@ -232,8 +250,12 @@ class ApprovalStore:
         return grant
 
     @staticmethod
-    def _assert_issueable(plan: Plan) -> None:
-        if plan.status is not PlanStatus.REQUIRES_CONFIRMATION or plan.validation is None:
+    def _assert_issueable(plan: Plan, *, recurrence_digest: str | None = None) -> None:
+        standing = recurrence_digest is not None
+        allowed = plan.status is PlanStatus.REQUIRES_CONFIRMATION or (
+            standing and plan.status in {PlanStatus.READY, PlanStatus.APPROVED}
+        )
+        if plan.validation is None or not allowed:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
                 "Only a validated plan requiring confirmation can receive an approval grant",
@@ -247,12 +269,26 @@ class ApprovalStore:
         authentication_context: str,
         session_id: str | None,
         bundle_digest: str | None,
+        recurrence_digest: str | None,
         assertion_nonce: str | None = None,
         approved_at: datetime | None = None,
         expires_at: datetime | None = None,
     ) -> ApprovalGrant:
-        self._assert_issueable(plan)
+        self._assert_issueable(plan, recurrence_digest=recurrence_digest)
         assert plan.validation is not None
+        now = self._clock.now()
+        server_expiry = now + self.APPROVAL_TTL
+        requested_expiry = expires_at or server_expiry
+        effective_expiry = min(
+            requested_expiry,
+            server_expiry,
+            plan.validation.valid_until or server_expiry,
+        )
+        if effective_expiry <= now:
+            raise DomainError(
+                ErrorCode.APPROVAL_ASSERTION_EXPIRED,
+                "Approval lifetime is already expired",
+            )
         grant = ApprovalGrant(
             approval_id=uuid.uuid4().hex,
             plan_id=plan.id,
@@ -262,24 +298,41 @@ class ApprovalStore:
             authentication_context=authentication_context,
             session_id=session_id,
             bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
+            validation_valid_until=plan.validation.valid_until,
             window_digest=plan.execution_window.digest if plan.execution_window else None,
             schedule_revision=plan.schedule_revision,
             assertion_nonce=assertion_nonce,
             approved_at=approved_at,
-            expires_at=expires_at,
+            expires_at=effective_expiry,
         )
         self._grants[grant.approval_id] = grant
         return grant
 
     def consume(
-        self, approval_id: str, plan: Plan, *, bundle_digest: str | None = None
+        self,
+        approval_id: str,
+        plan: Plan,
+        *,
+        bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
-        grant = self.validate(approval_id, plan, bundle_digest=bundle_digest)
+        grant = self.validate(
+            approval_id,
+            plan,
+            bundle_digest=bundle_digest,
+            recurrence_digest=recurrence_digest,
+        )
         self._consumed.add(approval_id)
         return grant
 
     def validate(
-        self, approval_id: str, plan: Plan, *, bundle_digest: str | None = None
+        self,
+        approval_id: str,
+        plan: Plan,
+        *,
+        bundle_digest: str | None = None,
+        recurrence_digest: str | None = None,
     ) -> ApprovalGrant:
         """Validate a grant without consuming it before a bundle preflight ends."""
 
@@ -300,6 +353,11 @@ class ApprovalStore:
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the plan's current validation digest",
             )
+        if grant.validation_valid_until != plan.validation.valid_until:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the current validation evidence lifetime",
+            )
         expected_window_digest = plan.execution_window.digest if plan.execution_window else None
         if (
             grant.window_digest != expected_window_digest
@@ -313,5 +371,10 @@ class ApprovalStore:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,
                 "Approval does not match the expected bundle digest",
+            )
+        if grant.recurrence_digest != recurrence_digest:
+            raise DomainError(
+                ErrorCode.APPROVAL_REQUIRED,
+                "Approval does not match the standing automation recurrence",
             )
         return grant

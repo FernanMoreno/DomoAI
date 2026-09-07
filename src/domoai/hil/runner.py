@@ -16,8 +16,11 @@ rather than silently marked passed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal
 
 from domoai.config.battery_qualification import (
     REQUIRED_HIL_CHECKS,
@@ -106,6 +109,24 @@ async def run_battery_hil(
     actuator = binding.profile.actuator
     if actuator is None:
         raise BatteryHILRunError("battery binding has no dispatch actuator configured")
+    configured_binding = getattr(runtime, "dispatchable_battery_binding", None)
+    if configured_binding is None:
+        raise BatteryHILRunError(
+            "HIL requires a runtime built with the exact dispatchable battery binding"
+        )
+    if configured_binding != binding:
+        raise BatteryHILRunError("HIL binding does not match the runtime binding")
+    if test_charge_kw > binding.profile.max_charge_kw:
+        raise BatteryHILRunError("test_charge_kw exceeds the battery profile envelope")
+    if test_discharge_kw > binding.profile.max_discharge_kw:
+        raise BatteryHILRunError("test_discharge_kw exceeds the battery profile envelope")
+    ceiling = getattr(runtime.settings, "battery_hil_power_ceiling_kw", None)
+    if ceiling is None:
+        raise BatteryHILRunError(
+            "HIL deployment safety ceiling must be configured before physical commands"
+        )
+    if max(test_charge_kw, test_discharge_kw) > ceiling:
+        raise BatteryHILRunError("HIL test power exceeds the deployment safety ceiling")
 
     clock = clock or SystemClock()
     run_id = run_id or f"hil-{uuid.uuid4().hex}"
@@ -161,7 +182,18 @@ async def run_battery_hil(
         ("stop_feedback", actuator.stop_command, None, 0.0, 0.0),
     ]
     outcomes_by_step: dict[str, ExecutionStatus] = {}
-    for index, (step_name, command_name, value, charge_kw, discharge_kw) in enumerate(steps):
+    command_attempted = False
+
+    async def _execute_step(
+        index: int,
+        step_name: str,
+        command_name: str,
+        value: float | None,
+        charge_kw: float,
+        discharge_kw: float,
+    ) -> None:
+        nonlocal command_attempted
+        command_attempted = command_attempted or charge_kw > 0 or discharge_kw > 0
         command = Command(
             id=f"{run_id}:{step_name}",
             device_id=actuator.device_id,
@@ -191,6 +223,8 @@ async def run_battery_hil(
                 approved_by="hil_runner_local_operator",
                 issued_at=clock.now(),
                 authentication_context="hil_runner_local_operator",
+                validation_valid_until=validated.validation.valid_until,
+                expires_at=validated.validation.valid_until,
                 window_digest=(
                     validated.execution_window.digest
                     if validated.execution_window is not None
@@ -213,10 +247,63 @@ async def run_battery_hil(
             "error": outcome.error.model_dump(mode="json") if outcome.error is not None else None,
         }
 
+    sequence_error: Exception | None = None
+    cleanup_error: Exception | None = None
+    try:
+        for index, (step_name, command_name, value, charge_kw, discharge_kw) in enumerate(steps):
+            await _execute_step(
+                index, step_name, command_name, value, charge_kw, discharge_kw
+            )
+    except Exception as error:
+        sequence_error = error
+    finally:
+        # A latched command must be stopped even when validation, transport,
+        # readback, or an unexpected runner error interrupts the sequence.
+        if (
+            command_attempted
+            and outcomes_by_step.get("stop_feedback") is not ExecutionStatus.CONFIRMED_SUCCESS
+        ):
+            try:
+                await _execute_step(
+                    len(steps),
+                    "emergency_stop",
+                    actuator.stop_command,
+                    None,
+                    0.0,
+                    0.0,
+                )
+                if outcomes_by_step.get("emergency_stop") is not ExecutionStatus.CONFIRMED_SUCCESS:
+                    raise BatteryHILRunError("emergency stop did not confirm zero power")
+            except Exception as error:
+                cleanup_error = error
+    if sequence_error is not None:
+        if cleanup_error is not None:
+            raise BatteryHILRunError(
+                f"HIL sequence failed and emergency stop was not confirmed: {cleanup_error}"
+            ) from sequence_error
+        raise BatteryHILRunError(f"HIL sequence failed: {sequence_error}") from sequence_error
+    if cleanup_error is not None:
+        raise BatteryHILRunError(
+            f"HIL emergency stop was not confirmed: {cleanup_error}"
+        ) from cleanup_error
+
     def _confirmed(step: str) -> bool:
         return outcomes_by_step[step] is ExecutionStatus.CONFIRMED_SUCCESS
 
-    checks["takeover_baseline"] = _confirmed("baseline_stop")
+    takeover_payload = next(
+        (
+            event.payload
+            for event in reversed(runtime.audit.events)
+            if event.event_type == "control_takeover_result"
+            and event.payload.get("plan_id") == f"{run_id}-baseline_stop"
+            and event.payload.get("status") == "acquired"
+            and isinstance(event.payload.get("baseline"), dict)
+        ),
+        None,
+    )
+    checks["takeover_baseline"] = takeover_payload is not None and _confirmed("baseline_stop")
+    if takeover_payload is not None:
+        observations["takeover_baseline"] = takeover_payload
     checks["charge_feedback"] = _confirmed("charge_feedback")
     checks["discharge_feedback"] = _confirmed("discharge_feedback")
     checks["stop_feedback"] = _confirmed("post_charge_stop") and _confirmed("stop_feedback")
@@ -229,7 +316,22 @@ async def run_battery_hil(
     )
 
     for check_name in _MANUAL_ONLY_CHECKS:
-        checks[check_name] = True  # presence already required above; value is the attestation
+        note = manual_attestations[check_name].lower()
+        checks[check_name] = not any(
+            marker in note for marker in ("not exercised", "not tested", "not verified", "not run")
+        )
+
+    def _manual_status(
+        check_name: str,
+    ) -> Literal["verified", "not_verified", "not_exercised", "not_applicable"]:
+        note = manual_attestations[check_name].lower()
+        if "not applicable" in note or "n/a" in note:
+            return "not_applicable"
+        if "not exercised" in note or "not tested" in note or "not run" in note:
+            return "not_exercised"
+        if "not verified" in note:
+            return "not_verified"
+        return "verified" if checks[check_name] else "not_verified"
 
     status: str = "passed" if all(checks.values()) else "failed"
     return BatteryHILEvidence(
@@ -243,4 +345,24 @@ async def run_battery_hil(
         test_software_version=test_software_version,
         observations=observations,
         manual_attestations=manual_attestations,
+        provider_id=binding.provider_id,
+        runtime_binding_digest=battery_binding_digest(binding),
+        takeover_evidence_digest=(
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(takeover_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if takeover_payload is not None
+            else None
+        ),
+        qualification_expires_at=clock.now() + timedelta(hours=24),
+        # The CLI receives these labels from the operator; it does not read
+        # serial/firmware identity from the physical device. Keep this
+        # artifact explicitly non-qualifying until a trusted test authority
+        # attaches identity attestation.
+        hardware_identity_observed=False,
+        firmware_identity_observed=False,
+        manual_check_status={
+            check: _manual_status(check) for check in _MANUAL_ONLY_CHECKS
+        },
     )

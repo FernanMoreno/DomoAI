@@ -6,14 +6,76 @@ from typing import Any
 import pytest
 
 from domoai.adapters.modbus.adapter import ModbusAdapter
-from domoai.adapters.modbus.config import ModbusMappingDocument
+from domoai.adapters.modbus.codec import encode_point
+from domoai.adapters.modbus.config import ModbusMappingDocument, ModbusPoint
 from domoai.adapters.modbus.mapper import ModbusMapper
 from domoai.adapters.modbus.transport import (
     InMemoryModbusTransport,
+    ModbusSample,
     PyModbusTcpTransport,
 )
 from domoai.domain.models import Command, SourceRef
 from tests.fixtures.modbus import mapping_payload, samples
+
+
+def battery_mapping_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "v1",
+        "entities": [
+            {
+                "entity_id": "lab.battery",
+                "name": "Virtual Battery",
+                "area_id": "lab",
+                "semantic_type": "energy",
+                "manufacturer": "DomoAI Lab",
+                "model": "Deterministic Battery",
+                "unit_id": 1,
+                "capabilities": [
+                    {
+                        "name": "battery.soc",
+                        "state": {
+                            "area": "input_register",
+                            "address": 0,
+                            "data_type": "float32",
+                        },
+                    },
+                    {
+                        "name": "battery.power",
+                        "state": {
+                            "area": "input_register",
+                            "address": 2,
+                            "data_type": "float32",
+                        },
+                        "command": {
+                            "area": "holding_register",
+                            "address": 10,
+                            "data_type": "float32",
+                        },
+                    },
+                    {
+                        "name": "battery.capacity",
+                        "state": {
+                            "area": "input_register",
+                            "address": 4,
+                            "data_type": "float32",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def battery_samples() -> list[ModbusSample]:
+    def point(address: int) -> ModbusPoint:
+        return ModbusPoint(area="input_register", address=address, data_type="float32")
+
+    observed_at = samples()[0].observed_at
+    return [
+        ModbusSample(1, "input_register", 0, encode_point(point(0), 5.0), observed_at),
+        ModbusSample(1, "input_register", 2, encode_point(point(2), 0.0), observed_at),
+        ModbusSample(1, "input_register", 4, encode_point(point(4), 10.0), observed_at),
+    ]
 
 
 def test_mapping_projects_bounded_canonical_entities() -> None:
@@ -29,6 +91,22 @@ def test_mapping_projects_bounded_canonical_entities() -> None:
         "brightness",
     }
     assert all(capability["writable"] for capability in light["capabilities"])
+
+
+def test_mapping_projects_explicit_energy_capabilities_and_routes() -> None:
+    document = ModbusMappingDocument.model_validate(battery_mapping_payload())
+    snapshot = ModbusMapper().to_snapshot(document)
+
+    battery = snapshot.source_entities[0]
+    assert battery["domain"] == "energy"
+    capabilities = {item["name"]: item for item in battery["capabilities"]}
+    assert capabilities["battery.soc"]["unit"] == "kWh"
+    assert capabilities["battery.capacity"]["writable"] is False
+    assert capabilities["battery.power"]["commands"] == [
+        "charge_battery",
+        "discharge_battery",
+        "stop_battery",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -216,6 +294,53 @@ async def test_invalid_and_unavailable_commands_never_write() -> None:
     assert transport.writes == []
 
 
+@pytest.mark.asyncio
+async def test_adapter_translates_battery_dispatch_to_signed_power_setpoint() -> None:
+    transport = InMemoryModbusTransport(battery_samples())
+    adapter = ModbusAdapter(
+        transport, ModbusMappingDocument.model_validate(battery_mapping_payload())
+    )
+    await adapter.connect()
+    await adapter.discover()
+
+    charge = await adapter.execute(
+        Command(
+            id="battery-charge",
+            device_id="lab.virtual-battery",
+            command="charge_battery",
+            value=2.0,
+            unit="kW",
+            idempotency_key="battery-charge-1",
+        )
+    )
+    discharge = await adapter.execute(
+        Command(
+            id="battery-discharge",
+            device_id="lab.virtual-battery",
+            command="discharge_battery",
+            value=1.5,
+            unit="kW",
+            idempotency_key="battery-discharge-1",
+        )
+    )
+    stop = await adapter.execute(
+        Command(
+            id="battery-stop",
+            device_id="lab.virtual-battery",
+            command="stop_battery",
+            idempotency_key="battery-stop-1",
+        )
+    )
+
+    assert charge.accepted and discharge.accepted and stop.accepted
+    point = ModbusPoint(area="holding_register", address=10, data_type="float32")
+    assert [transport.writes[index].values for index in range(len(transport.writes))] == [
+        encode_point(point, 2.0),
+        encode_point(point, -1.5),
+        encode_point(point, 0.0),
+    ]
+
+
 class _FakeResponse:
     def __init__(
         self,
@@ -250,6 +375,22 @@ class _FakeClient:
         return _FakeResponse()
 
 
+class _ModernFakeClient:
+    connected = True
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    def close(self) -> None:
+        self.connected = False
+
+    async def read_coils(
+        self, address: int, *, count: int = 1, device_id: int = 1
+    ) -> _FakeResponse:
+        assert (address, count, device_id) == (4, 1, 1)
+        return _FakeResponse(bits=[True])
+
+
 @pytest.mark.asyncio
 async def test_live_transport_isolated_behind_fake_client() -> None:
     client = _FakeClient()
@@ -265,4 +406,19 @@ async def test_live_transport_isolated_behind_fake_client() -> None:
     assert sample.values == (True,)
     assert client.calls[0] == ("read_coils", (4, 1), {"slave": 1})
     assert client.calls[1] == ("write_coil", (5, False), {"slave": 1})
+    await transport.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_live_transport_supports_current_pymodbus_read_signature() -> None:
+    transport = PyModbusTcpTransport(
+        "192.0.2.20",
+        client_factory=lambda _host, _port, _timeout: _ModernFakeClient(),
+    )
+    await transport.connect()
+
+    sample = await transport.read(1, "coil", 4, 1)
+
+    assert sample is not None
+    assert sample.values == (True,)
     await transport.disconnect()

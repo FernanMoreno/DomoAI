@@ -29,6 +29,7 @@ from tests.fixtures.skill_workflow import (
 
 def request_for(fixture: Any, **scenario_options: Any) -> EnergySkillRequest:
     device_id = light_device_id(fixture)
+    scenario_options.setdefault("horizon", fixture.horizon)
     return EnergySkillRequest(
         scenario=scenario_for(device_id, **scenario_options),
         devices=[device_id],
@@ -40,6 +41,7 @@ def bundle_request_for(fixture: Any, **scenario_options: Any) -> EnergySkillRequ
     light_id = light_device_id(fixture)
     switch_id = switch_device_id(fixture)
     scenario_options.setdefault("device_ids", (light_id, switch_id))
+    scenario_options.setdefault("horizon", fixture.horizon)
     return EnergySkillRequest(
         scenario=multi_slot_scenario_for(light_id, **scenario_options),
         devices=[light_id, switch_id],
@@ -735,10 +737,17 @@ async def test_mixed_bundle_approval_uses_full_bundle_digest() -> None:
     assert [call["validation_digest"] for call in member_approval_calls] == [
         pending.validation_digests[1]
     ]
-    member_execute_calls = [
-        arguments for _provider, tool, arguments in fixture.router.calls if tool == "execute_plan"
+    assert all(
+        tool not in {"execute_plan", "schedule_plan"}
+        for _provider, tool, _arguments in fixture.router.calls
+    )
+    commit_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "commit_or_schedule_bundle"
     ]
-    assert [call["validation_digest"] for call in member_execute_calls] == [
+    assert len(commit_calls) == 1
+    assert [member["validation_digest"] for member in commit_calls[0]["members"]] == [
         pending.validation_digests[0],
         pending.validation_digests[1],
     ]
@@ -776,14 +785,19 @@ async def test_bundle_future_members_are_scheduled_not_dropped() -> None:
     assert len(result.scheduled_plan_ids) == 1
     assert len(fixture.domotics_adapter.calls) == 1
 
-    execute_calls = [
-        arguments for _provider, tool, arguments in fixture.router.calls if tool == "execute_plan"
+    assert all(
+        tool not in {"execute_plan", "schedule_plan"}
+        for _provider, tool, _arguments in fixture.router.calls
+    )
+    commit_calls = [
+        arguments
+        for _provider, tool, arguments in fixture.router.calls
+        if tool == "commit_or_schedule_bundle"
     ]
-    schedule_calls = [
-        arguments for _provider, tool, arguments in fixture.router.calls if tool == "schedule_plan"
-    ]
-    assert execute_calls[0]["validation_digest"] == result.validation_digests[0]
-    assert schedule_calls[0]["validation_digest"] == result.validation_digests[1]
+    assert len(commit_calls) == 1
+    assert [member["validation_digest"] for member in commit_calls[0]["members"]] == (
+        result.validation_digests
+    )
 
     listed = await fixture.router.call("mcp", "list_scheduled_plans", {})
     listed_ids = {entry["plan_id"] for entry in listed["plans"]}

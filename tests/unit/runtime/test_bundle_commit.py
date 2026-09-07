@@ -94,7 +94,8 @@ class _Facade:
         self.calls: list[str] = []
         self.failures = failures or set()
 
-    async def execute_plan(self, plan: Plan) -> ExecutionSummary:
+    async def execute_plan(self, plan: Plan, *, aggregate_owner: bool = False) -> ExecutionSummary:
+        assert aggregate_owner is True
         self.calls.append(plan.id)
         if plan.id in self.failures:
             raise RuntimeError(f"failure:{plan.id}")

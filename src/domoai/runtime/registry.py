@@ -48,6 +48,20 @@ class DeviceRegistry:
             self._devices[device.id] = device
             for source_ref in device.source_refs:
                 self._source_entity_ids[(source_ref.adapter_id, source_ref.external_id)] = device.id
+                # Preserve stable provider claims independently from the last
+                # external entity id. Providers such as Home Assistant can
+                # rename an entity while keeping the device identifiers and
+                # connections unchanged; the next live discovery must be able
+                # to recover the same canonical device without rehydrating an
+                # executable route.
+                for identity_key in device.identity_keys:
+                    self._identity_to_canonical[
+                        f"source-identity:{source_ref.adapter_id}:{identity_key}"
+                    ] = device.id
+                for connection in device.connections:
+                    self._identity_to_canonical[
+                        f"source-connection:{source_ref.adapter_id}:{connection}"
+                    ] = device.id
 
     def apply_snapshot(
         self, snapshot: AdapterSnapshot, adapter_id: str
@@ -287,6 +301,22 @@ class DeviceRegistry:
                 else AvailabilityStatus.UNAVAILABLE
             ),
             source_refs=source_refs,
+            identity_keys=list(
+                dict.fromkeys(
+                    [
+                        *(existing.identity_keys if existing is not None else []),
+                        *identity.identity_keys,
+                    ]
+                )
+            ),
+            connections=list(
+                dict.fromkeys(
+                    [
+                        *(existing.connections if existing is not None else []),
+                        *identity.connections,
+                    ]
+                )
+            ),
         )
         self._devices[canonical_id] = device
         self._source_device_ids[(adapter_id, identity.source_device_id)] = canonical_id

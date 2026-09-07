@@ -589,6 +589,15 @@
           "default": true,
           "title": "Hard",
           "type": "boolean"
+        },
+        "enforcement": {
+          "default": "planning_only",
+          "enum": [
+            "planning_only",
+            "physical_execution"
+          ],
+          "title": "Enforcement",
+          "type": "string"
         }
       },
       "required": [

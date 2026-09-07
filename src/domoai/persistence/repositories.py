@@ -138,6 +138,9 @@ class AuditEventRepository:
         since: datetime | None = None,
         limit: int = 100,
     ) -> list[AuditEvent]:
+        if limit < 1:
+            raise ValueError("audit event limit must be at least 1")
+        bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
         clauses: list[str] = []
         params: list[Any] = []
         if event_type is not None:
@@ -152,7 +155,6 @@ class AuditEventRepository:
             clauses.append("julianday(created_at) > julianday(?)")
             params.append(since.astimezone(UTC).isoformat())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        bounded_limit = min(limit, self._MAX_LIST_EVENTS_LIMIT)
         params.append(bounded_limit)
 
         cursor = self.database.connection.execute(

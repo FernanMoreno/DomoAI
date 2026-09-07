@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.domain.models import Command, SourceRef, StateStatus
+from domoai.runtime.clock import FixedClock
 from domoai.runtime.execution_context import ExecutionContext
 from tests.fixtures.home_assistant_provider import FakeHomeAssistantProviderClient
 from tests.fixtures.simulated_home import simulated_home_entities
@@ -30,6 +33,42 @@ async def test_bridge_preserves_entity_routes_and_projects_provider_snapshot() -
         ("brightness", 0),
     ]
     assert all(state.status is StateStatus.CURRENT for state in states)
+
+
+@pytest.mark.asyncio
+async def test_bridge_preserves_source_received_at_instead_of_rejuvenating_cache() -> None:
+    observed_at = datetime(2026, 8, 25, 10, tzinfo=UTC)
+    received_at = datetime(2026, 8, 25, 10, 1, tzinfo=UTC)
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    entities = simulated_home_entities()
+    entities[0].update(
+        {
+            "last_updated": observed_at.isoformat(),
+            "last_changed": observed_at.isoformat(),
+            "received_at": received_at.isoformat(),
+        }
+    )
+    client = FakeHomeAssistantProviderClient(entities)
+    provider = HomeAssistantProvider(client, clock=FixedClock(now))
+    bridge = HomeAssistantProviderAdapter(provider, clock=FixedClock(now))
+
+    await bridge.connect()
+    await bridge.discover()
+    states = await bridge.read_state(
+        [SourceRef(adapter_id="home_assistant", external_id="light.living_room_main")]
+    )
+    measurements = await provider.get_measurements()
+
+    light_states = [state for state in states if state.capability == "power"]
+    light_measurements = [
+        item for item in measurements if item.source_ref.external_id == "light.living_room_main"
+    ]
+    assert light_states
+    assert light_measurements
+    assert light_states[0].observed_at == observed_at
+    assert light_states[0].received_at == received_at
+    assert light_measurements[0].observed_at == observed_at
+    assert light_measurements[0].received_at == received_at
 
 
 @pytest.mark.asyncio

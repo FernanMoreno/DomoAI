@@ -22,6 +22,7 @@ from domoai.optimizer.ports import (
     build_result,
 )
 from domoai.optimizer.scenario import (
+    MAX_HORIZON_SLOTS,
     OptimizationScenario,
     validate_executable_scenario,
 )
@@ -49,6 +50,7 @@ class OrtoolsMcpContext:
     plan_service: PlanService
     optimization_service: OptimizationService
     optimization_worker: BoundedOptimizerWorkerPort | None = None
+    max_horizon_slots: int = MAX_HORIZON_SLOTS
 
     @property
     def runtime_revision(self) -> str:
@@ -127,7 +129,9 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     async def validate_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
-            diagnostics = validate_scenario_model(parsed, context.registry)
+            diagnostics = validate_scenario_model(
+                parsed, context.registry, max_horizon_slots=context.max_horizon_slots
+            )
             return {
                 "schema_version": "v1",
                 "scenario_id": parsed.id,
@@ -150,7 +154,11 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
         try:
             parsed = OptimizationScenario.model_validate(scenario)
             if parsed.ev_loads:
-                diagnostics = validate_executable_scenario(parsed, context.registry)
+                diagnostics = validate_executable_scenario(
+                    parsed,
+                    context.registry,
+                    max_horizon_slots=context.max_horizon_slots,
+                )
                 if diagnostics:
                     return {
                         "schema_version": "v1",

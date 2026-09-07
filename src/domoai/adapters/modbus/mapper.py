@@ -21,6 +21,9 @@ _UNITS: dict[str, str | None] = {
     "temperature": "°C",
     "humidity": "%",
     "occupancy": None,
+    "battery.soc": "kWh",
+    "battery.power": "kW",
+    "battery.capacity": "kWh",
 }
 
 
@@ -63,12 +66,17 @@ class ModbusMapper:
             commands = ["turn_on", "turn_off"]
         elif writable and binding.name == "brightness":
             commands = ["set_brightness"]
+        elif writable and binding.name == "battery.power":
+            commands = ["charge_battery", "discharge_battery", "stop_battery"]
         kind = {
             "power": CapabilityKind.BOOLEAN.value,
             "brightness": CapabilityKind.INTEGER.value,
             "temperature": CapabilityKind.NUMBER.value,
             "humidity": CapabilityKind.NUMBER.value,
             "occupancy": CapabilityKind.BOOLEAN.value,
+            "battery.soc": CapabilityKind.NUMBER.value,
+            "battery.power": CapabilityKind.NUMBER.value,
+            "battery.capacity": CapabilityKind.NUMBER.value,
         }[binding.name]
         result: dict[str, Any] = {
             "name": binding.name,
@@ -107,6 +115,11 @@ class ModbusMapper:
             if not float(value).is_integer():
                 raise ValueError("brightness must decode to an integer percentage")
             value = int(value)
+        if binding.name in {"battery.soc", "battery.power", "battery.capacity"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{binding.name} must decode to a number")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{binding.name} must be finite")
         return {
             "entity_id": entity.entity_id,
             "capability": binding.name,

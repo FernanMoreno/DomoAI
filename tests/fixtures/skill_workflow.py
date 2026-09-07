@@ -90,6 +90,7 @@ class WorkflowFixture:
     ortools_context: OrtoolsMcpContext
     router: FixtureToolRouter
     approval: FixtureApprovalPort
+    horizon: Horizon
 
 
 async def build_workflow_fixture(
@@ -100,8 +101,9 @@ async def build_workflow_fixture(
     horizon: Horizon | None = None,
     clock: Clock | None = None,
 ) -> WorkflowFixture:
+    selected_horizon = horizon or default_horizon()
     domotics_adapter, domotics_context = await _build_domotics_context(
-        confirmation_required=confirmation_required, horizon=horizon, clock=clock
+        confirmation_required=confirmation_required, horizon=selected_horizon, clock=clock
     )
     ortools_context = OrtoolsMcpContext(
         registry=domotics_context.registry,
@@ -129,13 +131,17 @@ async def build_workflow_fixture(
         ortools_context=ortools_context,
         router=router,
         approval=approval,
+        horizon=selected_horizon,
     )
 
 
 def default_horizon() -> Horizon:
+    # Keep independently-created fixture requests identical within a clock
+    # minute while remaining due and inside their execution window.
+    start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(hours=1)
     return Horizon(
-        start=datetime(2026, 8, 15, tzinfo=UTC),
-        end=datetime(2026, 8, 15, 1, tzinfo=UTC),
+        start=start,
+        end=start + timedelta(hours=2),
         resolution_minutes=15,
         timezone="Europe/Madrid",
     )
@@ -235,17 +241,14 @@ async def _build_domotics_context(
 def scenario_for(
     device_id: str,
     *,
+    horizon: Horizon | None = None,
     max_power: float = 500,
     solver_time_limit_seconds: float = 5.0,
 ) -> OptimizationScenario:
+    selected_horizon = horizon or default_horizon()
     return OptimizationScenario(
         id="fixture-energy-001",
-        horizon=Horizon(
-            start=datetime(2026, 8, 15, tzinfo=UTC),
-            end=datetime(2026, 8, 15, 1, tzinfo=UTC),
-            resolution_minutes=15,
-            timezone="Europe/Madrid",
-        ),
+        horizon=selected_horizon,
         loads=[
             Load(
                 id="light-load",

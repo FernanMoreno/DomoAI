@@ -8,7 +8,6 @@ from domoai.domain.models import (
     Command,
     ExecutionStatus,
     Plan,
-    SourceRef,
     StateSnapshot,
     StateStatus,
 )
@@ -50,6 +49,8 @@ async def test_twin_preview_reflects_mirrored_current_state() -> None:
     adapter, registry, state_store = await _live_context()
     switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
 
+    existing = state_store.peek(switch_id, "power")
+    assert existing is not None
     await state_store.save(
         StateSnapshot(
             device_id=switch_id,
@@ -58,7 +59,7 @@ async def test_twin_preview_reflects_mirrored_current_state() -> None:
             observed_at=datetime.now(UTC),
             received_at=datetime.now(UTC),
             status=StateStatus.CURRENT,
-            source_ref=SourceRef(adapter_id="fixture", external_id=switch_id),
+            source_ref=existing.source_ref,
         )
     )
 

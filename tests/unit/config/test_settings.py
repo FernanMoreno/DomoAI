@@ -95,6 +95,16 @@ def test_home_assistant_mapping_path_is_loaded_from_environment(
     assert "fixture-token" not in repr(settings)
 
 
+def test_ev_charging_profile_path_is_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_EV_CHARGING_PROFILE_PATH", "config/ev-charging.json")
+
+    settings = Settings.from_environment()
+
+    assert settings.ev_charging_profile_path == Path("config/ev-charging.json")
+
+
 def test_matter_server_settings_are_loaded_with_safe_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -145,6 +155,16 @@ def test_modbus_settings_can_coexist_with_existing_sources() -> None:
     assert settings.knx_gateway_host is not None
 
 
+def test_knx_gateway_route_back_is_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOMOAI_KNX_GATEWAY_ROUTE_BACK", "1")
+
+    settings = Settings.from_environment()
+
+    assert settings.knx_gateway_route_back is True
+
+
 def test_mqtt_tls_settings_default_to_no_ca_and_verification_on() -> None:
     settings = Settings(zigbee2mqtt_url="mqtts://broker.test:8883")
 
@@ -170,6 +190,14 @@ def test_mqtt_client_cert_and_key_pair_is_accepted_together() -> None:
 
     assert settings.mqtt_client_cert_path == Path("config/mqtt-client.crt")
     assert settings.mqtt_client_key_path == Path("config/mqtt-client.key")
+
+
+def test_audit_database_must_be_physically_separate_from_authority_database() -> None:
+    with pytest.raises(ValueError, match="audit database must be separate"):
+        Settings(
+            database_path=Path("data/domoai.sqlite3"),
+            audit_database_path=Path("data/domoai.sqlite3"),
+        )
 
 
 def test_composite_event_queue_max_size_defaults_and_loads_from_environment(

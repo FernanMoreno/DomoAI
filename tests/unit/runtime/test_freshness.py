@@ -43,6 +43,15 @@ def test_current_matching_evidence_is_authorized() -> None:
     assert decision.reason_code == "current_evidence"
 
 
+def test_current_evidence_expires_by_server_owned_age() -> None:
+    evaluator = FreshnessEvaluator(FixedClock(datetime(2026, 8, 23, 12, tzinfo=UTC)))
+
+    decision = evaluator.evaluate(_snapshot(StateStatus.CURRENT), _precondition())
+
+    assert decision.satisfied is False
+    assert decision.reason_code == "current_evidence_expired"
+
+
 def test_missing_evidence_fails_closed() -> None:
     decision = FreshnessEvaluator().evaluate(None, _precondition())
 
@@ -81,4 +90,4 @@ def test_unavailable_and_invalid_evidence_never_become_authorizable() -> None:
     for status in (StateStatus.UNAVAILABLE, StateStatus.INVALID):
         decision = evaluator.evaluate(_snapshot(status), _precondition(allow_stale=True), policy)
         assert decision.satisfied is False
-        assert decision.reason_code == "precondition_state_not_current"
+        assert decision.reason_code == f"{status.value}_evidence"

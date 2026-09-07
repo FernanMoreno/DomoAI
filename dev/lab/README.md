@@ -30,6 +30,14 @@ ese archivo, elimina las variables `DOMOAI_*` del proceso hijo y ejecuta solo
 fixtures locales; por tanto no activa OMIE, Open-Meteo, Home Assistant live,
 Matter commissioning ni KNX/IP.
 
+El broker Mosquitto usa el volumen Docker externo `domoai-lab-mqtt-data` para
+conservar discovery y estados retained entre reinicios. Créalo una vez antes
+de levantar este stack:
+
+```bash
+docker volume create domoai-lab-mqtt-data
+```
+
 Para detener y borrar volúmenes de forma explícita:
 
 ```bash
@@ -121,6 +129,12 @@ Todos los servicios comparten la red del proyecto `domoai-lab`. Desde el host,
 Home Assistant queda en `http://127.0.0.1:8123`; desde otro contenedor del
 laboratorio, la URL es `http://homeassistant:8123`.
 
+La configuración persistente de Home Assistant se guarda en el volumen Docker
+nombrado `domoai-lab-homeassistant-data`, independiente del worktree desde el
+que se ejecute Compose. No uses `docker compose down -v` mientras este volumen
+sea el almacenamiento operativo, salvo que exista un respaldo verificado y la
+eliminación sea intencionada.
+
 En el primer arranque abre `http://127.0.0.1:8123`, completa el onboarding y
 genera un token long-lived local. El token se configura solo en la shell y no
 se guarda en el repositorio:
@@ -201,8 +215,12 @@ direcciones del proyecto en `configs/knx-virtual.json`.
 
 ```bash
 docker compose -f dev/lab/compose.yaml logs -f zigbee2mqtt modbus
-docker compose -f dev/lab/compose.yaml down -v
+docker compose -f dev/lab/compose.yaml down
 ```
+
+Este reset detiene los contenedores y conserva los volúmenes nombrados. Para
+eliminar datos persistentes usa `uv run domoai-lab down --volumes` solo después
+de verificar un respaldo y aceptar explícitamente la pérdida de datos.
 
 Si Docker no está disponible, la suite determinista de DomoAI y
 `tests/integration/test_virtual_lab_assets.py` siguen siendo ejecutables. Los

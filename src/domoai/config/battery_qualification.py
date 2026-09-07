@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,10 +27,30 @@ REQUIRED_HIL_CHECKS = frozenset(
         "restart_no_replay",
     }
 )
+MANUAL_HIL_CHECKS = frozenset({"native_scheduler_conflict", "restart_no_replay"})
 
 
 class BatteryQualificationError(ValueError):
     """Raised when a physical battery qualification artifact is unsafe."""
+
+
+class HILIdentityObservation(StrictModel):
+    """Identity read from the exercised device or a trusted test authority.
+
+    The CLI labels are intentionally not enough: qualification needs a
+    structured observation tied to the artifact and its observation time.
+    """
+
+    hardware_id: str = Field(min_length=1, max_length=200)
+    firmware_version: str = Field(min_length=1, max_length=200)
+    source: Literal["adapter_observed", "trusted_attestation"]
+    observed_at: datetime
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> HILIdentityObservation:
+        if self.observed_at.tzinfo is None:
+            raise ValueError("HIL identity observation must be timezone-aware")
+        return self
 
 
 class BatteryHILEvidence(StrictModel):
@@ -50,8 +70,20 @@ class BatteryHILEvidence(StrictModel):
     # both require multi-phase/out-of-band verification a single CLI
     # invocation cannot self-certify.
     test_software_version: str | None = Field(default=None, max_length=200)
+    identity_observation: HILIdentityObservation | None = None
     observations: dict[str, dict[str, Any]] = Field(default_factory=dict)
     manual_attestations: dict[str, str] = Field(default_factory=dict)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=200)
+    runtime_binding_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    takeover_evidence_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    qualification_expires_at: datetime | None = None
+    hardware_identity_observed: bool = False
+    firmware_identity_observed: bool = False
+    manual_check_status: dict[
+        str, Literal["verified", "not_verified", "not_exercised", "not_applicable"]
+    ] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_evidence(self) -> BatteryHILEvidence:
@@ -68,10 +100,76 @@ class BatteryHILEvidence(StrictModel):
         unknown_manual = set(self.manual_attestations) - REQUIRED_HIL_CHECKS
         if unknown_manual:
             raise ValueError("battery HIL manual attestations reference unknown checks")
+        for field_name, value in (
+            ("qualification_expires_at", self.qualification_expires_at),
+        ):
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+        unknown_manual_status = set(self.manual_check_status) - REQUIRED_HIL_CHECKS
+        if unknown_manual_status:
+            raise ValueError("manual check status references unknown checks")
+        if self.identity_observation is not None and (
+            self.identity_observation.hardware_id != self.hardware_id
+            or self.identity_observation.firmware_version != self.firmware_version
+        ):
+            raise ValueError(
+                "HIL identity observation must match the artifact hardware and firmware labels"
+            )
         return self
 
-    def qualifies(self, binding: DispatchableBatteryBinding) -> bool:
-        return self.status == "passed" and self.profile_digest == battery_binding_digest(binding)
+    def qualifies(
+        self,
+        binding: DispatchableBatteryBinding,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(hours=24),
+    ) -> bool:
+        """Return true only for complete, fresh, scope-bound evidence.
+
+        A fixture report may be useful for diagnostics but cannot silently
+        become production authority: provider/runtime/takeover provenance and
+        structured manual verification are required here.
+        """
+
+        if self.status != "passed" or self.profile_digest != battery_binding_digest(binding):
+            return False
+        if self.provider_id != binding.provider_id:
+            return False
+        if self.runtime_binding_digest != self.profile_digest:
+            return False
+        if self.takeover_evidence_digest is None:
+            return False
+        if not self.test_software_version:
+            return False
+        if not self.hardware_identity_observed or not self.firmware_identity_observed:
+            return False
+        identity = self.identity_observation
+        if identity is None or identity.source not in {
+            "adapter_observed",
+            "trusted_attestation",
+        }:
+            return False
+        if (
+            identity.hardware_id != self.hardware_id
+            or identity.firmware_version != self.firmware_version
+        ):
+            return False
+        current = now or datetime.now(UTC)
+        if current < identity.observed_at or current - identity.observed_at > max_age:
+            return False
+        if any(self.manual_check_status.get(check) != "verified" for check in MANUAL_HIL_CHECKS):
+            return False
+        if any(
+            marker in note.lower()
+            for note in self.manual_attestations.values()
+            for marker in ("not exercised", "not tested", "not verified", "not run")
+        ):
+            return False
+        if current < self.completed_at or current - self.completed_at > max_age:
+            return False
+        if self.qualification_expires_at is not None and current >= self.qualification_expires_at:
+            return False
+        return True
 
 
 def battery_binding_digest(binding: DispatchableBatteryBinding) -> str:
@@ -93,6 +191,8 @@ def load_battery_hil_evidence(path: Path) -> BatteryHILEvidence:
 __all__ = [
     "BatteryHILEvidence",
     "BatteryQualificationError",
+    "HILIdentityObservation",
+    "MANUAL_HIL_CHECKS",
     "REQUIRED_HIL_CHECKS",
     "battery_binding_digest",
     "load_battery_hil_evidence",

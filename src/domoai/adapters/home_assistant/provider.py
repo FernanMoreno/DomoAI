@@ -727,7 +727,10 @@ class HomeAssistantProvider:
             observed_at = _timestamp(
                 raw.get("last_updated"), raw.get("last_changed"), fallback=received_at
             )
-            measurement_received_at = max(received_at, observed_at)
+            measurement_received_at = max(
+                observed_at,
+                _timestamp(state.get("received_at"), fallback=received_at),
+            )
             value = _scalar(state.get("value"))
             quality = (
                 MeasurementQuality.GOOD

@@ -20,8 +20,14 @@ class DomoticsFacade:
         return self.plan_service.approve(plan, grant=grant)
 
     async def execute_plan(
-        self, plan: Plan, *, state_version_overrides: dict[str, int] | None = None
+        self,
+        plan: Plan,
+        *,
+        state_version_overrides: dict[str, int] | None = None,
+        aggregate_owner: bool = False,
     ) -> ExecutionSummary:
         return await self.executor.execute(
-            plan, state_version_overrides=state_version_overrides
+            plan,
+            state_version_overrides=state_version_overrides,
+            aggregate_owner=aggregate_owner,
         )

@@ -16,6 +16,7 @@ from domoai.domain.energy import (
     BatterySocConversionEvidence,
     BatterySocObservation,
     DispatchableBatteryBinding,
+    EVChargingBinding,
     NominalCapacityTrustPolicy,
 )
 from domoai.domain.models import SourceRef, StrictModel
@@ -177,6 +178,7 @@ __all__ = [
     "BatterySocConversionEvidence",
     "BatterySocObservation",
     "DispatchableBatteryBinding",
+    "EVChargingBinding",
     "NominalCapacityTrustPolicy",
     "BaseLoadPoint",
     "ConfidenceBand",

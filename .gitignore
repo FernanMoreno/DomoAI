@@ -9,6 +9,7 @@ __pycache__/
 coverage.xml
 dist/
 build/
+.lab-tools/
 *.db
 *.sqlite
 *.sqlite3

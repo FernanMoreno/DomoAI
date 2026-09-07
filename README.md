@@ -187,9 +187,10 @@ Modbus, Matter y KNX; no inventa gateways, tokens ni commissioning. Los
 smoke tests live siguen separados y requieren sus servicios y variables
 `DOMOAI_*` reales.
 
-The composition root selects the deterministic fixture when no live source is
-configured, a direct adapter for one source, or a composite runtime for two or
-more complete source configurations. Configure Home Assistant with:
+The composition root selects a direct adapter for one source or a composite
+runtime for two or more complete source configurations. The explicit fixture
+entry point is reserved for tests and local development. Configure Home
+Assistant with:
 
 ```bash
 export DOMOAI_HOME_ASSISTANT_URL="http://home-assistant.local:8123"
@@ -198,6 +199,10 @@ export DOMOAI_HOME_ASSISTANT_MAPPING_PATH="config/home-assistant-mappings.json"
 export DOMOAI_DATABASE_PATH="data/domoai.sqlite3"
 uv run domoai-mcp
 ```
+
+The `domoai-mcp` launcher requires an explicit live provider configuration and
+fails closed otherwise. The deterministic stdio fixture is available only for
+protocol tests or local development with `DOMOAI_RUNTIME_MODE=fixture`.
 
 The provider path is the configured Home Assistant runtime. The URL/token pair
 is required and an optional strict v1 mapping document can make energy roles
@@ -382,8 +387,8 @@ uv run mypy src
 uv lock --check
 ```
 
-The latest full-suite result without live credentials is `972 passed, 10
-skipped`, with no warnings. The skips
+The latest full-suite result is recorded in the SHA-tagged CI evidence
+artifact (`ci-evidence-${GITHUB_SHA}`), rather than hardcoded here. The skips
 are opt-in Matter Server, KNX/IP and other live cases without their external
 node, gateway or service configuration; deterministic fixture coverage remains
 enabled. No live gateway or hardware result is claimed by this run; the Home

@@ -12,7 +12,8 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantDispatchableBatteryBinding,
 )
 from domoai.adapters.sdk import AdapterManifest
-from domoai.config.battery_qualification import BatteryHILEvidence
+from domoai.config.battery_qualification import BatteryHILEvidence, HILIdentityObservation
+from domoai.domain.energy import EVChargingBinding
 from domoai.domain.models import (
     Area,
     AuditEvent,
@@ -96,6 +97,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "battery-soc-observation": BatterySocObservation,
     "battery-soc-conversion-evidence": BatterySocConversionEvidence,
     "dispatchable-battery-binding": DispatchableBatteryBinding,
+    "ev-charging-binding": EVChargingBinding,
     "home-assistant-battery-command-route": HomeAssistantBatteryCommandRoute,
     "home-assistant-dispatchable-battery-binding": HomeAssistantDispatchableBatteryBinding,
     "energy-context": EnergyContext,
@@ -103,6 +105,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "solar-forecast-series": SolarForecastSeries,
     "battery-state": BatteryState,
     "battery-hil-evidence": BatteryHILEvidence,
+    "hil-identity-observation": HILIdentityObservation,
     "energy-provider-diagnostic": EnergyProviderDiagnostic,
     "open-meteo-solar-config": OpenMeteoSolarConfig,
     "solar-installation-profile": SolarInstallationProfile,

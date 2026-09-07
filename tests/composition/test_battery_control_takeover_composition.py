@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -48,7 +48,7 @@ class TakeoverFixtureAdapter(SimulatedHomeAdapter):
             device_id=request.device_id,
             plan_id=request.plan_id,
             acquired_at=now,
-            expires_at=now.replace(second=now.second + 1),
+            expires_at=now + timedelta(minutes=5),
             baseline=PhysicalBaseline(
                 device_id=request.device_id,
                 capability="power",

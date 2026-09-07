@@ -253,6 +253,20 @@
       "title": "Source Refs",
       "type": "array"
     },
+    "identity_keys": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Identity Keys",
+      "type": "array"
+    },
+    "connections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Connections",
+      "type": "array"
+    },
     "last_seen_at": {
       "anyOf": [
         {

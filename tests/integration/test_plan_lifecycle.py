@@ -342,10 +342,21 @@ async def test_battery_feedback_readback_uses_its_own_canonical_route() -> None:
         PolicyEngine(
             [],
             RiskClassifier(
-                overrides=(RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),)
+                overrides=(
+                    RiskOverride(
+                        device_id="battery.home",
+                        risk_class=RiskClass.SAFE,
+                        privileged_exception=True,
+                    ),
+                )
             ),
         ),
         audit,
+        authorized_actuator_commands={
+            "battery.home": frozenset(
+                {"charge_battery", "discharge_battery", "stop_battery"}
+            )
+        },
     )
     executor = PlanExecutor(adapter, plan_service, audit)
     plan = Plan(
@@ -390,11 +401,20 @@ async def test_post_write_soc_readback_is_persisted_without_replaying_write(tmp_
             [],
             RiskClassifier(
                 overrides=(
-                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                    RiskOverride(
+                        device_id="battery.home",
+                        risk_class=RiskClass.SAFE,
+                        privileged_exception=True,
+                    ),
                 )
             ),
         ),
         audit,
+        authorized_actuator_commands={
+            "battery.home": frozenset(
+                {"charge_battery", "discharge_battery", "stop_battery"}
+            )
+        },
     )
     database = SQLiteDatabase(tmp_path / "soc-reconciliation.sqlite3")
     await database.initialize()
@@ -459,11 +479,20 @@ async def test_explicit_soc_reconciliation_route_is_required_before_execution() 
             [],
             RiskClassifier(
                 overrides=(
-                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                    RiskOverride(
+                        device_id="battery.home",
+                        risk_class=RiskClass.SAFE,
+                        privileged_exception=True,
+                    ),
                 )
             ),
         ),
         audit,
+        authorized_actuator_commands={
+            "battery.home": frozenset(
+                {"charge_battery", "discharge_battery", "stop_battery"}
+            )
+        },
     )
     plan = Plan(
         id="battery-soc-route-required",
@@ -515,11 +544,20 @@ async def test_readback_persistence_failure_is_unknown_without_write_replay() ->
             [],
             RiskClassifier(
                 overrides=(
-                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                    RiskOverride(
+                        device_id="battery.home",
+                        risk_class=RiskClass.SAFE,
+                        privileged_exception=True,
+                    ),
                 )
             ),
         ),
         audit,
+        authorized_actuator_commands={
+            "battery.home": frozenset(
+                {"charge_battery", "discharge_battery", "stop_battery"}
+            )
+        },
     )
     plan = Plan(
         id="battery-readback-persistence-failure",
@@ -574,11 +612,20 @@ async def _build_settling_context(
             [],
             RiskClassifier(
                 overrides=(
-                    RiskOverride(device_id="battery.home", risk_class=RiskClass.SAFE),
+                    RiskOverride(
+                        device_id="battery.home",
+                        risk_class=RiskClass.SAFE,
+                        privileged_exception=True,
+                    ),
                 )
             ),
         ),
         audit,
+        authorized_actuator_commands={
+            "battery.home": frozenset(
+                {"charge_battery", "discharge_battery", "stop_battery"}
+            )
+        },
     )
     clock = FixedClock(datetime.now(UTC))
 
@@ -969,6 +1016,47 @@ async def test_sensitive_command_requires_matching_operator_approval() -> None:
     assert approved.status is PlanStatus.APPROVED
     assert outcomes.outcomes[0].status.value == "confirmed_success"
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_persisted_approval_never_reaches_the_adapter() -> None:
+    initial = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    clock = FixedClock(initial)
+    adapter = SimulatedHomeAdapter()
+    registry = DeviceRegistry()
+    state_store = StateStore(clock=clock)
+    audit = AuditLog(clock=clock)
+    await DiscoveryService(adapter, registry, state_store, audit, clock=clock).refresh()
+    plan_service = PlanService(registry, state_store, PolicyEngine([]), audit, clock=clock)
+    executor = PlanExecutor(adapter, plan_service, audit, clock=clock)
+    device_id = next(device.id for device in registry.devices if device.type.value == "cover")
+    validated = plan_service.validate(
+        Plan(
+            id="plan-expired-approved-evidence",
+            commands=[
+                Command(
+                    id="command-expired-approved-evidence",
+                    device_id=device_id,
+                    command="open",
+                    risk_class=RiskClass.CONFIRM,
+                    idempotency_key="intent-expired-approved-evidence",
+                )
+            ],
+        )
+    )
+    grant = ApprovalStore(
+        clock=clock, operator_token="operator", allow_legacy_token=True
+    ).issue(validated, approved_by="operator", operator_token="operator")
+    approved = plan_service.approve(validated, grant=grant)
+    assert approved.approval is not None
+    assert approved.approval.expires_at is not None
+    clock.set(approved.approval.expires_at + timedelta(seconds=1))
+
+    with pytest.raises(DomainError) as error:
+        await executor.execute(approved)
+
+    assert error.value.code is ErrorCode.APPROVAL_ASSERTION_EXPIRED
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio

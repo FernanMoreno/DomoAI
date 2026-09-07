@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -23,6 +24,8 @@ __all__ = [
     "validate_scenario",
     "validate_executable_scenario",
 ]
+
+MAX_HORIZON_SLOTS = 7 * 24 * 60
 
 
 class Load(StrictModel):
@@ -99,6 +102,10 @@ class Constraint(StrictModel):
     value: float = Field(ge=0)
     unit: str = Field(default="W", min_length=1)
     hard: bool = True
+    # Solver constraints are not automatically physical execution guards.
+    # Callers must opt into the explicit planning-only contract; until a
+    # matching JIT guard exists, ``physical_execution`` is rejected below.
+    enforcement: Literal["planning_only", "physical_execution"] = "planning_only"
 
 
 class Objective(StrictModel):
@@ -163,12 +170,24 @@ class OptimizationScenario(StrictModel):
 
 
 def validate_scenario(
-    scenario: OptimizationScenario, registry: DeviceRegistry
+    scenario: OptimizationScenario,
+    registry: DeviceRegistry,
+    *,
+    max_horizon_slots: int = MAX_HORIZON_SLOTS,
 ) -> list[ErrorDetail]:
     errors: list[ErrorDetail] = []
     horizon_slots = scenario.horizon.slots
     if horizon_slots < 1:
         return [_diagnostic("invalid_horizon", "Horizon does not contain a complete slot")]
+    if max_horizon_slots <= 0:
+        raise ValueError("max_horizon_slots must be positive")
+    if horizon_slots > max_horizon_slots:
+        errors.append(
+            _diagnostic(
+                "horizon_too_large",
+                f"Horizon contains {horizon_slots} slots; maximum is {max_horizon_slots}",
+            )
+        )
     if scenario.energy_context is not None and scenario.energy_context.horizon != scenario.horizon:
         errors.append(
             _diagnostic(
@@ -373,6 +392,13 @@ def validate_scenario(
                 )
             )
     for constraint in scenario.constraints:
+        if constraint.enforcement == "physical_execution":
+            errors.append(
+                _diagnostic(
+                    "physical_constraint_unverifiable",
+                    f"Constraint {constraint.type!r} has no verified JIT execution guard",
+                )
+            )
         if constraint.type not in {
             "max_house_power",
             "max_grid_import",
@@ -418,11 +444,16 @@ def validate_scenario(
 
 
 def validate_executable_scenario(
-    scenario: OptimizationScenario, registry: DeviceRegistry
+    scenario: OptimizationScenario,
+    registry: DeviceRegistry,
+    *,
+    max_horizon_slots: int = MAX_HORIZON_SLOTS,
 ) -> list[ErrorDetail]:
     """Add provider-evidence gates required before physical proposal validation."""
 
-    errors = validate_scenario(scenario, registry)
+    errors = validate_scenario(
+        scenario, registry, max_horizon_slots=max_horizon_slots
+    )
     if not scenario.ev_loads:
         return errors
     context = scenario.energy_context
@@ -479,6 +510,25 @@ def validate_executable_scenario(
                     f"EV {ev_load.device_id!r} requested charge limit exceeds observed limit",
                 )
             )
+        if state.departure_at is not None:
+            departure_at = state.departure_at.astimezone(UTC)
+            if departure_at <= datetime.now(UTC):
+                errors.append(
+                    _diagnostic(
+                        "ev_departure_elapsed",
+                        f"EV {ev_load.device_id!r} departure has already elapsed",
+                    )
+                )
+            deadline_at = scenario.horizon.start.astimezone(UTC) + timedelta(
+                minutes=ev_load.deadline_slot * scenario.horizon.resolution_minutes
+            )
+            if deadline_at > departure_at:
+                errors.append(
+                    _diagnostic(
+                        "ev_departure_after_deadline",
+                        f"EV {ev_load.device_id!r} deadline is later than observed departure",
+                    )
+                )
     return errors
 
 

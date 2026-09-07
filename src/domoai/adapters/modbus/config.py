@@ -15,8 +15,17 @@ from domoai.domain.models import StrictModel
 ModbusArea = Literal["coil", "discrete_input", "input_register", "holding_register"]
 ModbusDataType = Literal["bool", "uint16", "int16", "float32"]
 ByteOrder = Literal["big", "little"]
-ModbusSemanticType = Literal["light", "switch", "sensor"]
-ModbusCapabilityName = Literal["power", "brightness", "temperature", "humidity", "occupancy"]
+ModbusSemanticType = Literal["light", "switch", "sensor", "energy"]
+ModbusCapabilityName = Literal[
+    "power",
+    "brightness",
+    "temperature",
+    "humidity",
+    "occupancy",
+    "battery.soc",
+    "battery.power",
+    "battery.capacity",
+]
 
 _SAFE_ID_PATTERN = r"^[a-z0-9][a-z0-9_.-]*$"
 
@@ -76,11 +85,22 @@ class ModbusCapabilityBinding(StrictModel):
                 self.command.area != "holding_register" or self.command.data_type == "bool"
             ):
                 raise ValueError("brightness command requires a numeric holding register")
-        elif self.name in {"temperature", "humidity"}:
+        elif self.name in {
+            "temperature",
+            "humidity",
+            "battery.soc",
+            "battery.power",
+            "battery.capacity",
+        }:
             if state.area not in {"input_register", "holding_register"}:
                 raise ValueError(f"{self.name} requires an input or holding register")
-            if state.data_type == "bool" or self.command is not None:
+            if state.data_type == "bool":
                 raise ValueError(f"{self.name} is read-only and numeric")
+            if self.command is not None:
+                if self.name != "battery.power":
+                    raise ValueError(f"{self.name} is read-only and numeric")
+                if self.command.area != "holding_register" or self.command.data_type == "bool":
+                    raise ValueError("battery.power command requires a numeric holding register")
         elif self.name == "occupancy":
             if state.data_type != "bool" or state.area not in {"coil", "discrete_input"}:
                 raise ValueError("occupancy requires a boolean coil or discrete input")
@@ -108,6 +128,7 @@ class ModbusEntityConfig(StrictModel):
             "light": {"power", "brightness"},
             "switch": {"power"},
             "sensor": {"temperature", "humidity", "occupancy"},
+            "energy": {"battery.soc", "battery.power", "battery.capacity"},
         }[self.semantic_type]
         unsupported = set(names) - allowed
         if unsupported:

@@ -7,6 +7,7 @@ import pytest
 
 from domoai.lab.runner import (
     DEFAULT_UP_SERVICES,
+    SERVICE_NAMES,
     LabConfig,
     LabRunner,
     LabRunnerError,
@@ -123,6 +124,10 @@ def test_deterministic_smoke_removes_live_configuration(tmp_path: Path) -> None:
 
 def test_default_up_services_are_only_core_local_services() -> None:
     assert DEFAULT_UP_SERVICES == ("mqtt", "zigbee2mqtt", "modbus")
+
+
+def test_knx_gateway_is_available_as_an_explicit_lab_service() -> None:
+    assert "knx-gateway" in SERVICE_NAMES
 
 
 def test_windows_docker_gets_a_repo_relative_compose_path(tmp_path: Path) -> None:

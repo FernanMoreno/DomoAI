@@ -316,6 +316,9 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             >= to_energy_int(ev_load.target_soc_kwh)
         )
 
+    if battery is not None:
+        _add_terminal_soc_constraints(model, scenario, soc_variables, soft_violations)
+
     terminal_policy = scenario.terminal_soc_policy
     if battery is not None and terminal_policy is not None:
         if terminal_policy.minimum_kwh is not None:
@@ -479,6 +482,9 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         constraint_summary={
             "hard_satisfied": True,
             "battery_actuator_bound": battery is not None and battery.actuator is not None,
+            "constraint_enforcement": {
+                constraint.type: constraint.enforcement for constraint in scenario.constraints
+            },
             "slots": slots,
             "violations": [],
             "soft_violations": _reported_soft_violations(solver, soft_violations),
@@ -581,6 +587,36 @@ def _add_energy_constraints(
         else:
             model.Add(violation >= limit - actual)
         soft_violations.append((constraint.type, slot, violation))
+
+
+def _add_terminal_soc_constraints(
+    model: Any,
+    scenario: OptimizationScenario,
+    soc_variables: list[Any],
+    soft_violations: list[tuple[str, int, Any]],
+) -> None:
+    """Apply battery SOC constraints to the terminal state as well as slots."""
+
+    if not soc_variables:
+        return
+    terminal = soc_variables[-1]
+    terminal_slot = len(soc_variables) - 1
+    for constraint in scenario.constraints:
+        if constraint.type not in {"battery_min_soc", "battery_max_soc"}:
+            continue
+        limit = to_energy_int(constraint.value)
+        is_max_bound = constraint.type == "battery_max_soc"
+        if constraint.hard:
+            model.Add(terminal <= limit if is_max_bound else terminal >= limit)
+            continue
+        violation = model.NewIntVar(
+            0, SOC_SCALE * 10**6, f"soft_violation_{constraint.type}_{terminal_slot}"
+        )
+        if is_max_bound:
+            model.Add(violation >= terminal - limit)
+        else:
+            model.Add(violation >= limit - terminal)
+        soft_violations.append((constraint.type, terminal_slot, violation))
 
 
 def _objective_terms(

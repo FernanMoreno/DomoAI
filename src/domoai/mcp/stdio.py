@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 
 from mcp.server.fastmcp import FastMCP
@@ -31,6 +32,30 @@ from domoai.runtime.approval_store import (
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
+
+
+def require_live_deployment_source(settings: Settings) -> None:
+    """Reject an unconfigured production launcher before fixture fallback.
+
+    ``build_fixture_server`` remains an explicit deterministic test/lab entry
+    point. The stdio executable, however, is the deployment boundary and must
+    never silently expose a simulated home when an operator intended to use
+    live providers.
+    """
+
+    if not any(
+        (
+            settings.home_assistant_url,
+            settings.zigbee2mqtt_url,
+            settings.matter_server_url,
+            settings.knx_gateway_host,
+            settings.modbus_host,
+        )
+    ):
+        raise ValueError(
+            "no live adapter source configured; set a DOMOAI_* provider or use "
+            "build_fixture_server explicitly"
+        )
 
 
 async def build_fixture_server() -> FastMCP:
@@ -93,6 +118,7 @@ async def build_configured_server(
                 queue_wait_seconds=runtime.settings.optimization_worker_queue_wait_seconds,
                 provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
             ),
+            max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
         )
     )
     # A second, separately-scoped worker for the energy-context provider
@@ -107,6 +133,7 @@ async def build_configured_server(
     )
     metrics = RuntimeMetricsCollector(
         adapter=runtime.adapter,
+        registry=runtime.registry,
         event_consumer=runtime.event_consumer,
         scheduler=runtime.scheduler,
         state_store=runtime.state_store,
@@ -145,6 +172,7 @@ async def build_configured_server(
         plan_service=runtime.plan_service,
         optimization_service=optimization_service,
         optimization_worker=worker,
+        max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context)
@@ -152,18 +180,25 @@ async def build_configured_server(
 
 
 async def run_stdio() -> None:
-    runtime, server = await build_configured_server()
+    settings = Settings.from_environment()
+    if os.getenv("DOMOAI_RUNTIME_MODE", "configured").strip().lower() != "fixture":
+        require_live_deployment_source(settings)
+    runtime, server = await build_configured_server(settings)
     event_task = asyncio.create_task(runtime.event_consumer.run())
     scheduler_task = asyncio.create_task(runtime.scheduler.run())
+    battery_supervisor_task = asyncio.create_task(runtime.run_battery_control_supervisor())
     try:
         await server.run_stdio_async()
     finally:
         event_task.cancel()
         scheduler_task.cancel()
+        battery_supervisor_task.cancel()
         with suppress(asyncio.CancelledError):
             await event_task
         with suppress(asyncio.CancelledError):
             await scheduler_task
+        with suppress(asyncio.CancelledError):
+            await battery_supervisor_task
         await runtime.close()
 
 

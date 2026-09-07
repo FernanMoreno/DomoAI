@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from domoai.domain.models import StateSnapshot
+from domoai.domain.models import StateSnapshot, StateStatus
 from domoai.runtime.state_store import StateStore
 
 
@@ -19,11 +19,18 @@ class StateService:
     ) -> list[StateSnapshot]:
         wanted_capabilities = set(capabilities or [])
         result: list[StateSnapshot] = []
+        now = self.state_store.clock.now()
         for snapshot in await self.state_store.all():
             if snapshot.device_id not in device_ids:
                 continue
             if wanted_capabilities and snapshot.capability not in wanted_capabilities:
                 continue
+            expired = (
+                snapshot.status.value == "current"
+                and now - snapshot.observed_at > self.state_store.stale_after
+            )
+            if expired:
+                snapshot = snapshot.model_copy(update={"status": StateStatus.STALE})
             if not allow_stale and snapshot.status.value in {"stale", "unavailable"}:
                 continue
             result.append(snapshot)

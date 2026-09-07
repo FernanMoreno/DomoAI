@@ -4,7 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from domoai.domain.models import (
+    Approval,
     AvailabilityStatus,
+    BundleMemberCommit,
     Capability,
     CapabilityKind,
     Command,
@@ -187,3 +189,28 @@ def test_command_rejects_preconditions_beyond_the_limit() -> None:
                 for _ in range(17)
             ],
         )
+
+
+def test_approval_persists_scope_bundle_and_lifetime() -> None:
+    approval = Approval(
+        status="approved",
+        approved_by="operator",
+        approved_at=datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+        validation_digest="sha256:validation",
+        bundle_digest="sha256:bundle",
+        recurrence_digest=None,
+        expires_at=datetime(2026, 8, 15, 10, 5, tzinfo=UTC),
+    )
+
+    assert approval.bundle_digest == "sha256:bundle"
+    assert approval.expires_at is not None
+
+
+def test_bundle_member_normalizes_multiple_predecessors() -> None:
+    member = BundleMemberCommit(
+        plan_id="p2",
+        validation_digest="sha256:v2",
+        predecessor_plan_ids=["p0", "p1"],
+    )
+
+    assert member.all_predecessor_plan_ids == ["p0", "p1"]

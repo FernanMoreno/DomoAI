@@ -115,7 +115,8 @@ class _FailingExecutorWrapper:
         self._failing_plan_prefix = failing_plan_prefix
         self.plan_service = real_executor.plan_service
 
-    async def execute(self, plan: Plan):
+    async def execute(self, plan: Plan, *, aggregate_owner: bool = False):
+        assert aggregate_owner is True
         if plan.id.startswith(self._failing_plan_prefix):
             raise RuntimeError("simulated unexpected execution failure")
         return await self._real.execute(plan)

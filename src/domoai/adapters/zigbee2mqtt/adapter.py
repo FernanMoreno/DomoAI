@@ -48,6 +48,11 @@ class Zigbee2MqttAdapter:
         self._availability: dict[str, bool] = {}
         self._bridge_online = True
         self._unsupported: list[dict[str, Any]] = []
+        self._event_stream_active = False
+        self._state_update_counts: dict[str, int] = {}
+        self._state_update_events: dict[str, asyncio.Event] = {}
+        self._pending_readback_expectations: dict[str, tuple[str, object]] = {}
+        self._readback_lock = asyncio.Lock()
         # Best-effort, process-local duplicate suppression only -- reset on
         # restart, not shared across processes. The authoritative barrier
         # against re-executing a command is the persistent execution claim
@@ -82,19 +87,22 @@ class Zigbee2MqttAdapter:
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
         self._require_connected()
         wanted = {source_ref.external_id for source_ref in source_refs}
-        await self._request_state_refresh(wanted)
+        requires_fresh_read = self._event_stream_active
+        refreshed = await self._request_state_refresh(wanted)
         now = self._clock.now()
         snapshots: list[StateSnapshot] = []
         for (friendly_name, capability), state in self._states.items():
             if friendly_name not in wanted:
                 continue
-            available = self._availability.get(friendly_name, self._bridge_online)
+            available = self._availability.get(friendly_name, self._bridge_online) and (
+                not requires_fresh_read or friendly_name in refreshed
+            )
             received_at = state.get("received_at", now)
             snapshots.append(
                 StateSnapshot(
                     device_id=canonical_id(friendly_name),
                     capability=capability,
-                    value=state["value"],
+                    value=state["value"] if available else None,
                     unit=state.get("unit"),
                     observed_at=received_at,
                     received_at=received_at,
@@ -107,8 +115,17 @@ class Zigbee2MqttAdapter:
             )
         return snapshots
 
-    async def _request_state_refresh(self, wanted: set[str]) -> None:
+    async def _request_state_refresh(self, wanted: set[str]) -> set[str]:
         """Ask Zigbee2MQTT for source-owned state before using its cache."""
+
+        # The event and expectation maps are process-local state. Serialize a
+        # refresh so concurrent callers cannot clear one another's event or
+        # consume the same command readback twice.
+        async with self._readback_lock:
+            return await self._request_state_refresh_unlocked(wanted)
+
+    async def _request_state_refresh_unlocked(self, wanted: set[str]) -> set[str]:
+        """Perform one serialized MQTT state refresh."""
 
         property_by_capability = {
             "power": "state",
@@ -117,6 +134,7 @@ class Zigbee2MqttAdapter:
             "humidity": "humidity",
             "occupancy": "occupancy",
         }
+        refreshed: set[str] = set()
         for friendly_name in sorted(wanted):
             definition = self._definitions.get(friendly_name)
             if definition is None:
@@ -136,6 +154,10 @@ class Zigbee2MqttAdapter:
             )
             if not properties:
                 continue
+            expected = self._pending_readback_expectations.pop(friendly_name, None)
+            update_event = self._state_update_events.setdefault(friendly_name, asyncio.Event())
+            update_event.clear()
+            update_count = self._state_update_counts.get(friendly_name, 0)
             try:
                 await self.transport.publish(
                     f"{self.base_topic}/{friendly_name}/get",
@@ -146,6 +168,46 @@ class Zigbee2MqttAdapter:
                 )
             except (ConnectionError, OSError, TimeoutError) as error:
                 raise ConnectionError(f"Zigbee2MQTT state refresh failed: {error}") from error
+            if not self._event_stream_active:
+                continue
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_state_update(
+                        friendly_name,
+                        update_event,
+                        update_count,
+                        expected=expected,
+                    ),
+                    self.discovery_timeout,
+                )
+            except TimeoutError:
+                continue
+            refreshed.add(friendly_name)
+        return refreshed
+
+    async def _wait_for_state_update(
+        self,
+        friendly_name: str,
+        update_event: asyncio.Event,
+        update_count: int,
+        *,
+        expected: tuple[str, object] | None = None,
+    ) -> None:
+        while self._state_update_counts.get(friendly_name, 0) <= update_count:
+            await update_event.wait()
+        if expected is None:
+            return
+        capability, expected_value = expected
+        while True:
+            state = self._states.get((friendly_name, capability))
+            if state is not None and state.get("available", False):
+                if state.get("value") == expected_value:
+                    return
+            update_count = self._state_update_counts.get(friendly_name, update_count)
+            update_event.clear()
+            if self._state_update_counts.get(friendly_name, 0) > update_count:
+                continue
+            await update_event.wait()
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None
@@ -166,6 +228,11 @@ class Zigbee2MqttAdapter:
         friendly_name = source_entity_id
         if friendly_name not in self._definitions:
             return AdapterExecutionAck(accepted=False, message="Unknown Zigbee2MQTT entity")
+        if self._event_stream_active and friendly_name in self._pending_readback_expectations:
+            return AdapterExecutionAck(
+                accepted=False,
+                message="Zigbee2MQTT readback pending",
+            )
         if command.idempotency_key in self._executed_idempotency_keys:
             return AdapterExecutionAck(accepted=False, message="Duplicate idempotency key")
         payload = self._command_payload(friendly_name, command)
@@ -182,6 +249,9 @@ class Zigbee2MqttAdapter:
             )
         except (ConnectionError, OSError, TimeoutError) as error:
             raise ConnectionError(f"Zigbee2MQTT publish failed: {error}") from error
+        expected = self._readback_expectation(command, payload)
+        if expected is not None and self._event_stream_active:
+            self._pending_readback_expectations[friendly_name] = expected
         self._executed_idempotency_keys.add(command.idempotency_key)
         return AdapterExecutionAck(
             accepted=True,
@@ -191,13 +261,17 @@ class Zigbee2MqttAdapter:
 
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
         self._require_connected()
-        while True:
-            message = await self.transport.receive(1.0)
-            if message is None:
-                continue
-            event = self._ingest(message)
-            if event is not None:
-                yield event
+        self._event_stream_active = True
+        try:
+            while True:
+                message = await self.transport.receive(1.0)
+                if message is None:
+                    continue
+                event = self._ingest(message)
+                if event is not None:
+                    yield event
+        finally:
+            self._event_stream_active = False
 
     async def health(self) -> AdapterHealth:
         connected = self._connected and await self.transport.health()
@@ -233,6 +307,11 @@ class Zigbee2MqttAdapter:
         if relative.endswith("/availability"):
             friendly_name = relative[: -len("/availability")]
             return self._ingest_availability(friendly_name, message)
+        if relative.endswith("/set") or relative.endswith("/get"):
+            # The adapter subscribes to the same wildcard it uses for
+            # commands. Control topics are not source state and must not be
+            # interpreted as device entities or diagnostics.
+            return None
         if relative and not relative.startswith("bridge/"):
             return self._ingest_state(relative, message)
         return None
@@ -294,6 +373,13 @@ class Zigbee2MqttAdapter:
         for state in states:
             state["received_at"] = received_at
             self._states[(friendly_name, state["capability"])] = state
+        if states:
+            self._state_update_counts[friendly_name] = (
+                self._state_update_counts.get(friendly_name, 0) + 1
+            )
+            update_event = self._state_update_events.get(friendly_name)
+            if update_event is not None:
+                update_event.set()
         if diagnostics:
             return self._diagnostic(message.topic, "; ".join(diagnostics))
         return StateChangedEvent(
@@ -343,6 +429,18 @@ class Zigbee2MqttAdapter:
             if not 0 <= command.value <= 100:
                 return None
             return {"brightness": round(float(command.value) * 254 / 100)}
+        return None
+
+    @staticmethod
+    def _readback_expectation(
+        command: Command, payload: dict[str, Any]
+    ) -> tuple[str, object] | None:
+        if command.command == "turn_on":
+            return "power", True
+        if command.command == "turn_off":
+            return "power", False
+        if command.command == "set_brightness" and "brightness" in payload:
+            return "brightness", round(float(payload["brightness"]) * 100 / 254)
         return None
 
     def _require_connected(self) -> None:

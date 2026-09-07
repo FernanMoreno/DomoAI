@@ -4,20 +4,25 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.optimization_worker import OptimizationWorker, WorkerBudget
+from domoai.application.privacy import PrivacyService
 from domoai.application.process_optimization_worker import ProcessOptimizationWorker
 from domoai.application.runtime_factory import RuntimeComposition, build_runtime
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
 from domoai.domain.energy import EVChargingBinding
+from domoai.domain.models import AuthorityContext, PrincipalRole
+from domoai.domain.privacy import HouseholdDataPolicy, PrivacyCategory
 from domoai.mcp.auth import StaticBearerTokenVerifier
 from domoai.mcp.domotics_server import DomoticsMcpContext
 from domoai.mcp.ortools_server import OrtoolsMcpContext
 from domoai.mcp.unified_server import UnifiedMcpContext, create_unified_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.ports import EnergyContextProvider
+from domoai.persistence.privacy import SQLitePrivacyStore
 from domoai.runtime.approval_store import (
     OperatorApprovalAssertionProvider,
     OperatorPrincipalProvider,
@@ -97,6 +102,10 @@ async def build_configured_server(
         optimization_worker=worker,
         optimization_service=optimization_service,
         clock=runtime.clock,
+        operational_metrics=runtime.operational_metrics,
+        metric_history_repository=runtime.metric_history_repository,
+        metric_history_max_samples=runtime.settings.metric_history_max_samples,
+        household_work_queues=runtime.household_work_queues,
     )
     context = DomoticsMcpContext(
         discovery=runtime.discovery,
@@ -107,6 +116,7 @@ async def build_configured_server(
         active_provider_ids=_adapter_ids(runtime.adapter),
         battery_qualification=runtime.battery_qualification,
         plan_repository=runtime.plan_repository,
+        state_history_repository=runtime.state_history_repository,
         approval_store=runtime.approval_store,
         plans=runtime.plans,
         energy_context_provider=runtime.energy_context_provider,
@@ -121,6 +131,42 @@ async def build_configured_server(
         clock=runtime.clock,
         commissioning_service=runtime.commissioning_service,
         commissioning_report=runtime.commissioning_report,
+        qualification_repository=runtime.qualification_repository,
+        local_automation=runtime.local_automation,
+        privacy_service=PrivacyService(
+            SQLitePrivacyStore(runtime.database),
+            audit=runtime.audit.append,
+            state_store=runtime.state_store,
+        ),
+        privacy_policy=HouseholdDataPolicy(
+            authority=AuthorityContext(
+                tenant_id=runtime.settings.mcp_tenant_id,
+                household_id=runtime.settings.mcp_household_id,
+                household_ids=[runtime.settings.mcp_household_id],
+                principal_id="runtime",
+                roles=[PrincipalRole.SERVICE],
+            ),
+            exportable_categories=[
+                PrivacyCategory.STATE,
+                PrivacyCategory.PLANS,
+                PrivacyCategory.APPROVALS,
+                PrivacyCategory.BUNDLES,
+                PrivacyCategory.SCHEDULES,
+                PrivacyCategory.AUTOMATIONS,
+            ],
+            deletable_categories=[
+                PrivacyCategory.STATE,
+                PrivacyCategory.PLANS,
+                PrivacyCategory.SCHEDULES,
+                PrivacyCategory.AUTOMATIONS,
+            ],
+            immutable_categories=[PrivacyCategory.AUDIT],
+            retention_days=runtime.settings.privacy_retention_days,
+        ),
+        authority_policy=AuthorityPolicy(
+            tenant_id=runtime.settings.mcp_tenant_id,
+            household_id=runtime.settings.mcp_household_id,
+        ),
     )
     optimizer_context = OrtoolsMcpContext(
         registry=runtime.registry,

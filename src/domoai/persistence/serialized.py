@@ -248,8 +248,8 @@ class SerializedRepositoryProxy:
 
         if callable(attribute):
 
-            def submit(*args: Any, **kwargs: Any) -> None:
-                self._storage.submit_nowait(lambda: attribute(*args, **kwargs))
+            def submit(*args: Any, **kwargs: Any) -> Future[Any]:
+                return self._storage.submit_nowait(lambda: attribute(*args, **kwargs))
 
             return submit
         return attribute

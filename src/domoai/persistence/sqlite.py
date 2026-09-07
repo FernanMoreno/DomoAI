@@ -164,13 +164,23 @@ class SQLiteDatabase:
                     # Re-run the remaining statements instead of merely
                     # registering the migration: a following backfill must not
                     # be lost in this historical-recovery path.
-                    for statement in migration_sql.split(";"):
+                    statements_without_comments = "\n".join(
+                        line
+                        for line in migration_sql.splitlines()
+                        if not line.lstrip().startswith("--")
+                    )
+                    for statement in statements_without_comments.split(";"):
                         normalized = statement.strip()
                         if not normalized:
                             continue
                         if normalized.upper().startswith("ALTER TABLE") and " ADD COLUMN " in (
                             normalized.upper()
                         ):
+                            try:
+                                self._connection.execute(normalized)
+                            except sqlite3.OperationalError as alter_error:
+                                if "duplicate column name" not in str(alter_error):
+                                    raise
                             continue
                         self._connection.execute(normalized)
                 self._connection.execute(

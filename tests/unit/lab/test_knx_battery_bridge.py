@@ -24,6 +24,14 @@ BRIDGE_SPEC.loader.exec_module(knx_bridge)
 MAPPING = load_mapping(Path("dev/lab/configs/knx-battery-virtual.json"))
 
 
+def test_bridge_defaults_to_local_knxd_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DOMOAI_KNX_GATEWAY_HOST", raising=False)
+    monkeypatch.setattr(sys, "argv", ["knx_bridge"])
+
+    assert knx_bridge.BatteryBridgeConfig(mapping_path=Path("mapping.json")).knx_host == "127.0.0.1"
+    assert knx_bridge._parse_args().knx_host == "127.0.0.1"
+
+
 def test_state_projects_to_configured_knx_groups() -> None:
     writes = state_to_knx_writes({"soc_kwh": 5.0, "power_kw": -1.5, "capacity_kwh": 10.0}, MAPPING)
 

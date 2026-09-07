@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from domoai.application.discovery_service import DiscoveryResult, DiscoveryService
@@ -26,6 +27,7 @@ class RuntimeStateRefresher:
         inventory_refresh_interval_seconds: float | None = None,
         adapter: AdapterPort | None = None,
         clock: Clock | None = None,
+        retention_maintenance: Callable[[], Awaitable[int]] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("state refresh interval must be positive")
@@ -61,6 +63,7 @@ class RuntimeStateRefresher:
                 str(child.adapter_id) for child in configured_children
             )
         self.clock = clock or state_store.clock or SystemClock()
+        self.retention_maintenance = retention_maintenance
         self.alive = False
         self.refreshes = 0
         self.last_refresh_at: datetime | None = None
@@ -90,8 +93,30 @@ class RuntimeStateRefresher:
         else:
             self.last_error = None
             self.refreshes += 1
+        await self._run_retention_maintenance()
         self.last_refresh_at = self.clock.now()
         return states
+
+    async def _run_retention_maintenance(self) -> None:
+        if self.retention_maintenance is None:
+            return
+        try:
+            deleted = await self.retention_maintenance()
+        except Exception as error:  # noqa: BLE001 - maintenance must not stop refresh
+            self.audit.append(
+                event_type="runtime_retention_purge_failed",
+                actor="runtime",
+                subject_id="state_history",
+                payload={"error": str(error)[:200]},
+            )
+            return
+        if deleted:
+            self.audit.append(
+                event_type="runtime_retention_purged",
+                actor="runtime",
+                subject_id="state_history",
+                payload={"deleted": deleted},
+            )
 
     def _inventory_refresh_due(self) -> bool:
         age = (self.clock.now() - self.last_inventory_refresh_at).total_seconds()

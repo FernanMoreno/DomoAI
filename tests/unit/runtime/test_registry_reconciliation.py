@@ -212,3 +212,21 @@ def test_same_source_rediscovery_removes_capability_no_longer_advertised() -> No
     assert device is not None
     assert [capability.name for capability in device.capabilities] == ["battery.power"]
     assert registry.routes_for("battery.home", "value") == ()
+
+
+def test_string_availability_is_rejected_instead_of_coerced_to_true() -> None:
+    registry = DeviceRegistry()
+    invalid = entity(
+        entity_id="light.invalid-availability",
+        source_device_id="invalid-availability-device",
+        canonical_id="living_room.invalid_availability",
+        name="Invalid availability",
+        capabilities=[power_capability()],
+    )
+    invalid["available"] = "false"
+
+    registry.apply_snapshot(AdapterSnapshot(source_entities=[invalid]), "fixture")
+
+    assert registry.get("living_room.invalid_availability") is None
+    assert registry.diagnostics[-1]["kind"] == "source_entity_rejected"
+    assert "boolean" in registry.diagnostics[-1]["reason"]

@@ -118,7 +118,9 @@ class ModbusAdapter:
                 StateSnapshot(
                     device_id=self._canonical_by_source[entity_id],
                     capability=capability,
-                    value=state["value"],
+                    value=state["value"]
+                    if state["available"] and self._available
+                    else None,
                     unit=state["unit"],
                     observed_at=state["observed_at"],
                     received_at=state["received_at"],

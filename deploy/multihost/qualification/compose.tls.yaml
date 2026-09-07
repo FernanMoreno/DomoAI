@@ -1,0 +1,15 @@
+# NOT FOR PRODUCTION: opt-in metadata for the ephemeral local mTLS probe.
+# Use with compose.yaml and --profile v2 --profile secure.
+services:
+  host-a:
+    profiles: ["secure"]
+    labels:
+      com.domoai.lab.tls-profile: "ephemeral-mtls"
+    environment:
+      DOMOAI_LAB_TLS_PROFILE: ephemeral-mtls
+  host-b:
+    profiles: ["secure"]
+    labels:
+      com.domoai.lab.tls-profile: "ephemeral-mtls"
+    environment:
+      DOMOAI_LAB_TLS_PROFILE: ephemeral-mtls

@@ -1,0 +1,84 @@
+{
+  "authority": {
+    "area_ids": [],
+    "capabilities": [],
+    "device_ids": [],
+    "household_id": "default",
+    "household_ids": [
+      "default"
+    ],
+    "operations": [],
+    "principal_id": "runtime",
+    "roles": [
+      "service"
+    ],
+    "tenant_id": "default"
+  },
+  "authority_created": false,
+  "candidates": [
+    {
+      "asset_type": "battery",
+      "blockers": [
+        {
+          "capability": "battery.soc",
+          "code": "missing_capability",
+          "detail": "canonical capability 'battery.soc' was not discovered"
+        },
+        {
+          "capability": "battery.power",
+          "code": "missing_capability",
+          "detail": "canonical capability 'battery.power' was not discovered"
+        },
+        {
+          "capability": "battery.capacity",
+          "code": "missing_capability",
+          "detail": "canonical capability 'battery.capacity' was not discovered"
+        },
+        {
+          "capability": "battery_control",
+          "code": "missing_control_route",
+          "detail": "canonical capability 'battery_control' was not discovered"
+        }
+      ],
+      "candidate_digest": "95c5db565c1c95f7916a56307c2abdca33d0817c3bd88eda56abf4e0e26aace3",
+      "canonical_device_id": "garage.house-power",
+      "connections": [
+        "fixture:ha-energy-1"
+      ],
+      "device_type": "energy",
+      "identity_keys": [
+        "fixture:device:ha-energy-1"
+      ],
+      "name": "House power",
+      "next_actions": [
+        "complete_battery_routes_and_identity"
+      ],
+      "provider_ids": [
+        "fixture"
+      ],
+      "required_capabilities": [
+        "battery.soc",
+        "battery.power",
+        "battery.capacity",
+        "battery_control"
+      ],
+      "routes": [],
+      "schema_version": "v1",
+      "source_refs": [
+        {
+          "adapter_id": "fixture",
+          "external_id": "sensor.house_power",
+          "external_type": "sensor",
+          "metadata_digest": null,
+          "source_device_id": "ha-energy-1"
+        }
+      ],
+      "status": "blocked"
+    }
+  ],
+  "generated_at": "2026-09-06T19:59:04.047704Z",
+  "report_digest": "d51857caa0c285bc04183fa8c90855622003db1510ae579bae5d9de6a1a1b8d3",
+  "runtime_revision": "rev-1",
+  "schema_version": "v1",
+  "warnings": []
+}

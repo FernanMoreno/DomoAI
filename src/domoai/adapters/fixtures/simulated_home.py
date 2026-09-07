@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time as _time
 from collections.abc import AsyncIterator, Sequence
@@ -116,6 +117,7 @@ class SimulatedHomeAdapter:
         self._entities = deepcopy(entities if entities is not None else default_entities())
         self._clock = clock or SystemClock()
         self._events: list[SourceEvent] = []
+        self._events_available = asyncio.Event()
         self._connected = False
         self.calls: list[Command] = []
         self._executed_idempotency_keys: set[str] = set()
@@ -131,13 +133,17 @@ class SimulatedHomeAdapter:
         # Decision 1's linear RC model), not a reuse of the lab module.
         self._climate_hvac_mode: dict[str, str] = {}
         self._climate_last_tick_by_entity: dict[str, float] = {}
+        # VirtualPlantClock exposes explicit ``advance``; use its timeline
+        # for deterministic lab runs while retaining monotonic wall time for
+        # legacy fixture callers and FixedClock-based tests.
+        self._uses_virtual_time = callable(getattr(self._clock, "advance", None))
 
     def _sync_climate_state(self, entity: dict[str, Any]) -> None:
         if entity["domain"] != "climate":
             return
         entity_id = entity["entity_id"]
         state = entity.setdefault("state", {})
-        elapsed = min(max(_time.monotonic() - self._climate_last_tick(entity_id), 0.0), 10.0)
+        elapsed = min(max(self._clock_timestamp() - self._climate_last_tick(entity_id), 0.0), 10.0)
         mode = self._climate_hvac_mode.get(entity_id, "off")
         if elapsed and mode != "off":
             current = float(state["temperature"])
@@ -174,15 +180,23 @@ class SimulatedHomeAdapter:
 
     def _climate_last_tick(self, entity_id: str) -> float:
         last = self._climate_last_tick_by_entity.get(entity_id)
-        now = _time.monotonic()
+        now = self._clock_timestamp()
         self._climate_last_tick_by_entity[entity_id] = now
         return last if last is not None else now
 
+    def _clock_timestamp(self) -> float:
+        if self._uses_virtual_time:
+            return self._clock.now().timestamp()
+        return _time.monotonic()
+
     async def connect(self) -> None:
         self._connected = True
+        if self._events:
+            self._events_available.set()
 
     async def disconnect(self) -> None:
         self._connected = False
+        self._events_available.set()
 
     async def discover(self) -> AdapterSnapshot:
         for entity in self._entities:
@@ -241,8 +255,28 @@ class SimulatedHomeAdapter:
         return AdapterExecutionAck(accepted=True, message="Fixture command accepted")
 
     async def subscribe_events(self) -> AsyncIterator[SourceEvent]:
-        while self._events:
-            yield self._events.pop(0)
+        """Keep the fixture stream live until the adapter disconnects.
+
+        Production adapters expose long-lived subscriptions. Ending an empty
+        fixture buffer immediately makes the runtime interpret normal fixture
+        idleness as source loss, which mutates the shared inventory revision.
+        The short timeout also observes tests that append directly to the
+        legacy buffer instead of using the notification helpers.
+        """
+
+        while self._connected or self._events:
+            if self._events:
+                yield self._events.pop(0)
+                continue
+            if not self._connected:
+                return
+            self._events_available.clear()
+            if self._events:
+                continue
+            try:
+                await asyncio.wait_for(self._events_available.wait(), timeout=0.1)
+            except TimeoutError:
+                continue
 
     async def health(self) -> AdapterHealth:
         return AdapterHealth(adapter_id=self.adapter_id, connected=self._connected)
@@ -255,11 +289,13 @@ class SimulatedHomeAdapter:
                 payload={"entity_id": entity_id, "available": available},
             )
         )
+        self._events_available.set()
 
     def rename(self, entity_id: str, name: str) -> None:
         entity = self._find(entity_id)
         entity["name"] = name
         self._events.append(MetadataChangedEvent(payload={"entity_id": entity_id, "name": name}))
+        self._events_available.set()
 
     def _find(self, entity_id: str) -> dict[str, Any]:
         for entity in self._entities:

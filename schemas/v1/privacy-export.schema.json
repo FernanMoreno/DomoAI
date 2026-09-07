@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "PrivacyCategory": {
+      "enum": [
+        "inventory",
+        "state",
+        "plans",
+        "approvals",
+        "bundles",
+        "schedules",
+        "automations",
+        "audit"
+      ],
+      "title": "PrivacyCategory",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "household_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Household Id",
+      "type": "string"
+    },
+    "categories": {
+      "items": {
+        "$ref": "#/$defs/PrivacyCategory"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Categories",
+      "type": "array"
+    },
+    "records": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "maxItems": 1024,
+      "title": "Records",
+      "type": "array"
+    },
+    "record_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Record Count",
+      "type": "integer"
+    },
+    "total_record_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Total Record Count"
+    },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Cursor"
+    }
+  },
+  "required": [
+    "household_id",
+    "categories"
+  ],
+  "title": "PrivacyExport",
+  "type": "object"
+}

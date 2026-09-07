@@ -15,6 +15,12 @@ KNX Virtual/ETS is installed on Windows and the live lab uses `knxd` in WSL as
 the single upstream client. Until those prerequisites are available, the live
 smoke remains intentionally skipped.
 
+The upstream host is topology-dependent. In the current WSL mirrored
+networking mode, KNX Virtual is reachable from WSL at `127.0.0.1:3671`; in
+classic WSL NAT mode, set `DOMOAI_KNX_KV_HOST` to the Windows-side address
+reachable from WSL. DomoAI continues to use the local `knxd` endpoint
+`127.0.0.1:3672`.
+
 ## Network checklist
 
 1. Create the virtual project in ETS and use the group addresses in
@@ -106,8 +112,10 @@ estado. El proyecto ETS debe enlazar estas direcciones:
 
 El mapping DomoAI correspondiente es `configs/knx-battery-virtual.json`.
 KNX Virtual sigue ejecutándose en Windows y conserva su interfaz upstream en
-`172.26.80.1:3671`. `knxd` en WSL es el único cliente de esa interfaz y
-publica `3672` para ETS y DomoAI. Configura ETS a la IP actual de WSL en
+UDP/3671. En la topología WSL mirrored validada el 2026-09-04, esa interfaz se
+alcanza desde WSL mediante `127.0.0.1:3671`; en WSL NAT debe usarse la IP de
+Windows alcanzable desde WSL. `knxd` en WSL es el único cliente de esa interfaz
+y publica `3672` para ETS y DomoAI. Configura ETS a la IP actual de WSL en
 `3672/UDP`, conserva `1.0.255` como dirección individual y no conectes dos
 clientes directamente a `3671`.
 

@@ -14,10 +14,15 @@ from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProvide
 from domoai.application.runtime_factory import build_runtime
 from domoai.application.state_service import StateService
 from domoai.config.settings import Settings
+from domoai.domain.models import StateStatus
 from domoai.mcp.domotics_server import DomoticsMcpContext, create_domotics_server
 
 
 def _structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return cast(dict[str, Any], result[1])
     assert isinstance(result, dict)
@@ -53,7 +58,9 @@ async def test_home_assistant_provider_runtime_live_smoke(tmp_path: Path) -> Non
 
         states = await runtime.state_store.all()
         assert states, "Home Assistant must expose at least one readable semantic state"
-        state = states[0]
+        state = next(
+            state for state in states if state.status is StateStatus.CURRENT
+        )
 
         context = DomoticsMcpContext(
             discovery=runtime.discovery,

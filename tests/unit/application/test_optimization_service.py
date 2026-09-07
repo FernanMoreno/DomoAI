@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
@@ -7,7 +9,7 @@ from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.domain.models import Command, Plan
 from domoai.optimizer.ports import OptimizationResult, OptimizationStatus
-from domoai.optimizer.scenario import OptimizationScenario
+from domoai.optimizer.scenario import OptimizationScenario, scenario_definition_digest
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
@@ -117,6 +119,27 @@ async def test_last_wall_time_seconds_none_before_any_optimize_call() -> None:
     )
 
     assert service.last_wall_time_seconds is None
+
+
+@pytest.mark.asyncio
+async def test_optimize_attaches_the_canonical_scenario_definition_digest() -> None:
+    registry, plan_service = await build_service()
+    result = _result_with_wall_time(0.1)
+    service = OptimizationService(registry, plan_service, _FixedOptimizer(result))
+    start = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    scenario = OptimizationScenario(
+        id="digest-service-scenario",
+        horizon={
+            "start": start,
+            "end": start + timedelta(minutes=15),
+            "resolution_minutes": 15,
+            "timezone": "Europe/Madrid",
+        },
+    )
+
+    optimized = service.optimize(scenario)
+
+    assert optimized.definition_digest == scenario_definition_digest(scenario)
 
 
 @pytest.mark.asyncio

@@ -113,11 +113,14 @@ uv run pytest -q tests/integration/test_energy_skill_workflow.py
 ```
 
 The workflow uses the same connection for semantic reads, proposals,
-explanations and plan validation. The published v3 skill hands every mutation
+explanations and plan validation. The published v4 skill hands every mutation
 to `commit_or_schedule_bundle`; it never calls an adapter directly. Sensitive
-bundles pause for explicit operator approval.
+bundles pause for explicit operator approval. The local catalog also contains
+EV, thermal-comfort, solar, battery, night and vacation procedures plus
+read-only `device-diagnostics` and `commission-new-device`; all nine contracts
+are validated offline with `load_core_catalog()`.
 
-For energy-aware scenarios, the portable v3 procedure reads a complete typed
+For energy-aware scenarios, the portable v4 procedure reads a complete typed
 context through `mcp.get_energy_context` before calling the proposal-only
 optimizer. The context aligns tariffs and solar forecasts to a fixed horizon
 and may include one battery profile. CP-SAT returns cost, peak-import and
@@ -218,9 +221,10 @@ Modbus, Matter y KNX; no inventa gateways, tokens ni commissioning. Los
 smoke tests live siguen separados y requieren sus servicios y variables
 `DOMOAI_*` reales.
 
-The composition root selects the deterministic fixture when no live source is
-configured, a direct adapter for one source, or a composite runtime for two or
-more complete source configurations. Configure Home Assistant with:
+The composition root selects a direct adapter for one source or a composite
+runtime for two or more complete source configurations. The explicit fixture
+entry point is reserved for tests and local development. Configure Home
+Assistant with:
 
 ```bash
 export DOMOAI_HOME_ASSISTANT_URL="http://home-assistant.local:8123"
@@ -229,6 +233,10 @@ export DOMOAI_HOME_ASSISTANT_MAPPING_PATH="config/home-assistant-mappings.json"
 export DOMOAI_DATABASE_PATH="data/domoai.sqlite3"
 uv run domoai-mcp
 ```
+
+The `domoai-mcp` launcher requires an explicit live provider configuration and
+fails closed otherwise. The deterministic stdio fixture is available only for
+protocol tests or local development with `DOMOAI_RUNTIME_MODE=fixture`.
 
 The provider path is the configured Home Assistant runtime. The URL/token pair
 is required and an optional strict v1 mapping document can make energy roles
@@ -292,6 +300,13 @@ export DOMOAI_MQTT_TIMEOUT_SECONDS="5"
 export DOMOAI_MQTT_USERNAME="domoai"
 export DOMOAI_MQTT_PASSWORD="<mqtt-password>"
 uv run domoai-mcp
+```
+
+Generic MQTT/ESP devices use a separate strict declarative mapping:
+
+```bash
+export DOMOAI_GENERIC_MQTT_URL="mqtt://mqtt-broker.local:1883"
+export DOMOAI_GENERIC_MQTT_MAPPING_PATH="config/generic-mqtt.json"
 ```
 
 Zigbee2MQTT may run alongside Home Assistant or another configured source. The
@@ -423,5 +438,10 @@ credentials and hardware were unavailable. The FastMCP compatibility
 seam keeps the known `pydantic_settings` incomplete-field warning out of the
 MCP contracts without globally suppressing warnings.
 
-Adapter and public contract guidance lives in [`docs/adapter-sdk.md`](docs/adapter-sdk.md)
-and [`docs/contracts.md`](docs/contracts.md).
+Universal adapter and public contract guidance lives in [`docs/adapter-sdk.md`](docs/adapter-sdk.md)
+and [`docs/contracts.md`](docs/contracts.md). The current connector coverage,
+including the distinction between native connectors, Home Assistant mediation,
+internal extensions, fixtures and external qualification, is recorded in
+[`docs/adapter-coverage.md`](docs/adapter-coverage.md). The versioned program
+status and external gates are listed in
+[`docs/program-status-2026-09-06.md`](docs/program-status-2026-09-06.md).

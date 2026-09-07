@@ -32,7 +32,7 @@ from tests.fixtures.zigbee2mqtt import retained_messages
 pytest.importorskip("testcontainers", reason="testcontainers is a dev-only dependency")
 
 from testcontainers.core.container import DockerContainer  # noqa: E402
-from testcontainers.core.waiting_utils import wait_for_logs  # noqa: E402
+from testcontainers.core.wait_strategies import LogMessageWaitStrategy  # noqa: E402
 
 
 def _docker_available() -> bool:
@@ -53,10 +53,15 @@ pytestmark = pytest.mark.skipif(
 
 @pytest_asyncio.fixture
 async def mosquitto_port() -> AsyncIterator[int]:
-    container = DockerContainer("eclipse-mosquitto:1.6.15").with_exposed_ports(1883)
+    container = (
+        DockerContainer("eclipse-mosquitto:1.6.15")
+        .with_exposed_ports(1883)
+        .waiting_for(
+            LogMessageWaitStrategy("mosquitto version").with_startup_timeout(30)
+        )
+    )
     container.start()
     try:
-        wait_for_logs(container, "mosquitto version", timeout=30)
         yield int(container.get_exposed_port(1883))
     finally:
         container.stop()

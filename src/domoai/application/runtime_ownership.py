@@ -50,12 +50,13 @@ class RuntimeOwnership:
         adapter_id: str,
     ) -> RuntimeOwnership:
         advisory_lock = repository.database.advisory_lock()
-        try:
-            await asyncio.to_thread(advisory_lock.acquire, blocking=False)
-        except BlockingIOError as error:
-            raise RuntimeOwnershipConflict(
-                f"runtime ownership for {settings.mcp_deployment_id} is active"
-            ) from error
+        if advisory_lock is not None:
+            try:
+                await asyncio.to_thread(advisory_lock.acquire, blocking=False)
+            except BlockingIOError as error:
+                raise RuntimeOwnershipConflict(
+                    f"runtime ownership for {settings.mcp_deployment_id} is active"
+                ) from error
         owner = cls(
             repository=repository,
             deployment_id=settings.mcp_deployment_id,
@@ -69,7 +70,8 @@ class RuntimeOwnership:
                 config_digest=runtime_config_digest(settings, adapter_id=adapter_id),
             )
         except BaseException:
-            advisory_lock.release()
+            if advisory_lock is not None:
+                advisory_lock.release()
             raise
         return owner
 

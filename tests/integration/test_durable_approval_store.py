@@ -69,3 +69,74 @@ async def test_approval_store_restores_pending_grants_and_keeps_consumption_one_
         restarted_store.consume(grant.approval_id, plan)
 
     await restarted_database.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_reservation_survives_restart_and_can_be_released(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "approval-reservation.sqlite3"
+    database = SQLiteDatabase(path)
+    await database.initialize()
+    store = ApprovalStore(
+        operator_token="operator",
+        allow_legacy_token=True,
+        persistence=ApprovalGrantRepository(database),
+    )
+    plan = _plan()
+    grant = store.issue(plan, approved_by="operator", operator_token="operator")
+    store.reserve(grant.approval_id, plan, reservation_id="bundle-restart")
+    await database.close()
+
+    restarted_database = SQLiteDatabase(path)
+    await restarted_database.initialize()
+    restarted_store = ApprovalStore(
+        operator_token="operator",
+        allow_legacy_token=True,
+        persistence=ApprovalGrantRepository(restarted_database),
+    )
+
+    with pytest.raises(DomainError, match="reserved"):
+        restarted_store.consume(grant.approval_id, plan)
+    restarted_store.release_reservation("bundle-restart")
+    assert restarted_store.consume(grant.approval_id, plan).approval_id == grant.approval_id
+
+    await restarted_database.close()
+
+
+@pytest.mark.asyncio
+async def test_released_durable_reservation_can_be_re_reserved_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "approval-reservation-retry.sqlite3"
+    database = SQLiteDatabase(path)
+    await database.initialize()
+    store = ApprovalStore(
+        operator_token="operator",
+        allow_legacy_token=True,
+        persistence=ApprovalGrantRepository(database),
+    )
+    plan = _plan()
+    grant = store.issue(plan, approved_by="operator", operator_token="operator")
+    store.reserve(grant.approval_id, plan, reservation_id="bundle-failed")
+    store.release_reservation("bundle-failed")
+    await database.close()
+
+    restarted_database = SQLiteDatabase(path)
+    await restarted_database.initialize()
+    restarted_store = ApprovalStore(
+        operator_token="operator",
+        allow_legacy_token=True,
+        persistence=ApprovalGrantRepository(restarted_database),
+    )
+
+    assert restarted_store.reserve(
+        grant.approval_id,
+        plan,
+        reservation_id="bundle-retry",
+    ) == grant
+    restarted_store.commit_reservation("bundle-retry")
+    with pytest.raises(DomainError, match="consumed"):
+        restarted_store.consume(grant.approval_id, plan)
+
+    await restarted_database.close()

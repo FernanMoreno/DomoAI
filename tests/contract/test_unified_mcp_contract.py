@@ -24,6 +24,10 @@ from domoai.runtime.state_store import StateStore
 
 
 def structured(result: object) -> dict[str, Any]:
+    protocol_content = getattr(result, "structuredContent", None)
+    if isinstance(protocol_content, dict):
+        return protocol_content
+
     if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict):
         return result[1]
     assert isinstance(result, dict)
@@ -93,7 +97,12 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
     assert [tool.name for tool in tools] == [
         "discover_devices",
         "get_state",
+        "get_history",
         "get_energy_context",
+        "preview_command",
+        "prepare_command",
+        "preview_plan",
+        "prepare_plan",
         "validate_command",
         "validate_plan",
         "request_approval",
@@ -105,10 +114,16 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
         "schedule_recurring_plan",
         "cancel_recurring_schedule",
         "list_recurring_schedules",
+        "create_local_automation_rule",
+        "update_local_automation_rule",
+        "list_local_automation_rules",
+        "set_local_automation_status",
         "list_audit_events",
         "validate_scenario",
         "optimize_scenario",
         "explain_solution",
+        "summarize_solution",
+        "compare_scenarios",
     ]
     annotations = {tool.name: tool.annotations for tool in tools}
     assert all(annotation is not None for annotation in annotations.values())
@@ -117,6 +132,7 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
     assert [str(resource.uri) for resource in await server.list_resources()] == [
         "domotics://areas",
         "domotics://capabilities",
+        "domotics://coverage",
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",
@@ -130,6 +146,37 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
     assert runtime["providers"]
     assert runtime["writable_capabilities"]
     assert runtime["authority"]["physical_execution"] == "plan_executor"
+
+    coverage = json.loads((await server.read_resource("domotics://coverage"))[0].content)
+    assert coverage["schema_version"] == "v1"
+    assert coverage["routes"]
+    assert all("authority" not in route for route in coverage["routes"])
+    first_route = coverage["routes"][0]
+    assert {"read", "write", "commands"} <= set(first_route["operations"])
+    assert {"confirmation_required", "readback_required"} <= set(first_route["guarantees"])
+    assert {"unit", "minimum", "maximum", "enum_values"} <= set(first_route["limits"])
+    prompts = await server.list_prompts()
+    assert [prompt.name for prompt in prompts] == [
+        "discover-domotics-inventory",
+        "diagnose-domotics-device",
+        "prepare-energy-plan",
+    ]
+    prompt_result = await server.get_prompt("prepare-energy-plan")
+    prompt_text = " ".join(
+        message.content.text
+        for message in prompt_result.messages
+        if hasattr(message.content, "text")
+    )
+    assert "approval" in prompt_text
+    assert "plan_id" not in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_unified_context_has_one_registry_and_plan_boundary() -> None:
+    _, context = await build_context()
+
+    assert context.domotics.registry is context.optimizer.registry
+    assert context.domotics.facade.plan_service is context.optimizer.plan_service
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
@@ -6,6 +8,7 @@ from domoai.adapters.zigbee2mqtt.transport import (
     MqttMessage,
 )
 from domoai.domain.models import Command, SourceRef, StateStatus
+from domoai.runtime.execution_context import ExecutionContext
 from tests.fixtures.zigbee2mqtt import retained_messages, state_message
 
 
@@ -44,6 +47,47 @@ class _IdleOncePersistentTransport(InMemoryMqttTransport):
             self._idle_returned = True
             return None
         return await super().receive(timeout)
+
+
+class _GetRespondingTransport(InMemoryMqttTransport):
+    async def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        retained: bool = False,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
+        await super().publish(
+            topic,
+            payload,
+            retained=retained,
+            execution_context=execution_context,
+        )
+        if topic.endswith("/get"):
+            self.enqueue(state_message("zigbee2mqtt/living_room/main_light", {"state": "OFF"}))
+
+
+class _StaleThenFreshTransport(InMemoryMqttTransport):
+    async def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        retained: bool = False,
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
+        await super().publish(
+            topic,
+            payload,
+            retained=retained,
+            execution_context=execution_context,
+        )
+        if topic.endswith("/set"):
+            self.enqueue(state_message("zigbee2mqtt/living_room/main_light", {"state": "ON"}))
+        elif topic.endswith("/get"):
+            await asyncio.sleep(0.02)
+            self.enqueue(state_message("zigbee2mqtt/living_room/main_light", {"state": "OFF"}))
 
 
 @pytest.mark.asyncio
@@ -170,6 +214,108 @@ async def test_read_state_projects_typed_values_and_source_references() -> None:
     assert all(state.source_ref.external_id == "living_room/main_light" for state in states)
     assert transport.published[-1].topic == "zigbee2mqtt/living_room/main_light/get"
     assert transport.published[-1].payload == b'{"brightness":null,"state":null}'
+
+
+@pytest.mark.asyncio
+async def test_read_state_waits_for_live_event_after_get_request() -> None:
+    transport = _GetRespondingTransport(retained_messages())
+    adapter = Zigbee2MqttAdapter(transport, discovery_timeout=0.05)
+    await adapter.connect()
+    await adapter.discover()
+    events = adapter.subscribe_events()
+    event_task = asyncio.create_task(anext(events))
+    await asyncio.sleep(0)
+
+    states = await adapter.read_state(
+        [SourceRef(adapter_id="zigbee2mqtt", external_id="living_room/main_light")]
+    )
+
+    assert (await event_task).kind == "state_changed"
+    assert {state.capability: state.value for state in states}["power"] is False
+    await events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_read_state_ignores_stale_event_before_command_readback() -> None:
+    transport = _StaleThenFreshTransport(retained_messages())
+    adapter = Zigbee2MqttAdapter(transport, discovery_timeout=0.05)
+    await adapter.connect()
+    await adapter.discover()
+    events = adapter.subscribe_events()
+
+    async def consume() -> None:
+        async for _event in events:
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    try:
+        await adapter.execute_source(
+            Command(
+                id="command-live-off",
+                device_id="unassigned.living-room-main-light",
+                command="turn_off",
+                idempotency_key="intent-live-off",
+            ),
+            "living_room/main_light",
+        )
+        states = await adapter.read_state(
+            [SourceRef(adapter_id="zigbee2mqtt", external_id="living_room/main_light")]
+        )
+        assert {state.capability: state.value for state in states}["power"] is False
+    finally:
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_live_source_rejects_a_second_command_with_pending_readback() -> None:
+    transport = _StaleThenFreshTransport(retained_messages())
+    adapter = Zigbee2MqttAdapter(transport, discovery_timeout=0.05)
+    await adapter.connect()
+    await adapter.discover()
+    events = adapter.subscribe_events()
+
+    async def consume() -> None:
+        async for _event in events:
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    try:
+        first = await adapter.execute_source(
+            Command(
+                id="command-live-on",
+                device_id="unassigned.living-room-main-light",
+                command="turn_on",
+                idempotency_key="intent-live-on",
+            ),
+            "living_room/main_light",
+        )
+        second = await adapter.execute_source(
+            Command(
+                id="command-live-off",
+                device_id="unassigned.living-room-main-light",
+                command="turn_off",
+                idempotency_key="intent-live-off-before-readback",
+            ),
+            "living_room/main_light",
+        )
+
+        assert first.accepted is True
+        assert second.accepted is False
+        assert second.message == "Zigbee2MQTT readback pending"
+    finally:
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+        await adapter.disconnect()
 
 
 @pytest.mark.asyncio

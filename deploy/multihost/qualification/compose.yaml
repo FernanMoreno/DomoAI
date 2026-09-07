@@ -1,0 +1,252 @@
+# NOT FOR PRODUCTION: disposable synchronous PostgreSQL HA qualification lab.
+# It has no TLS, production identities, backup policy, or independent fault domains.
+# All services are internal-only; production must use mTLS and independent fault domains.
+x-lab-labels: &lab-labels
+  com.domoai.lab: "true"
+  com.domoai.not-for-production: "true"
+
+services:
+  etcd-1:
+    image: quay.io/coreos/etcd:v3.5.17
+    labels: *lab-labels
+    command: >-
+      etcd --name etcd-1 --data-dir /etcd-data
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd-1:2379
+      --listen-peer-urls http://0.0.0.0:2380
+      --initial-advertise-peer-urls http://etcd-1:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token domoai-qualification-lab
+    volumes:
+      - etcd-1-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  etcd-2:
+    image: quay.io/coreos/etcd:v3.5.17
+    labels: *lab-labels
+    command: >-
+      etcd --name etcd-2 --data-dir /etcd-data
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd-2:2379
+      --listen-peer-urls http://0.0.0.0:2380
+      --initial-advertise-peer-urls http://etcd-2:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token domoai-qualification-lab
+    volumes:
+      - etcd-2-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  etcd-3:
+    image: quay.io/coreos/etcd:v3.5.17
+    labels: *lab-labels
+    command: >-
+      etcd --name etcd-3 --data-dir /etcd-data
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd-3:2379
+      --listen-peer-urls http://0.0.0.0:2380
+      --initial-advertise-peer-urls http://etcd-3:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token domoai-qualification-lab
+    volumes:
+      - etcd-3-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  postgres-1:
+    image: domoai-qualification-patroni:local
+    build: ./patroni
+    labels: *lab-labels
+    environment:
+      PATRONI_NAME: postgres-1
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres-1:8008
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres-1:5432
+    depends_on:
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    expose:
+      - "5432"
+      - "8008"
+    volumes:
+      - postgres-1-data:/var/lib/postgresql/data
+
+  postgres-2:
+    image: domoai-qualification-patroni:local
+    build: ./patroni
+    labels: *lab-labels
+    environment:
+      PATRONI_NAME: postgres-2
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres-2:8008
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres-2:5432
+    depends_on:
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    expose:
+      - "5432"
+      - "8008"
+    volumes:
+      - postgres-2-data:/var/lib/postgresql/data
+
+  postgres-3:
+    image: domoai-qualification-patroni:local
+    build: ./patroni
+    labels: *lab-labels
+    environment:
+      PATRONI_NAME: postgres-3
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres-3:8008
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres-3:5432
+    depends_on:
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    expose:
+      - "5432"
+      - "8008"
+    volumes:
+      - postgres-3-data:/var/lib/postgresql/data
+
+  postgres-writer:
+    image: haproxy:3.0.8-bookworm
+    labels: *lab-labels
+    depends_on:
+      postgres-1:
+        condition: service_started
+      postgres-2:
+        condition: service_started
+      postgres-3:
+        condition: service_started
+    expose:
+      - "5432"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+
+  # v2 host participants are opt-in so the original qualification runner keeps
+  # its seven-service topology. The v2 controller enables the profile and
+  # supplies its unique locally-built runner image.
+  host-a:
+    profiles: ["v2"]
+    image: ${DOMOAI_LAB_RUNNER_IMAGE:-domoai-qualification-runner:local}
+    labels: *lab-labels
+    restart: on-failure
+    entrypoint: ["python"]
+    environment:
+      DOMOAI_INSTANCE_ID: host-a
+      PGPASSWORD: lab-only-postgres-password
+    command:
+      - -m
+      - domoai.lab.multihost_host
+      - --serve
+      - --instance-id
+      - host-a
+      - --port
+      - "8090"
+      - --etcd-endpoint
+      - http://etcd-1:2379
+      - --etcd-endpoint
+      - http://etcd-2:2379
+      - --etcd-endpoint
+      - http://etcd-3:2379
+      - --postgres-dsn
+      - postgresql://postgres@postgres-writer:5432/postgres
+      - --bridge-state-file
+      - /lab-state/fencing-state.json
+      - --outbox-sink-file
+      - /lab-state/outbox-deliveries.jsonl
+    depends_on:
+      postgres-writer:
+        condition: service_started
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    expose:
+      - "8090"
+    volumes:
+      - lab-state:/lab-state
+
+  host-b:
+    profiles: ["v2"]
+    image: ${DOMOAI_LAB_RUNNER_IMAGE:-domoai-qualification-runner:local}
+    labels: *lab-labels
+    restart: on-failure
+    entrypoint: ["python"]
+    environment:
+      DOMOAI_INSTANCE_ID: host-b
+      PGPASSWORD: lab-only-postgres-password
+    command:
+      - -m
+      - domoai.lab.multihost_host
+      - --serve
+      - --instance-id
+      - host-b
+      - --port
+      - "8090"
+      - --etcd-endpoint
+      - http://etcd-1:2379
+      - --etcd-endpoint
+      - http://etcd-2:2379
+      - --etcd-endpoint
+      - http://etcd-3:2379
+      - --postgres-dsn
+      - postgresql://postgres@postgres-writer:5432/postgres
+      - --bridge-state-file
+      - /lab-state/fencing-state.json
+      - --outbox-sink-file
+      - /lab-state/outbox-deliveries.jsonl
+    depends_on:
+      postgres-writer:
+        condition: service_started
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    expose:
+      - "8090"
+    volumes:
+      - lab-state:/lab-state
+
+volumes:
+  # Compose prefixes these local, disposable volumes with its project name.
+  etcd-1-data:
+    labels: *lab-labels
+  etcd-2-data:
+    labels: *lab-labels
+  etcd-3-data:
+    labels: *lab-labels
+  postgres-1-data:
+    labels: *lab-labels
+  postgres-2-data:
+    labels: *lab-labels
+  postgres-3-data:
+    labels: *lab-labels
+  lab-state:
+    labels: *lab-labels

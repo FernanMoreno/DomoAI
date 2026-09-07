@@ -1,0 +1,87 @@
+{
+  "$defs": {
+    "PhysicalIntentStatus": {
+      "enum": [
+        "prepared",
+        "acknowledged",
+        "confirmed",
+        "rejected",
+        "unknown"
+      ],
+      "title": "PhysicalIntentStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Durable idempotency record for one household physical intention.",
+  "properties": {
+    "tenant_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "household_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Household Id",
+      "type": "string"
+    },
+    "deployment_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Deployment Id",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "plan_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "command_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Command Id",
+      "type": "string"
+    },
+    "fencing_epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Fencing Epoch",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/PhysicalIntentStatus",
+      "default": "prepared"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tenant_id",
+    "household_id",
+    "deployment_id",
+    "idempotency_key",
+    "plan_id",
+    "command_id",
+    "fencing_epoch",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "PhysicalIntent",
+  "type": "object"
+}

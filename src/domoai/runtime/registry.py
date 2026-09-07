@@ -295,7 +295,10 @@ class DeviceRegistry:
         identity = SourceIdentity.from_entity(entity, adapter_id)
         canonical_id = self._canonical_id_for(identity)
         capabilities = capabilities_from_entity(entity)
-        available = bool(entity.get("available", True))
+        available_value = entity.get("available", True)
+        if not isinstance(available_value, bool):
+            raise TypeError("entity availability must be a boolean")
+        available = available_value
         source_ref = SourceRef(
             adapter_id=adapter_id,
             external_id=identity.source_entity_id,

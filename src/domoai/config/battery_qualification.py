@@ -34,6 +34,21 @@ class BatteryQualificationError(ValueError):
     """Raised when a physical battery qualification artifact is unsafe."""
 
 
+class HILIdentityObservation(StrictModel):
+    """Structured identity evidence attached to a HIL qualification artifact."""
+
+    hardware_id: str = Field(min_length=1, max_length=200)
+    firmware_version: str = Field(min_length=1, max_length=200)
+    source: Literal["adapter_observed", "trusted_attestation"]
+    observed_at: datetime
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> HILIdentityObservation:
+        if self.observed_at.tzinfo is None:
+            raise ValueError("HIL identity observation must be timezone-aware")
+        return self
+
+
 class BatteryHILEvidence(StrictModel):
     schema_version: Literal["v1"] = "v1"
     status: Literal["passed", "failed"]
@@ -51,6 +66,7 @@ class BatteryHILEvidence(StrictModel):
     # both require multi-phase/out-of-band verification a single CLI
     # invocation cannot self-certify.
     test_software_version: str | None = Field(default=None, max_length=200)
+    identity_observation: HILIdentityObservation | None = None
     observations: dict[str, dict[str, Any]] = Field(default_factory=dict)
     manual_attestations: dict[str, str] = Field(default_factory=dict)
     provider_id: str | None = Field(default=None, min_length=1, max_length=200)
@@ -93,6 +109,13 @@ class BatteryHILEvidence(StrictModel):
         unknown_manual_status = set(self.manual_check_status) - REQUIRED_HIL_CHECKS
         if unknown_manual_status:
             raise ValueError("manual check status references unknown checks")
+        if self.identity_observation is not None and (
+            self.identity_observation.hardware_id != self.hardware_id
+            or self.identity_observation.firmware_version != self.firmware_version
+        ):
+            raise ValueError(
+                "HIL identity observation must match the artifact hardware and firmware labels"
+            )
         return self
 
     def qualifies(
@@ -197,6 +220,7 @@ def load_battery_hil_evidence(path: Path) -> BatteryHILEvidence:
 __all__ = [
     "BatteryHILEvidence",
     "BatteryQualificationError",
+    "HILIdentityObservation",
     "REQUIRED_HIL_CHECKS",
     "MANUAL_HIL_CHECKS",
     "battery_binding_digest",

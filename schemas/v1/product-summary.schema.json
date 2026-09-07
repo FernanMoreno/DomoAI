@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "ProductAlternative": {
+      "additionalProperties": false,
+      "properties": {
+        "plan_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "objective_values": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "maxProperties": 32,
+          "title": "Objective Values",
+          "type": "object"
+        },
+        "constraint_effects": {
+          "additionalProperties": true,
+          "maxProperties": 16,
+          "title": "Constraint Effects",
+          "type": "object"
+        },
+        "forecast_assumptions": {
+          "additionalProperties": true,
+          "maxProperties": 16,
+          "title": "Forecast Assumptions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "plan_id"
+      ],
+      "title": "ProductAlternative",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Stable, non-executable explanation of an optimization proposal.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Scenario Id",
+      "type": "string"
+    },
+    "definition_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Digest"
+    },
+    "status": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Status",
+      "type": "string"
+    },
+    "headline": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Headline",
+      "type": "string"
+    },
+    "proposal_id": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Proposal Id"
+    },
+    "objective_values": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "maxProperties": 32,
+      "title": "Objective Values",
+      "type": "object"
+    },
+    "constraint_summary": {
+      "additionalProperties": true,
+      "maxProperties": 16,
+      "title": "Constraint Summary",
+      "type": "object"
+    },
+    "alternatives": {
+      "items": {
+        "$ref": "#/$defs/ProductAlternative"
+      },
+      "maxItems": 16,
+      "title": "Alternatives",
+      "type": "array"
+    },
+    "hard_constraints_satisfied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hard Constraints Satisfied"
+    },
+    "forecast_confidence": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Forecast Confidence"
+    },
+    "diagnostic_codes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Diagnostic Codes",
+      "type": "array"
+    },
+    "next_step": {
+      "enum": [
+        "validate_and_request_approval_before_execution",
+        "revise_scenario_or_inputs",
+        "no_action_required"
+      ],
+      "title": "Next Step",
+      "type": "string"
+    }
+  },
+  "required": [
+    "scenario_id",
+    "status",
+    "headline",
+    "next_step"
+  ],
+  "title": "ProductSummary",
+  "type": "object"
+}

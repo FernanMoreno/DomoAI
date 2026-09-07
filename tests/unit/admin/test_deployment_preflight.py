@@ -5,9 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.fixtures.deployment_preflight import write_deployment
 
 from domoai.admin.deployment_preflight import run_preflight
+from tests.fixtures.deployment_preflight import write_deployment
 
 
 @pytest.mark.asyncio

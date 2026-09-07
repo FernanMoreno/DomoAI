@@ -26,6 +26,7 @@ DEFAULT_REQUIRED_TOOLS = frozenset(
         "validate_plan",
         "execute_plan",
         "optimize_scenario",
+        "compare_scenarios",
     }
 )
 

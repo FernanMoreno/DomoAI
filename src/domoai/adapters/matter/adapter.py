@@ -101,7 +101,7 @@ class MatterServerAdapter:
                 StateSnapshot(
                     device_id=self._canonical_by_source.get(source_entity_id, source_entity_id),
                     capability=capability,
-                    value=state.get("value"),
+                    value=state.get("value") if state.get("available", False) else None,
                     unit=state.get("unit"),
                     observed_at=received_at,
                     received_at=received_at,

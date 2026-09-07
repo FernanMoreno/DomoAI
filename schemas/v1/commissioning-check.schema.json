@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "CommissioningCheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked"
+      ],
+      "title": "CommissioningCheckStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "check_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]*$",
+      "title": "Check Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/CommissioningCheckStatus"
+    },
+    "detail": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Detail",
+      "type": "string"
+    }
+  },
+  "required": [
+    "check_id",
+    "status",
+    "detail"
+  ],
+  "title": "CommissioningCheck",
+  "type": "object"
+}

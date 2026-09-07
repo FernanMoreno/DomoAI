@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any, cast
+
+from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from domoai.domain.errors import DomainError, ErrorCode
@@ -9,7 +13,7 @@ from domoai.domain.models import ErrorDetail
 from domoai.optimizer.providers import EnergyProviderError
 
 
-def error_envelope(error: Exception) -> dict[str, object]:
+def error_envelope(error: Exception) -> dict[str, Any]:
     if isinstance(error, DomainError):
         detail = error.as_detail()
     elif isinstance(error, EnergyProviderError):
@@ -36,4 +40,17 @@ def error_envelope(error: Exception) -> dict[str, object]:
             code=ErrorCode.VALIDATION_ERROR,
             message="Request could not be processed",
         )
-    return {"error": detail.model_dump(mode="json")}
+    payload = {"error": detail.model_dump(mode="json")}
+    return cast(
+        dict[str, Any],
+        CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+                )
+            ],
+            structuredContent=payload,
+            isError=True,
+        ),
+    )

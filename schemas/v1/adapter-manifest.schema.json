@@ -1,5 +1,14 @@
 {
   "$defs": {
+    "AvailabilityMode": {
+      "description": "Transport mode that may provide a capability observation or command.",
+      "enum": [
+        "local",
+        "remote"
+      ],
+      "title": "AvailabilityMode",
+      "type": "string"
+    },
     "CapabilityDeclaration": {
       "additionalProperties": false,
       "description": "Semantic capability promised by an adapter package.",
@@ -88,6 +97,9 @@
           },
           "title": "Constraints",
           "type": "object"
+        },
+        "guarantees": {
+          "$ref": "#/$defs/CapabilityGuarantees"
         }
       },
       "required": [
@@ -97,6 +109,95 @@
         "writable"
       ],
       "title": "CapabilityDeclaration",
+      "type": "object"
+    },
+    "CapabilityGuarantees": {
+      "additionalProperties": false,
+      "description": "Operational guarantees attached to a canonical capability.\n\nDefaults are intentionally legacy-safe.  They describe no additional\nevidence requirement; they do not claim that a physical device was\ncommissioned.",
+      "properties": {
+        "resolution": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "gt": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        },
+        "tolerance": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "ge": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance"
+        },
+        "expected_latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Latency Ms"
+        },
+        "readback_required": {
+          "default": false,
+          "title": "Readback Required",
+          "type": "boolean"
+        },
+        "reversible": {
+          "default": true,
+          "title": "Reversible",
+          "type": "boolean"
+        },
+        "confirmation_required": {
+          "default": false,
+          "title": "Confirmation Required",
+          "type": "boolean"
+        },
+        "availability_modes": {
+          "items": {
+            "$ref": "#/$defs/AvailabilityMode"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Availability Modes",
+          "type": "array"
+        },
+        "commissioning_required": {
+          "$ref": "#/$defs/CommissioningRequirement",
+          "default": "not_required"
+        }
+      },
+      "title": "CapabilityGuarantees",
       "type": "object"
     },
     "CapabilityKind": {
@@ -109,6 +210,16 @@
         "timestamp"
       ],
       "title": "CapabilityKind",
+      "type": "string"
+    },
+    "CommissioningRequirement": {
+      "description": "Trust level required before a capability can be bound for production.",
+      "enum": [
+        "not_required",
+        "recommended",
+        "required"
+      ],
+      "title": "CommissioningRequirement",
       "type": "string"
     },
     "DeviceType": {

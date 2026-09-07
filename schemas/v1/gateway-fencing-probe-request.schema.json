@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "LeaseScope": {
+      "additionalProperties": false,
+      "description": "The smallest authority scope that may have one physical owner.",
+      "properties": {
+        "tenant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "deployment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Deployment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "household_id",
+        "deployment_id"
+      ],
+      "title": "LeaseScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One explicitly safe physical-boundary fencing probe.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "probe_id": {
+      "format": "uuid",
+      "title": "Probe Id",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/LeaseScope"
+    },
+    "fencing_epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Fencing Epoch",
+      "type": "integer"
+    },
+    "lease_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Lease Id",
+      "type": "string"
+    },
+    "safe_command": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Safe Command",
+      "type": "string"
+    }
+  },
+  "required": [
+    "probe_id",
+    "scope",
+    "fencing_epoch",
+    "lease_id",
+    "safe_command"
+  ],
+  "title": "GatewayFencingProbeRequest",
+  "type": "object"
+}

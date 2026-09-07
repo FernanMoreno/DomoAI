@@ -88,7 +88,7 @@ volumes:
     handle @mcp {
         reverse_proxy gateway:8124
     }
-    @health path /healthz /readyz
+    @health path /healthz /readyz /metrics
     handle @health {
         reverse_proxy gateway:8124
     }

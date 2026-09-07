@@ -9,7 +9,7 @@ from datetime import UTC, datetime, time
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 SCHEMA_VERSION = "v1"
 type ScalarValue = bool | int | float | str
@@ -21,6 +21,107 @@ class StrictModel(BaseModel):
         populate_by_name=True,
         str_strip_whitespace=True,
     )
+
+
+class AvailabilityMode(StrEnum):
+    """Transport mode that may provide a capability observation or command."""
+
+    LOCAL = "local"
+    REMOTE = "remote"
+
+
+class CommissioningRequirement(StrEnum):
+    """Trust level required before a capability can be bound for production."""
+
+    NOT_REQUIRED = "not_required"
+    RECOMMENDED = "recommended"
+    REQUIRED = "required"
+
+
+class CapabilityGuarantees(StrictModel):
+    """Operational guarantees attached to a canonical capability.
+
+    Defaults are intentionally legacy-safe.  They describe no additional
+    evidence requirement; they do not claim that a physical device was
+    commissioned.
+    """
+
+    resolution: float | int | None = Field(default=None, gt=0)
+    tolerance: float | int | None = Field(default=None, ge=0)
+    expected_latency_ms: int | None = Field(default=None, ge=0)
+    readback_required: bool = False
+    reversible: bool = True
+    confirmation_required: bool = False
+    availability_modes: list[AvailabilityMode] = Field(
+        default_factory=lambda: [AvailabilityMode.LOCAL], min_length=1, max_length=2
+    )
+    commissioning_required: CommissioningRequirement = CommissioningRequirement.NOT_REQUIRED
+
+    @model_validator(mode="after")
+    def validate_values(self) -> CapabilityGuarantees:
+        for field_name in ("resolution", "tolerance"):
+            value = getattr(self, field_name)
+            if value is not None and (
+                isinstance(value, bool) or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"{field_name} must be a finite number")
+        if self.expected_latency_ms is not None and isinstance(
+            self.expected_latency_ms, bool
+        ):
+            raise ValueError("expected_latency_ms must be an integer")
+        if len(set(self.availability_modes)) != len(self.availability_modes):
+            raise ValueError("availability_modes must contain unique values")
+        return self
+
+
+class PrincipalRole(StrEnum):
+    """Role granted by a trusted identity provider for one deployment."""
+
+    VIEWER = "viewer"
+    PLANNER = "planner"
+    OPERATOR = "operator"
+    OWNER = "owner"
+    SERVICE = "service"
+
+
+class AuthorityContext(StrictModel):
+    """Non-secret identity and resource scope attached to authority records.
+
+    The defaults are the legacy single-home local runtime. They let v1 rows be
+    read during an additive migration while every new authority record still
+    carries an explicit principal and household.
+    """
+
+    tenant_id: str = Field(default="default", min_length=1, max_length=200)
+    household_id: str = Field(default="default", min_length=1, max_length=200)
+    household_ids: list[str] = Field(default_factory=lambda: ["default"], max_length=100)
+    principal_id: str = Field(default="system", min_length=1, max_length=200)
+    roles: list[PrincipalRole] = Field(
+        default_factory=lambda: [PrincipalRole.SERVICE], max_length=5
+    )
+    area_ids: list[str] = Field(default_factory=list, max_length=200)
+    device_ids: list[str] = Field(default_factory=list, max_length=500)
+    capabilities: list[str] = Field(default_factory=list, max_length=200)
+    operations: list[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_scope_values(self) -> AuthorityContext:
+        if self.household_id not in self.household_ids:
+            raise ValueError("household_id must be included in household_ids")
+        for field_name in (
+            "household_ids",
+            "roles",
+            "area_ids",
+            "device_ids",
+            "capabilities",
+            "operations",
+        ):
+            values = getattr(self, field_name)
+            if len(set(values)) != len(values):
+                raise ValueError(f"{field_name} must contain unique values")
+            if any(not str(value).strip() for value in values):
+                raise ValueError(f"{field_name} must not contain blank values")
+        return self
 
 
 class DeviceType(StrEnum):
@@ -48,11 +149,25 @@ class StateStatus(StrEnum):
     INVALID = "invalid"
 
 
+class SourceOrderingPolicy(StrEnum):
+    ORDERED = "ordered"
+    UNORDERED = "unordered"
+
+
+class SourceCursor(StrictModel):
+    source_id: str = Field(min_length=1)
+    stream_id: str = Field(min_length=1)
+    epoch: str = Field(min_length=1)
+    sequence: int = Field(ge=0)
+    resync: bool = False
+
+
 class ControlLeaseStatus(StrEnum):
     ACQUIRED = "acquired"
     REJECTED = "rejected"
     EXPIRED = "expired"
     RELEASED = "released"
+    UNKNOWN = "unknown"
 
 
 class CapabilityKind(StrEnum):
@@ -170,6 +285,10 @@ class Capability(StrictModel):
     enum_values: list[str] = Field(default_factory=list)
     commands: list[str] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
+    guarantees: CapabilityGuarantees = Field(
+        default_factory=CapabilityGuarantees,
+        exclude_if=lambda value: value == CapabilityGuarantees(),
+    )
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> Capability:
@@ -191,6 +310,20 @@ class Capability(StrictModel):
                 or float(step) <= 0
             ):
                 raise ValueError("step must be a finite positive number")
+        if self.guarantees.resolution is not None and self.kind not in {
+            CapabilityKind.INTEGER,
+            CapabilityKind.NUMBER,
+        }:
+            raise ValueError("resolution is only valid for numeric capabilities")
+        if self.guarantees.tolerance is not None and self.kind not in {
+            CapabilityKind.INTEGER,
+            CapabilityKind.NUMBER,
+        }:
+            raise ValueError("tolerance is only valid for numeric capabilities")
+        if self.guarantees.readback_required and not self.readable:
+            raise ValueError("readback guarantee requires a readable capability")
+        if self.guarantees.confirmation_required and not self.writable:
+            raise ValueError("confirmation guarantee requires a writable capability")
         return self
 
 
@@ -219,6 +352,7 @@ class Device(StrictModel):
 
 
 class StateSnapshot(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     device_id: str = Field(min_length=1)
     capability: str = Field(min_length=1)
     value: ScalarValue | None
@@ -227,13 +361,30 @@ class StateSnapshot(StrictModel):
     received_at: datetime
     status: StateStatus
     source_ref: SourceRef
+    source_cursor: SourceCursor | None = None
 
     @model_validator(mode="after")
     def validate_timestamps(self) -> StateSnapshot:
-        if self.observed_at.tzinfo is None or self.received_at.tzinfo is None:
+        if (
+            self.observed_at.tzinfo is None
+            or self.observed_at.utcoffset() is None
+            or self.received_at.tzinfo is None
+            or self.received_at.utcoffset() is None
+        ):
             raise ValueError("observed_at and received_at must be timezone-aware")
         if self.received_at < self.observed_at:
             raise ValueError("received_at must be greater than or equal to observed_at")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("value must be finite")
+        if self.status is StateStatus.CURRENT and self.value is None:
+            raise ValueError("current state requires a value")
+        if self.status in {StateStatus.INVALID, StateStatus.UNAVAILABLE} and self.value is not None:
+            raise ValueError(f"{self.status.value} state must not carry a value")
+        if (
+            self.source_cursor is not None
+            and self.source_cursor.source_id != self.source_ref.adapter_id
+        ):
+            raise ValueError("source_cursor.source_id must match source_ref.adapter_id")
         return self
 
 
@@ -304,9 +455,7 @@ class CommandPostcondition(StrictModel):
 
     capability: str = Field(min_length=1)
     expected: ScalarValue | None = None
-    verification: Literal["equals", "toggle_transition", "motion_stopped", "unconfirmed"] = (
-        "equals"
-    )
+    verification: Literal["equals", "toggle_transition", "motion_stopped", "unconfirmed"] = "equals"
     tolerance: float | None = Field(default=None, ge=0)
     settle_timeout_seconds: float | None = Field(default=None, ge=0, le=120)
     poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
@@ -415,9 +564,13 @@ class PolicyDecision(StrictModel):
 
 
 class Approval(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     status: str = Field(pattern=r"^(approved|denied|expired)$")
     approved_by: str = Field(min_length=1)
     approved_at: datetime
+    # Optional for loading legacy v1 evidence; confirmation execution rejects
+    # legacy approvals without the server-issued opaque identifier.
+    approval_id: str | None = None
     validation_digest: str = Field(min_length=1)
     scope: str = "plan"
     authentication_context: str | None = None
@@ -428,7 +581,6 @@ class Approval(StrictModel):
     expires_at: datetime | None = None
     window_digest: str | None = None
     schedule_revision: int = Field(default=0, ge=0)
-    approval_id: str | None = None
 
     @model_validator(mode="after")
     def validate_expiry(self) -> Approval:
@@ -453,8 +605,8 @@ class Approval(StrictModel):
             raise ValueError("approval lifetime must not outlive validation evidence")
         return self
 
-
 class ExecutionOutcome(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     plan_id: str = Field(min_length=1)
     command_id: str = Field(min_length=1)
     execution_attempt_id: str = Field(min_length=1)
@@ -471,9 +623,21 @@ class ExecutionSummary(StrictModel):
     outcomes: list[ExecutionOutcome] = Field(default_factory=list)
 
 
+def execution_outcome_digest(outcomes: list[ExecutionOutcome]) -> str:
+    """Return the canonical digest of an ordered execution outcome list."""
+
+    canonical = json.dumps(
+        [outcome.model_dump(mode="json") for outcome in outcomes],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
 class ControlLease(StrictModel):
     """Evidence-backed ownership lease for a physically controlled device."""
 
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     lease_id: str = Field(min_length=1)
     owner: str = Field(min_length=1)
     device_id: str = Field(min_length=1)
@@ -517,6 +681,7 @@ class PhysicalBaseline(StrictModel):
 class TakeoverResult(StrictModel):
     """Result and evidence of the pre-write control acquisition handshake."""
 
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     lease_id: str = Field(min_length=1)
     status: ControlLeaseStatus
     owner: str = Field(min_length=1)
@@ -547,11 +712,14 @@ class TakeoverResult(StrictModel):
 
 
 class ExecutionDependencyEvidence(StrictModel):
+    bundle_id: str = Field(min_length=1)
+    member_plan_id: str = Field(min_length=1)
     predecessor_plan_id: str = Field(min_length=1)
     predecessor_command_ids: list[str] = Field(min_length=1)
     status: ExecutionStatus
     state_versions: dict[str, int] = Field(default_factory=dict)
     captured_at: datetime
+    outcome_digest: str = Field(min_length=1)
     evidence_digest: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -560,7 +728,47 @@ class ExecutionDependencyEvidence(StrictModel):
             raise ValueError("captured_at must be timezone-aware")
         if self.status is not ExecutionStatus.CONFIRMED_SUCCESS:
             raise ValueError("only confirmed success can publish dependency evidence")
+        expected_digest = execution_dependency_evidence_digest(
+            bundle_id=self.bundle_id,
+            member_plan_id=self.member_plan_id,
+            predecessor_plan_id=self.predecessor_plan_id,
+            predecessor_command_ids=self.predecessor_command_ids,
+            status=self.status,
+            state_versions=self.state_versions,
+            captured_at=self.captured_at,
+            outcome_digest=self.outcome_digest,
+        )
+        if self.evidence_digest != expected_digest:
+            raise ValueError("dependency evidence digest mismatch")
         return self
+
+
+def execution_dependency_evidence_digest(
+    *,
+    bundle_id: str,
+    member_plan_id: str,
+    predecessor_plan_id: str,
+    predecessor_command_ids: list[str],
+    status: ExecutionStatus,
+    state_versions: dict[str, int],
+    captured_at: datetime,
+    outcome_digest: str,
+) -> str:
+    """Digest every identity-bearing field in a dependency proof."""
+
+    canonical_payload = {
+        "schema": "execution-dependency-evidence-v2",
+        "bundle_id": bundle_id,
+        "member_plan_id": member_plan_id,
+        "predecessor_plan_id": predecessor_plan_id,
+        "predecessor_command_ids": predecessor_command_ids,
+        "status": status.value,
+        "state_versions": state_versions,
+        "captured_at": captured_at.isoformat(),
+        "outcome_digest": outcome_digest,
+    }
+    canonical = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 class BundleMemberCommit(StrictModel):
@@ -596,12 +804,14 @@ class BundleMemberCommit(StrictModel):
 
 
 class BundleCommit(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     id: str = Field(min_length=1)
     schema_version: str = SCHEMA_VERSION
     bundle_digest: str = Field(min_length=1)
     scenario_id: str = Field(min_length=1)
     status: BundleCommitStatus = BundleCommitStatus.COMMITTING
     compensation_policy: Literal["none"] = "none"
+    approval_reservation_id: str | None = None
     members: list[BundleMemberCommit] = Field(min_length=1, max_length=50)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -618,7 +828,25 @@ class BundleCommit(StrictModel):
         return self
 
 
+class AggregateExecutionCapability(StrictModel):
+    """Opaque, single-use proof issued by a bundle aggregate."""
+
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
+    bundle_id: str = Field(min_length=1)
+    member_plan_id: str = Field(min_length=1)
+    bundle_digest: str = Field(min_length=1)
+    nonce: str = Field(min_length=1)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_expiry(self) -> AggregateExecutionCapability:
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("aggregate execution capability expiry must be timezone-aware")
+        return self
+
+
 class Plan(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     id: str = Field(min_length=1)
     schema_version: str = SCHEMA_VERSION
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -655,6 +883,7 @@ class Plan(StrictModel):
 
 
 class RecurrenceRule(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     time_of_day: time
     timezone: str = Field(min_length=1)
     days_of_week: list[int] | None = None
@@ -676,12 +905,33 @@ class RecurrenceRule(StrictModel):
 
 
 class AuditEvent(StrictModel):
+    authority: AuthorityContext = Field(default_factory=AuthorityContext)
     id: str = Field(min_length=1)
     event_type: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     subject_id: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_serializer(mode="plain")
+    def serialize_compactly(self) -> dict[str, Any]:
+        """Keep bounded audit projections compact without dropping identity.
+
+        Default authority values are reconstructed by ``AuthorityContext`` on
+        read. Non-default tenant, household, principal and scope fields stay
+        present, while empty optional ACL lists do not consume the bounded
+        rejection-event budget.
+        """
+
+        return {
+            "authority": self.authority.model_dump(mode="json", exclude_defaults=True),
+            "id": self.id,
+            "event_type": self.event_type,
+            "actor": self.actor,
+            "subject_id": self.subject_id,
+            "payload": self.payload,
+            "created_at": self.created_at.isoformat(),
+        }
 
 
 class AdapterSnapshot(StrictModel):
@@ -730,21 +980,26 @@ class StateChangedEvent(StrictModel):
     unit: str | None = None
     available: bool | None = None
     capabilities: list[str] = Field(default_factory=list)
+    source_cursor: SourceCursor | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def decode_legacy_payload(cls, value: Any) -> Any:
-        return _decode_event_payload(value, {
-            "source_adapter_id": ("source_adapter_id",),
-            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
-            "capability": ("capability",),
-            "value": ("value",),
-            "unit": ("unit",),
-            "available": ("available",),
-            "capabilities": ("capabilities",),
-            "occurred_at": ("occurred_at", "received_at", "observed_at"),
-        })
+        return _decode_event_payload(
+            value,
+            {
+                "source_adapter_id": ("source_adapter_id",),
+                "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+                "capability": ("capability",),
+                "value": ("value",),
+                "unit": ("unit",),
+                "available": ("available",),
+                "capabilities": ("capabilities",),
+                "source_cursor": ("source_cursor", "cursor"),
+                "occurred_at": ("occurred_at", "received_at", "observed_at"),
+            },
+        )
 
 
 class AvailabilityChangedEvent(StrictModel):
@@ -758,12 +1013,15 @@ class AvailabilityChangedEvent(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def decode_legacy_payload(cls, value: Any) -> Any:
-        return _decode_event_payload(value, {
-            "source_adapter_id": ("source_adapter_id",),
-            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
-            "available": ("available",),
-            "occurred_at": ("occurred_at", "received_at", "observed_at"),
-        })
+        return _decode_event_payload(
+            value,
+            {
+                "source_adapter_id": ("source_adapter_id",),
+                "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+                "available": ("available",),
+                "occurred_at": ("occurred_at", "received_at", "observed_at"),
+            },
+        )
 
 
 class DeviceMembershipChangedEvent(StrictModel):
@@ -778,13 +1036,16 @@ class DeviceMembershipChangedEvent(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def decode_legacy_payload(cls, value: Any) -> Any:
-        return _decode_event_payload(value, {
-            "source_adapter_id": ("source_adapter_id",),
-            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
-            "friendly_name": ("friendly_name",),
-            "capabilities": ("capabilities",),
-            "occurred_at": ("occurred_at", "received_at", "observed_at"),
-        })
+        return _decode_event_payload(
+            value,
+            {
+                "source_adapter_id": ("source_adapter_id",),
+                "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+                "friendly_name": ("friendly_name",),
+                "capabilities": ("capabilities",),
+                "occurred_at": ("occurred_at", "received_at", "observed_at"),
+            },
+        )
 
 
 class MetadataChangedEvent(StrictModel):
@@ -799,13 +1060,16 @@ class MetadataChangedEvent(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def decode_legacy_payload(cls, value: Any) -> Any:
-        return _decode_event_payload(value, {
-            "source_adapter_id": ("source_adapter_id",),
-            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
-            "friendly_name": ("friendly_name",),
-            "capabilities": ("capabilities",),
-            "occurred_at": ("occurred_at", "received_at", "observed_at"),
-        })
+        return _decode_event_payload(
+            value,
+            {
+                "source_adapter_id": ("source_adapter_id",),
+                "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+                "friendly_name": ("friendly_name",),
+                "capabilities": ("capabilities",),
+                "occurred_at": ("occurred_at", "received_at", "observed_at"),
+            },
+        )
 
 
 class AdapterDiagnosticEvent(StrictModel):
@@ -820,13 +1084,16 @@ class AdapterDiagnosticEvent(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def decode_legacy_payload(cls, value: Any) -> Any:
-        return _decode_event_payload(value, {
-            "source_adapter_id": ("source_adapter_id",),
-            "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
-            "code": ("code", "diagnostic_code"),
-            "message": ("message", "reason"),
-            "occurred_at": ("occurred_at", "received_at", "observed_at"),
-        })
+        return _decode_event_payload(
+            value,
+            {
+                "source_adapter_id": ("source_adapter_id",),
+                "external_id": ("external_id", "entity_id", "friendly_name", "node_id"),
+                "code": ("code", "diagnostic_code"),
+                "message": ("message", "reason"),
+                "occurred_at": ("occurred_at", "received_at", "observed_at"),
+            },
+        )
 
 
 type SourceEvent = (
@@ -854,9 +1121,7 @@ def _decode_event_payload(value: Any, fields: dict[str, tuple[str, ...]]) -> Any
             if payload.get(alias) is not None:
                 raw_value = payload[alias]
                 result[field_name] = (
-                    str(raw_value)
-                    if field_name in {"external_id", "device_id"}
-                    else raw_value
+                    str(raw_value) if field_name in {"external_id", "device_id"} else raw_value
                 )
                 break
     return result

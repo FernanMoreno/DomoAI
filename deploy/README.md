@@ -89,12 +89,25 @@ stream with `405 Method Not Allowed` unless
 normal agent/tool path bounded with the pinned MCP SDK; enable SSE only after
 qualifying the deployment's dependency lifecycle.
 
-The token file contains only SHA-256 hashes and server-owned scopes:
+The optional Prometheus-compatible endpoint is disabled by default. Enable it
+only when a bearer-protected scrape target is required:
+
+```bash
+DOMOAI_MCP_METRICS_ENABLED=true
+curl -k -H "Authorization: Bearer ${DOMOAI_MCP_METRICS_TOKEN}" \
+  https://mcp.example.test/metrics
+```
+
+Metrics are pull-based, bounded and intentionally low-cardinality. The
+endpoint rejects unauthenticated requests and never includes bearer values,
+token hashes or client identifiers in the exposition.
+
+The token file contains only SHA-256 hashes and server-owned identity scopes:
 
 ```json
 {
   "clients": [
-    {"client_id": "codex", "token_hash": "<64 hex chars>", "scopes": ["read", "mutate"]}
+    {"client_id": "codex", "token_hash": "<64 hex chars>", "scopes": ["read", "mutate"], "tenant_id": "tenant-main", "household_ids": ["home-main"], "roles": ["operator"]}
   ]
 }
 ```
@@ -103,6 +116,17 @@ Keep the raw bearer token in the client secret store, never in Git, tool
 arguments or audit events. A client with `read` may inspect and propose; the
 `mutate` scope is required for approval requests, scheduling and execution.
 Human approval remains a separate trusted-host assertion.
+
+Rotate or revoke credentials through the offline administrator command.
+Rotation prints the new bearer once and atomically replaces the hash-only file;
+revoke survives gateway reload:
+
+```bash
+uv run domoai-admin tokens rotate --file deploy/clients.json \
+  --client-id codex --scopes read,mutate --tenant-id tenant-main \
+  --households home-main --roles operator
+uv run domoai-admin tokens revoke --file deploy/clients.json --client-id codex
+```
 
 ## TLS and network boundary
 
@@ -235,8 +259,19 @@ The restore validates both members, stages/migrates the copy, keeps a local
 rollback directory when replacing existing data, and does not execute plans or
 replay adapter writes. Keep a small rolling set (for example, seven copies),
 restrict the backup directory to the service operator, and test verification
-regularly. Encryption, off-site replication and cloud retention are not yet
-provided by this command and must be supplied by the deployment environment.
+regularly. For encrypted format-v2 backups, provision a separate 32-byte AES
+key with owner-only permissions (`0600`) and pass it to all three commands.
+The key must remain outside the backup directory:
+
+```bash
+domoai-admin backup create ... --encryption-key-file /run/secrets/domoai-backup.key
+domoai-admin backup verify ... --encryption-key-file /run/secrets/domoai-backup.key
+domoai-admin backup restore ... --encryption-key-file /run/secrets/domoai-backup.key
+```
+
+Verification decrypts/authenticates into temporary staging before any target
+replacement. Unencrypted v1 backups remain readable for compatibility.
+Off-site replication and cloud retention are still deployment responsibilities.
 
 For native Linux/WSL, use the same `domoai-admin` commands with paths on a
 protected filesystem. Do not place `--output-dir` below the live database's

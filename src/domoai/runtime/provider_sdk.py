@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Protocol, cast
 
@@ -195,8 +196,32 @@ def _validate_role_methods(provider: object, manifest: ProviderManifest) -> None
                 f"telemetry provider {manifest.provider_id!r} is missing required methods: "
                 + ", ".join(missing)
             )
-    if ProviderRole.COMMANDS in manifest.roles and not callable(getattr(provider, "execute", None)):
+        sync_methods = tuple(
+            method
+            for method in _TELEMETRY_METHODS
+            if (
+                method == "subscribe"
+                and not inspect.isasyncgenfunction(getattr(provider, method))
+            )
+            or (
+                method != "subscribe"
+                and not inspect.iscoroutinefunction(getattr(provider, method))
+            )
+        )
+        if sync_methods:
+            raise TypeError(
+                f"telemetry provider {manifest.provider_id!r} methods must be coroutine functions: "
+                + ", ".join(sync_methods)
+            )
+    execute_method = getattr(provider, "execute", None)
+    if ProviderRole.COMMANDS in manifest.roles and not callable(execute_method):
         raise TypeError(f"command provider {manifest.provider_id!r} is missing execute")
+    if ProviderRole.COMMANDS in manifest.roles and not inspect.iscoroutinefunction(
+        execute_method
+    ):
+        raise TypeError(
+            f"command provider {manifest.provider_id!r} execute must be a coroutine function"
+        )
 
 
 async def _call_async(provider: object, method_name: str, *args: object) -> object:

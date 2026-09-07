@@ -107,3 +107,32 @@ async def test_protocol_flow_rejects_unknown_scenario_fields_without_adapter_cal
     assert result["error"]["code"] == "validation_error"
     assert "token" not in str(result).lower()
     assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_client_session_receives_mcp_error_for_invalid_tool_input() -> None:
+    _adapter, context = await build_context()
+    server = create_unified_server(context)
+    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream(0)
+    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream(0)
+
+    async def run_server() -> None:
+        await server._mcp_server.run(
+            client_to_server_receive,
+            server_to_client_send,
+            server._mcp_server.create_initialization_options(),
+        )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_server)
+        async with ClientSession(server_to_client_receive, client_to_server_send) as session:
+            await session.initialize()
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            result = await session.call_tool("prepare_command", {"command": {}})
+        task_group.cancel_scope.cancel()
+
+    command_schema = tools["prepare_command"].inputSchema["$defs"]["Command"]
+    assert command_schema["additionalProperties"] is False
+    assert set(command_schema["required"]) >= {"id", "device_id", "command", "idempotency_key"}
+    assert result.isError is True
+    assert result.structuredContent is None

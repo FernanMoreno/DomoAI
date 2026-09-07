@@ -1,0 +1,141 @@
+{
+  "$defs": {
+    "AuthorityContext": {
+      "additionalProperties": false,
+      "description": "Non-secret identity and resource scope attached to authority records.\n\nThe defaults are the legacy single-home local runtime. They let v1 rows be\nread during an additive migration while every new authority record still\ncarries an explicit principal and household.",
+      "properties": {
+        "tenant_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "household_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Household Ids",
+          "type": "array"
+        },
+        "principal_id": {
+          "default": "system",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/PrincipalRole"
+          },
+          "maxItems": 5,
+          "title": "Roles",
+          "type": "array"
+        },
+        "area_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Area Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "title": "AuthorityContext",
+      "type": "object"
+    },
+    "PrincipalRole": {
+      "description": "Role granted by a trusted identity provider for one deployment.",
+      "enum": [
+        "viewer",
+        "planner",
+        "operator",
+        "owner",
+        "service"
+      ],
+      "title": "PrincipalRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "authority": {
+      "$ref": "#/$defs/AuthorityContext"
+    },
+    "approval_id": {
+      "minLength": 1,
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "principal_id": {
+      "minLength": 1,
+      "title": "Principal Id",
+      "type": "string"
+    },
+    "scope": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Scope",
+      "type": "string"
+    },
+    "rule_digest": {
+      "minLength": 1,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Rule Digest",
+      "type": "string"
+    },
+    "approved_at": {
+      "format": "date-time",
+      "title": "Approved At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "approval_id",
+    "principal_id",
+    "scope",
+    "rule_digest",
+    "approved_at",
+    "expires_at"
+  ],
+  "title": "AutomationConsent",
+  "type": "object"
+}

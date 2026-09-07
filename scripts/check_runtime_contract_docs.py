@@ -22,7 +22,7 @@ def main() -> None:
     )
 
     required = {
-        "skill v3": "contract_version: v3" in skill,
+        "published skill v4": "contract_version: v4" in skill,
         "bundle operation": (
             "commit_or_schedule_bundle" in skill and "commit_or_schedule_bundle" in readme
         ),

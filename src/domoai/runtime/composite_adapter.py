@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from itertools import count
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from domoai.domain.models import (
     SourceRef,
     StateChangedEvent,
     StateSnapshot,
+    StateStatus,
 )
 from domoai.runtime.execution_context import ExecutionContext
 from domoai.runtime.ports import AdapterPort
@@ -25,6 +27,28 @@ from domoai.runtime.registry import DeviceRegistry
 
 DEFAULT_DIAGNOSTICS_MAX_SIZE = 1000
 StateEventKey = tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EntityReadResult:
+    """Per-reference result for a composite read, including missing data."""
+
+    ref: SourceRef
+    snapshot: StateSnapshot | None
+    status: str
+    error_code: str | None = None
+    error_message: str | None = None
+    source_revision: str | None = None
+    snapshots: tuple[StateSnapshot, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Keep the original singular ``snapshot`` field as the primary
+        # observation for callers that only need one value, while retaining
+        # every capability returned for the same source entity.  A source
+        # reference identifies an entity, not a capability; collapsing by
+        # only that reference silently discarded all but the last state.
+        if self.snapshot is not None and not self.snapshots:
+            object.__setattr__(self, "snapshots", (self.snapshot,))
 
 
 class CompositeAdapter:
@@ -210,24 +234,76 @@ class CompositeAdapter:
         )
 
     async def read_state(self, source_refs: Sequence[SourceRef]) -> list[StateSnapshot]:
+        detailed = await self.read_state_detailed(source_refs)
+        results = [snapshot for item in detailed for snapshot in item.snapshots]
+        if not results:
+            errors = [item for item in detailed if item.error_message]
+            if errors:
+                raise ConnectionError(errors[0].error_message)
+        return results
+
+    async def read_state_detailed(
+        self, source_refs: Sequence[SourceRef]
+    ) -> list[EntityReadResult]:
+        """Read each reference without hiding partial source failures."""
+
         grouped: dict[str, list[SourceRef]] = defaultdict(list)
         for source_ref in source_refs:
             grouped[source_ref.adapter_id].append(source_ref)
-        results: list[StateSnapshot] = []
-        failures: list[Exception] = []
+        snapshots: dict[tuple[str, str, str], StateSnapshot] = {}
+        failures: dict[tuple[str, str], str] = {}
         for adapter_id, refs in grouped.items():
             adapter = self._by_id.get(adapter_id)
             if adapter is None or adapter_id not in self._connected:
-                failures.append(ConnectionError(f"Source adapter {adapter_id!r} is unavailable"))
+                for ref in refs:
+                    failures[(ref.adapter_id, ref.external_id)] = (
+                        f"Source adapter {adapter_id!r} is unavailable"
+                    )
                 continue
             try:
-                results.extend(await adapter.read_state(refs))
+                wanted = {(ref.adapter_id, ref.external_id) for ref in refs}
+                for candidate_snapshot in await adapter.read_state(refs):
+                    key = (
+                        candidate_snapshot.source_ref.adapter_id,
+                        candidate_snapshot.source_ref.external_id,
+                        candidate_snapshot.capability,
+                    )
+                    if key[:2] in wanted:
+                        snapshots[key] = candidate_snapshot
             except (ConnectionError, OSError, TimeoutError) as error:
-                failures.append(ConnectionError(f"Source adapter {adapter_id!r} read failed"))
+                message = f"Source adapter {adapter_id!r} read failed"
+                for ref in refs:
+                    failures[(ref.adapter_id, ref.external_id)] = message
                 self._record_failure(adapter_id, "adapter_read_failed", error)
-        if failures and not results:
-            raise failures[0]
-        return results
+        detailed: list[EntityReadResult] = []
+        for ref in source_refs:
+            ref_key = (ref.adapter_id, ref.external_id)
+            matching = tuple(
+                snapshot
+                for snapshot_key, snapshot in snapshots.items()
+                if snapshot_key[:2] == ref_key
+            )
+            if matching:
+                snapshot = matching[0]
+                status = {
+                    StateStatus.CURRENT: "success",
+                    StateStatus.STALE: "stale",
+                    StateStatus.UNAVAILABLE: "unavailable",
+                    StateStatus.INVALID: "invalid",
+                }[snapshot.status]
+                detailed.append(EntityReadResult(ref, snapshot, status, snapshots=matching))
+                continue
+            message = failures.get(ref_key, "Source adapter returned no state for reference")
+            detailed.append(
+                EntityReadResult(
+                    ref,
+                    None,
+                    "unavailable",
+                    "state_missing" if ref_key not in failures else "adapter_read_failed",
+                    message,
+                )
+            )
+        return detailed
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None
@@ -360,6 +436,7 @@ class CompositeAdapter:
                             adapter.adapter_id,
                             AdapterDiagnosticEvent(
                                 source_adapter_id=adapter.adapter_id,
+                                code="source_reconnected",
                                 payload={
                                     "source_adapter_id": adapter.adapter_id,
                                     "event": "adapter_reconnected",

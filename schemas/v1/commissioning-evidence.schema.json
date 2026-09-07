@@ -1,0 +1,275 @@
+{
+  "$defs": {
+    "AuthorityContext": {
+      "additionalProperties": false,
+      "description": "Non-secret identity and resource scope attached to authority records.\n\nThe defaults are the legacy single-home local runtime. They let v1 rows be\nread during an additive migration while every new authority record still\ncarries an explicit principal and household.",
+      "properties": {
+        "tenant_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "household_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Household Ids",
+          "type": "array"
+        },
+        "principal_id": {
+          "default": "system",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/PrincipalRole"
+          },
+          "maxItems": 5,
+          "title": "Roles",
+          "type": "array"
+        },
+        "area_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Area Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "title": "AuthorityContext",
+      "type": "object"
+    },
+    "CommissioningCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "check_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "title": "Check Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CommissioningCheckStatus"
+        },
+        "detail": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "check_id",
+        "status",
+        "detail"
+      ],
+      "title": "CommissioningCheck",
+      "type": "object"
+    },
+    "CommissioningCheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked"
+      ],
+      "title": "CommissioningCheckStatus",
+      "type": "string"
+    },
+    "CommissioningEvidenceClass": {
+      "enum": [
+        "simulation",
+        "hardware",
+        "external_dependency"
+      ],
+      "title": "CommissioningEvidenceClass",
+      "type": "string"
+    },
+    "PrincipalRole": {
+      "description": "Role granted by a trusted identity provider for one deployment.",
+      "enum": [
+        "viewer",
+        "planner",
+        "operator",
+        "owner",
+        "service"
+      ],
+      "title": "PrincipalRole",
+      "type": "string"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Bounded operator evidence; it is not an execution grant.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "authority": {
+      "$ref": "#/$defs/AuthorityContext"
+    },
+    "evidence_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "candidate_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Digest",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "evidence_class": {
+      "$ref": "#/$defs/CommissioningEvidenceClass"
+    },
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/CommissioningCheck"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Checks",
+      "type": "array"
+    },
+    "source_refs": {
+      "items": {
+        "$ref": "#/$defs/SourceRef"
+      },
+      "maxItems": 64,
+      "title": "Source Refs",
+      "type": "array"
+    },
+    "evidence_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Digest"
+    }
+  },
+  "required": [
+    "authority",
+    "evidence_id",
+    "candidate_digest",
+    "observed_at",
+    "expires_at",
+    "evidence_class",
+    "checks"
+  ],
+  "title": "CommissioningEvidence",
+  "type": "object"
+}

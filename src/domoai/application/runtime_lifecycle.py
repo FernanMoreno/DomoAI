@@ -17,6 +17,7 @@ class RuntimeLifecycle:
     scheduler_runner: Runner
     state_refresh_runner: Runner | None = None
     supervisor_runner: Runner | None = None
+    coordination_runner: Runner | None = None
     _tasks: list[asyncio.Task[None]] = field(default_factory=list, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -50,6 +51,8 @@ class RuntimeLifecycle:
         ]
         if self.supervisor_runner is not None:
             runners.append(("domoai-control-supervisor", self.supervisor_runner))
+        if self.coordination_runner is not None:
+            runners.append(("domoai-coordination-supervisor", self.coordination_runner))
         if self.state_refresh_runner is not None:
             runners.append(("domoai-state-refresher", self.state_refresh_runner))
         self._tasks = [asyncio.create_task(runner(), name=name) for name, runner in runners]

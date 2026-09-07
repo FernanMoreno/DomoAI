@@ -94,6 +94,18 @@
       "title": "Scenario Id",
       "type": "string"
     },
+    "definition_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Digest"
+    },
     "status": {
       "$ref": "#/$defs/OptimizationStatus"
     },
@@ -136,6 +148,58 @@
       ],
       "default": null,
       "title": "Proposal"
+    },
+    "proposal_count": {
+      "default": 0,
+      "title": "Proposal Count",
+      "type": "integer"
+    },
+    "alternatives": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Alternatives",
+      "type": "array"
+    },
+    "hard_constraints_satisfied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hard Constraints Satisfied"
+    },
+    "soft_violations": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Soft Violations",
+      "type": "array"
+    },
+    "forecast_confidence": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Forecast Confidence"
+    },
+    "next_step": {
+      "default": "revise_scenario_or_inputs",
+      "title": "Next Step",
+      "type": "string"
     }
   },
   "required": [

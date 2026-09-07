@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from domoai.optimizer.horizon import Horizon
-from domoai.optimizer.scenario import Load, OptimizationScenario
+from domoai.optimizer.scenario import Constraint, Load, Objective, OptimizationScenario
 
 
 def _horizon() -> Horizon:
@@ -68,3 +68,26 @@ def test_each_list_field_has_a_bound(field: str, limit: int) -> None:
         (item.max_length for item in schema.metadata if hasattr(item, "max_length")), None
     )
     assert max_length == limit
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_scenario_rejects_non_finite_solver_limits(value: float) -> None:
+    with pytest.raises(ValidationError):
+        OptimizationScenario(
+            id="non-finite-limit", horizon=_horizon(), solver_time_limit_seconds=value
+        )
+
+
+def test_scenario_rejects_non_finite_load_and_objective_values() -> None:
+    with pytest.raises(ValidationError):
+        Load(
+            id="non-finite-load",
+            device_id="fixture.device",
+            capability="power",
+            command="turn_on",
+            power=float("inf"),
+        )
+    with pytest.raises(ValidationError):
+        Constraint(type="grid_limit", value=float("nan"))
+    with pytest.raises(ValidationError):
+        Objective(name="cost", direction="minimize", weight=float("inf"))

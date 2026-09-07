@@ -21,6 +21,7 @@ from domoai.persistence.repositories import (
     StateSnapshotRepository,
 )
 from domoai.runtime.clock import Clock, SystemClock
+from domoai.runtime.composite_adapter import EntityReadResult
 from domoai.runtime.events import AuditLog
 from domoai.runtime.executable_fingerprint import inventory_fingerprint
 from domoai.runtime.ports import AdapterPort
@@ -62,6 +63,13 @@ class DiscoveryService:
         # were constructed with different clocks.
         self.clock = clock or state_store.clock or SystemClock()
         self._refresh_lock = asyncio.Lock()
+        self._last_read_results: tuple[EntityReadResult, ...] = ()
+
+    @property
+    def last_read_results(self) -> tuple[EntityReadResult, ...]:
+        """Return the most recent per-reference refresh evidence."""
+
+        return self._last_read_results
 
     async def refresh(
         self, *, exclude_adapter_ids: Collection[str] = ()
@@ -172,7 +180,54 @@ class DiscoveryService:
             ]
             if not source_refs:
                 return ()
-            snapshots = await self.adapter.read_state(source_refs)
+            read_detailed = getattr(self.adapter, "read_state_detailed", None)
+            if callable(read_detailed):
+                read_results = tuple(await read_detailed(source_refs))
+            else:
+                snapshots = await self.adapter.read_state(source_refs)
+                returned = {
+                    (snapshot.source_ref.adapter_id, snapshot.source_ref.external_id): snapshot
+                    for snapshot in snapshots
+                }
+                read_results = tuple(
+                    EntityReadResult(
+                        ref,
+                        returned.get((ref.adapter_id, ref.external_id)),
+                        "success"
+                        if (ref.adapter_id, ref.external_id) in returned
+                        else "unavailable",
+                        None
+                        if (ref.adapter_id, ref.external_id) in returned
+                        else "state_missing",
+                        None
+                        if (ref.adapter_id, ref.external_id) in returned
+                        else "Source adapter returned no state for reference",
+                    )
+                    for ref in source_refs
+                )
+            self._last_read_results = read_results
+            snapshots = [
+                snapshot
+                for result in read_results
+                for snapshot in result.snapshots
+            ]
+            for result in read_results:
+                if result.status in {"success", "stale"}:
+                    continue
+                await self.state_store.mark_source_unavailable(
+                    result.ref.adapter_id, result.ref.external_id
+                )
+                self.audit.append(
+                    event_type="state_read_degraded",
+                    actor="runtime",
+                    subject_id=result.ref.external_id,
+                    payload={
+                        "adapter_id": result.ref.adapter_id,
+                        "error_code": result.error_code,
+                        "status": result.status,
+                        "reason": result.error_message,
+                    },
+                )
             return tuple(await self._save_state_snapshots_unlocked(snapshots))
 
     async def save_state_snapshots(
@@ -253,8 +308,9 @@ class DiscoveryService:
             if canonical_id is None:
                 continue
             normalized = snapshot.model_copy(update={"device_id": canonical_id})
-            await self.state_store.save(normalized)
             normalized_states.append(normalized)
+        if normalized_states:
+            await self.state_store.save_many(normalized_states)
         return normalized_states
 
     def _inventory_fingerprint(self) -> str:
@@ -279,7 +335,14 @@ class DiscoveryService:
         if self.state_store.persistence_bound:
             await self.state_store.persist_metadata()
         elif self.runtime_state_metadata_repository is not None:
-            await self.runtime_state_metadata_repository.save(self.state_store.export_metadata())
+            try:
+                await self.runtime_state_metadata_repository.save(
+                    self.state_store.export_metadata()
+                )
+            except BaseException:
+                self.state_store.rollback_metadata_mutation()
+                raise
+            self.state_store.confirm_metadata_persisted()
 
     def _configured_adapter_ids(self) -> frozenset[str]:
         """Return source IDs represented by this runtime's live adapter set."""
@@ -309,7 +372,7 @@ class DiscoveryService:
             state = StateSnapshot(
                 device_id=device_id,
                 capability=str(raw_state["capability"]),
-                value=raw_state.get("value"),
+                value=raw_state.get("value") if status is StateStatus.CURRENT else None,
                 unit=raw_state.get("unit"),
                 observed_at=observed_at,
                 received_at=effective_received_at,

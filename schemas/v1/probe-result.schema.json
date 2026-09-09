@@ -1,0 +1,153 @@
+{
+  "$defs": {
+    "ConnectionDiagnostic": {
+      "additionalProperties": false,
+      "description": "Actionable connection information that cannot contain secret material.",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "user_action": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Action"
+        },
+        "message": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "technical_details": {
+          "$ref": "#/$defs/ScalarMap"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "retryable",
+        "message"
+      ],
+      "title": "ConnectionDiagnostic",
+      "type": "object"
+    },
+    "DiagnosticSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "DiagnosticSeverity",
+      "type": "string"
+    },
+    "InventoryStatus": {
+      "enum": [
+        "unknown",
+        "ready",
+        "mapping_required",
+        "pairing_required",
+        "empty",
+        "failed"
+      ],
+      "title": "InventoryStatus",
+      "type": "string"
+    },
+    "ProductStatus": {
+      "enum": [
+        "connected",
+        "needs_setup",
+        "reauth_required",
+        "degraded",
+        "unavailable",
+        "disabled"
+      ],
+      "title": "ProductStatus",
+      "type": "string"
+    },
+    "ScalarMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TransportStatus": {
+      "enum": [
+        "unknown",
+        "reachable",
+        "connected",
+        "auth_required",
+        "auth_failed",
+        "degraded",
+        "unreachable",
+        "incompatible",
+        "disabled"
+      ],
+      "title": "TransportStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Independent transport, inventory, and product health projection.",
+  "properties": {
+    "transport_status": {
+      "$ref": "#/$defs/TransportStatus"
+    },
+    "inventory_status": {
+      "$ref": "#/$defs/InventoryStatus"
+    },
+    "product_status": {
+      "$ref": "#/$defs/ProductStatus"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConnectionDiagnostic"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    }
+  },
+  "required": [
+    "transport_status",
+    "inventory_status",
+    "product_status"
+  ],
+  "title": "ProbeResult",
+  "type": "object"
+}

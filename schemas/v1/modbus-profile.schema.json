@@ -1,0 +1,303 @@
+{
+  "$defs": {
+    "ModbusCapabilityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "power",
+            "brightness",
+            "temperature",
+            "humidity",
+            "occupancy",
+            "battery.soc",
+            "battery.power",
+            "battery.capacity",
+            "ev.soc",
+            "ev_charging",
+            "ev.capacity",
+            "ev.connected",
+            "water.flow_rate",
+            "water.total_volume",
+            "thermal.indoor_temperature",
+            "thermal.hvac_power"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ModbusPoint"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModbusPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "title": "ModbusCapabilityBinding",
+      "type": "object"
+    },
+    "ModbusEntityConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "area_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Id"
+        },
+        "semantic_type": {
+          "enum": [
+            "light",
+            "switch",
+            "sensor",
+            "energy"
+          ],
+          "title": "Semantic Type",
+          "type": "string"
+        },
+        "manufacturer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manufacturer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "unit_id": {
+          "maximum": 247,
+          "minimum": 1,
+          "title": "Unit Id",
+          "type": "integer"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/ModbusCapabilityBinding"
+          },
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "name",
+        "semantic_type",
+        "unit_id",
+        "capabilities"
+      ],
+      "title": "ModbusEntityConfig",
+      "type": "object"
+    },
+    "ModbusMappingDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/ModbusEntityConfig"
+          },
+          "minItems": 1,
+          "title": "Entities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "entities"
+      ],
+      "title": "ModbusMappingDocument",
+      "type": "object"
+    },
+    "ModbusPoint": {
+      "additionalProperties": false,
+      "description": "One explicit Modbus state or command address.",
+      "properties": {
+        "area": {
+          "enum": [
+            "coil",
+            "discrete_input",
+            "input_register",
+            "holding_register"
+          ],
+          "title": "Area",
+          "type": "string"
+        },
+        "address": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "data_type": {
+          "enum": [
+            "bool",
+            "uint16",
+            "int16",
+            "float32"
+          ],
+          "title": "Data Type",
+          "type": "string"
+        },
+        "byte_order": {
+          "default": "big",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Byte Order",
+          "type": "string"
+        },
+        "word_order": {
+          "default": "big",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Word Order",
+          "type": "string"
+        },
+        "scale": {
+          "default": 1.0,
+          "title": "Scale",
+          "type": "number"
+        },
+        "offset": {
+          "default": 0.0,
+          "title": "Offset",
+          "type": "number"
+        }
+      },
+      "required": [
+        "area",
+        "address",
+        "data_type"
+      ],
+      "title": "ModbusPoint",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "profile_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "profile_version": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[0-9]+(?:\\.[0-9]+){0,2}$",
+      "title": "Profile Version",
+      "type": "string"
+    },
+    "vendor_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Vendor Name",
+      "type": "string"
+    },
+    "product_code": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Product Code",
+      "type": "string"
+    },
+    "min_firmware": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Min Firmware"
+    },
+    "max_firmware": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Firmware"
+    },
+    "mapping": {
+      "$ref": "#/$defs/ModbusMappingDocument"
+    },
+    "provenance": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Provenance",
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile_id",
+    "profile_version",
+    "vendor_name",
+    "product_code",
+    "mapping",
+    "provenance"
+  ],
+  "title": "ModbusProfile",
+  "type": "object"
+}

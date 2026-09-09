@@ -1,0 +1,320 @@
+{
+  "$defs": {
+    "ConnectionDiagnostic": {
+      "additionalProperties": false,
+      "description": "Actionable connection information that cannot contain secret material.",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "user_action": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Action"
+        },
+        "message": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "technical_details": {
+          "$ref": "#/$defs/ScalarMap"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "retryable",
+        "message"
+      ],
+      "title": "ConnectionDiagnostic",
+      "type": "object"
+    },
+    "ConnectionDraft": {
+      "additionalProperties": false,
+      "description": "Not-yet-validated connection data without raw credentials.",
+      "properties": {
+        "connector_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "unique_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Unique Id",
+          "type": "string"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/ScalarMap"
+        },
+        "options": {
+          "$ref": "#/$defs/ScalarMap"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credential Ref"
+        },
+        "mapping_ref": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mapping Ref"
+        }
+      },
+      "required": [
+        "connector_id",
+        "unique_id",
+        "endpoint",
+        "options"
+      ],
+      "title": "ConnectionDraft",
+      "type": "object"
+    },
+    "DiagnosticSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "DiagnosticSeverity",
+      "type": "string"
+    },
+    "ScalarMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SetupFieldDescriptor": {
+      "additionalProperties": false,
+      "description": "Secret-free metadata used to render one setup input.",
+      "properties": {
+        "key": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "input_type": {
+          "$ref": "#/$defs/SetupFieldType"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "secret": {
+          "default": false,
+          "title": "Secret",
+          "type": "boolean"
+        },
+        "help_text": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Help Text",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "input_type"
+      ],
+      "title": "SetupFieldDescriptor",
+      "type": "object"
+    },
+    "SetupFieldType": {
+      "description": "Small, renderer-independent vocabulary for provider setup inputs.",
+      "enum": [
+        "text",
+        "url",
+        "password",
+        "number",
+        "select"
+      ],
+      "title": "SetupFieldType",
+      "type": "string"
+    },
+    "SetupStep": {
+      "additionalProperties": false,
+      "description": "One onboarding step described by input names, never input values.",
+      "properties": {
+        "step_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Description",
+          "type": "string"
+        },
+        "input_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Keys",
+          "type": "array"
+        },
+        "secret_input_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Secret Input Keys",
+          "type": "array"
+        },
+        "fields": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SetupFieldDescriptor"
+          },
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "title"
+      ],
+      "title": "SetupStep",
+      "type": "object"
+    },
+    "SetupTransitionStatus": {
+      "enum": [
+        "continue",
+        "completed",
+        "failed"
+      ],
+      "title": "SetupTransitionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Explicit result of advancing an onboarding session.",
+  "properties": {
+    "session_id": {
+      "format": "uuid",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/SetupTransitionStatus"
+    },
+    "next_step": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SetupStep"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "draft": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConnectionDraft"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConnectionDiagnostic"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    }
+  },
+  "required": [
+    "session_id",
+    "status"
+  ],
+  "title": "SetupTransition",
+  "type": "object"
+}

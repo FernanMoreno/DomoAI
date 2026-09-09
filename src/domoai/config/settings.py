@@ -53,6 +53,7 @@ class Settings(StrictModel):
     mcp_server_sent_events: bool = False
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, gt=0)
     database_path: Path = Path("data/domoai.sqlite3")
+    connection_master_key_path: Path = Path("data/domoai-key/master.key")
     audit_database_path: Path | None = None
     backup_encryption_key_file: Path | None = None
     policy_config_path: Path | None = None
@@ -60,6 +61,12 @@ class Settings(StrictModel):
     safety_limits_path: Path | None = None
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
+    home_assistant_oauth_authorization_url: str | None = None
+    home_assistant_oauth_token_url: str | None = None
+    home_assistant_oauth_revoke_url: str | None = None
+    home_assistant_oauth_client_id: str | None = None
+    home_assistant_oauth_redirect_uri: str | None = None
+    home_assistant_oauth_scopes: tuple[str, ...] = ()
     operator_approval_token: SecretStr | None = None
     allow_legacy_operator_token: bool = False
     home_assistant_mapping_path: Path | None = None
@@ -67,6 +74,10 @@ class Settings(StrictModel):
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
     generic_mqtt_url: str | None = None
     generic_mqtt_mapping_path: Path | None = None
+    generic_mqtt_discovery_url: str | None = None
+    generic_mqtt_discovery_prefix: str = Field(
+        default="homeassistant", min_length=1, max_length=128
+    )
     matter_server_url: str | None = None
     knx_gateway_host: str | None = None
     knx_gateway_port: int = Field(default=3671, ge=1, le=65535)
@@ -74,9 +85,15 @@ class Settings(StrictModel):
     knx_gateway_route_back: bool = False
     knx_config_path: Path | None = None
     knx_timeout_seconds: float = Field(default=5.0, gt=0)
+    knx_secure_mode: Literal["ip_secure", "data_secure", "ip_and_data_secure"] | None = None
+    knx_secure_keyring_path: Path | None = None
+    knx_secure_interface: str | None = None
+    knx_secure_user_id: int | None = Field(default=None, ge=0, le=65535)
+    knx_secure_credential_ref: str | None = None
     modbus_host: str | None = None
     modbus_port: int = Field(default=502, ge=1, le=65535)
     modbus_config_path: Path | None = None
+    modbus_profile_catalog_path: Path = Path("data/modbus-profiles")
     modbus_timeout_seconds: float = Field(default=5.0, gt=0)
     modbus_poll_interval_seconds: float = Field(default=5.0, gt=0)
     mqtt_username: str | None = None
@@ -171,6 +188,19 @@ class Settings(StrictModel):
             )
         if self.mqtt_password is not None and self.mqtt_username is None:
             raise ValueError("DOMOAI_MQTT_USERNAME is required when a password is configured")
+        oauth_values = (
+            self.home_assistant_oauth_authorization_url,
+            self.home_assistant_oauth_token_url,
+            self.home_assistant_oauth_client_id,
+            self.home_assistant_oauth_redirect_uri,
+        )
+        if any(value is not None for value in oauth_values) and not all(
+            value is not None for value in oauth_values
+        ):
+            raise ValueError(
+                "Home Assistant OAuth authorization, token, client and redirect settings "
+                "must be configured together"
+            )
         if len(set(self.matter_optional_node_ids)) != len(self.matter_optional_node_ids):
             raise ValueError("DOMOAI_MATTER_OPTIONAL_NODE_IDS must be unique")
         if any(node_id < 0 for node_id in self.matter_optional_node_ids):
@@ -345,6 +375,12 @@ class Settings(StrictModel):
                 os.getenv("DOMOAI_MCP_MAX_REQUEST_BODY_SIZE", str(4 * 1024 * 1024))
             ),
             database_path=Path(os.getenv("DOMOAI_DATABASE_PATH", "data/domoai.sqlite3")),
+            connection_master_key_path=Path(
+                os.getenv(
+                    "DOMOAI_CONNECTION_MASTER_KEY_PATH",
+                    "data/domoai-key/master.key",
+                )
+            ),
             audit_database_path=(
                 Path(audit_path)
                 if (audit_path := os.getenv("DOMOAI_AUDIT_DATABASE_PATH"))
@@ -372,6 +408,20 @@ class Settings(StrictModel):
             home_assistant_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_HOME_ASSISTANT_TOKEN")) else None
             ),
+            home_assistant_oauth_authorization_url=os.getenv(
+                "DOMOAI_HOME_ASSISTANT_OAUTH_AUTHORIZATION_URL"
+            ),
+            home_assistant_oauth_token_url=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_TOKEN_URL"),
+            home_assistant_oauth_revoke_url=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_REVOKE_URL"),
+            home_assistant_oauth_client_id=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_CLIENT_ID"),
+            home_assistant_oauth_redirect_uri=os.getenv(
+                "DOMOAI_HOME_ASSISTANT_OAUTH_REDIRECT_URI"
+            ),
+            home_assistant_oauth_scopes=tuple(
+                scope.strip()
+                for scope in os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_SCOPES", "").split()
+                if scope.strip()
+            ),
             operator_approval_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN")) else None
             ),
@@ -389,6 +439,10 @@ class Settings(StrictModel):
                 if (mapping_path := os.getenv("DOMOAI_GENERIC_MQTT_MAPPING_PATH"))
                 else None
             ),
+            generic_mqtt_discovery_url=os.getenv("DOMOAI_GENERIC_MQTT_DISCOVERY_URL"),
+            generic_mqtt_discovery_prefix=os.getenv(
+                "DOMOAI_GENERIC_MQTT_DISCOVERY_PREFIX", "homeassistant"
+            ),
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
             knx_gateway_port=int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3671")),
@@ -398,12 +452,27 @@ class Settings(StrictModel):
                 Path(config_path) if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH")) else None
             ),
             knx_timeout_seconds=float(os.getenv("DOMOAI_KNX_TIMEOUT_SECONDS", "5")),
+            knx_secure_mode=cast(
+                Literal["ip_secure", "data_secure", "ip_and_data_secure"] | None,
+                os.getenv("DOMOAI_KNX_SECURE_MODE") or None,
+            ),
+            knx_secure_keyring_path=(
+                Path(path) if (path := os.getenv("DOMOAI_KNX_SECURE_KEYRING_PATH")) else None
+            ),
+            knx_secure_interface=os.getenv("DOMOAI_KNX_SECURE_INTERFACE") or None,
+            knx_secure_user_id=(
+                int(user_id) if (user_id := os.getenv("DOMOAI_KNX_SECURE_USER_ID")) else None
+            ),
+            knx_secure_credential_ref=os.getenv("DOMOAI_KNX_SECURE_CREDENTIAL_REF") or None,
             modbus_host=os.getenv("DOMOAI_MODBUS_HOST"),
             modbus_port=int(os.getenv("DOMOAI_MODBUS_PORT", "502")),
             modbus_config_path=(
                 Path(config_path)
                 if (config_path := os.getenv("DOMOAI_MODBUS_CONFIG_PATH"))
                 else None
+            ),
+            modbus_profile_catalog_path=Path(
+                os.getenv("DOMOAI_MODBUS_PROFILE_CATALOG_PATH", "data/modbus-profiles")
             ),
             modbus_timeout_seconds=float(os.getenv("DOMOAI_MODBUS_TIMEOUT_SECONDS", "5")),
             modbus_poll_interval_seconds=float(

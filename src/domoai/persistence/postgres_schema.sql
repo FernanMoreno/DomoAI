@@ -25,6 +25,30 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS connections (
+    id TEXT PRIMARY KEY,
+    connector_id TEXT NOT NULL,
+    unique_id TEXT NOT NULL,
+    endpoint_json TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    credential_ref TEXT,
+    mapping_ref TEXT,
+    enabled INTEGER NOT NULL,
+    schema_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(connector_id, unique_id)
+);
+
+CREATE TABLE IF NOT EXISTS connection_documents (
+    document_ref TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    UNIQUE(kind, digest)
+);
+
 CREATE TABLE IF NOT EXISTS devices (
     id TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
@@ -211,6 +235,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS approval_grants_assertion_nonce
 CREATE INDEX IF NOT EXISTS idx_bundle_commits_status ON bundle_commits (status);
 CREATE INDEX IF NOT EXISTS idx_audit_outbox_pending ON audit_outbox (status, sequence);
 CREATE INDEX IF NOT EXISTS idx_automation_rules_status ON automation_rules (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_connections_connector_id ON connections (connector_id);
+CREATE INDEX IF NOT EXISTS idx_connections_enabled ON connections (enabled, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_connection_documents_kind_digest
+    ON connection_documents (kind, digest);
 CREATE INDEX IF NOT EXISTS idx_physical_intents_status
     ON physical_intents (household_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_metric_history_instance_time

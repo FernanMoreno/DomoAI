@@ -50,11 +50,14 @@ class HomeAssistantProviderAdapter:
         self,
         provider: HomeAssistantProvider,
         *,
+        adapter_id: str | None = None,
         clock: Clock | None = None,
         dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
         ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     ) -> None:
         self.provider = provider
+        if adapter_id is not None:
+            self.adapter_id = adapter_id
         self._clock = clock or SystemClock()
         self._connected = False
         self._source_by_command: dict[tuple[str, str], list[str]] = {}
@@ -165,15 +168,21 @@ class HomeAssistantProviderAdapter:
         }:
             return AdapterExecutionAck(
                 accepted=False,
-                source_ref=result.source_ref,
+                source_ref=self._runtime_source_ref(result.source_ref, source_entity_id),
                 message=result.message or "Home Assistant provider rejected command",
             )
         return AdapterExecutionAck(
             accepted=True,
-            source_ref=result.source_ref
-            or SourceRef(adapter_id=self.adapter_id, external_id=source_entity_id),
+            source_ref=self._runtime_source_ref(result.source_ref, source_entity_id),
             message=result.message,
         )
+
+    def _runtime_source_ref(self, source_ref: SourceRef | None, external_id: str) -> SourceRef:
+        """Keep provider acknowledgements inside this connection namespace."""
+
+        if source_ref is None:
+            return SourceRef(adapter_id=self.adapter_id, external_id=external_id)
+        return source_ref.model_copy(update={"adapter_id": self.adapter_id})
 
     async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
         """Read a declared HA battery baseline without pretending to disable native control.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from dataclasses import dataclass
@@ -113,6 +114,17 @@ class RuntimeOperationalMetrics:
         self._fencing = {value: 0 for value in _FENCING_EVENTS.values()}
         self._series_overflow_total = 0
         self._telemetry_failure_total = 0
+        self._connection_total = 0
+        self._connection_states = {
+            "connection_connected": 0,
+            "connection_degraded": 0,
+            "connection_unavailable": 0,
+        }
+        self._connection_reconnect_attempt_total = 0
+        self._connection_reconnect_success_total = 0
+        self._connection_auth_failure_total = 0
+        self._connection_discovery_duration = _CommandLatency()
+        self._connection_validation_duration = _CommandLatency()
 
     def record_command(
         self,
@@ -169,11 +181,64 @@ class RuntimeOperationalMetrics:
     def record_telemetry_failure(self) -> None:
         self._record_failure()
 
+    def record_connection_total(self, connector_id: str) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        with self._lock:
+            self._connection_total += 1
+
+    def record_connection_state(self, state: str, *, connector_id: str) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        key = f"connection_{state}"
+        if key not in self._connection_states:
+            self._record_failure()
+            return
+        with self._lock:
+            self._connection_states[key] += 1
+
+    def record_connection_reconnect_attempt(self, connector_id: str) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        with self._lock:
+            self._connection_reconnect_attempt_total += 1
+
+    def record_connection_reconnect_success(self, connector_id: str) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        with self._lock:
+            self._connection_reconnect_success_total += 1
+
+    def record_connection_auth_failure(self, connector_id: str) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        with self._lock:
+            self._connection_auth_failure_total += 1
+
+    def record_connection_discovery_duration(
+        self, elapsed_seconds: float, *, connector_id: str
+    ) -> None:
+        self._record_connection_duration(
+            elapsed_seconds, connector_id, self._connection_discovery_duration
+        )
+
+    def record_connection_validation_duration(
+        self, elapsed_seconds: float, *, connector_id: str
+    ) -> None:
+        self._record_connection_duration(
+            elapsed_seconds, connector_id, self._connection_validation_duration
+        )
+
     def snapshot(self) -> dict[str, Any]:
         """Return a detached JSON-ready view of all operational counters."""
 
         with self._lock:
-            return {
+            snapshot: dict[str, Any] = {
                 "instance_id": self.instance_identity.instance_id,
                 "process_start_time": self.instance_identity.process_start_time.isoformat(),
                 "process_start_time_seconds": self.instance_identity.process_start_time.timestamp(),
@@ -198,6 +263,21 @@ class RuntimeOperationalMetrics:
                 "series_overflow_total": self._series_overflow_total,
                 "telemetry_failure_total": self._telemetry_failure_total,
             }
+            if self._connection_metric_recorded():
+                snapshot["connections"] = {
+                    "connection_total": self._connection_total,
+                    **self._connection_states,
+                    "connection_reconnect_attempt_total": self._connection_reconnect_attempt_total,
+                    "connection_reconnect_success_total": self._connection_reconnect_success_total,
+                    "connection_auth_failure_total": self._connection_auth_failure_total,
+                    "connection_discovery_duration_seconds": self._duration_snapshot(
+                        self._connection_discovery_duration
+                    ),
+                    "connection_validation_duration_seconds": self._duration_snapshot(
+                        self._connection_validation_duration
+                    ),
+                }
+            return snapshot
 
     @staticmethod
     def _label(value: str) -> str:
@@ -235,3 +315,64 @@ class RuntimeOperationalMetrics:
     def _record_failure(self) -> None:
         with self._lock:
             self._telemetry_failure_total += 1
+
+    @staticmethod
+    def _valid_connection_label(value: str) -> bool:
+        if not isinstance(value, str):
+            return False
+        normalized = value.strip()
+        if not normalized or len(normalized) > _MAX_LABEL_LENGTH:
+            return False
+        if any(
+            marker in normalized.casefold()
+            for marker in ("token", "password", "secret", "serial", "passwd", "credential")
+        ):
+            return False
+        if "://" in normalized or "@" in normalized:
+            return False
+        try:
+            ipaddress.ip_address(normalized)
+            return False
+        except ValueError:
+            pass
+        return _SAFE_LABEL.fullmatch(normalized) is not None
+
+    def _record_connection_duration(
+        self, elapsed_seconds: float, connector_id: str, series: _CommandLatency
+    ) -> None:
+        if not self._valid_connection_label(connector_id):
+            self._record_failure()
+            return
+        if (
+            isinstance(elapsed_seconds, bool)
+            or not isinstance(elapsed_seconds, (int, float))
+            or not math.isfinite(float(elapsed_seconds))
+            or elapsed_seconds < 0
+        ):
+            self._record_failure()
+            return
+        with self._lock:
+            series.count += 1
+            series.total += float(elapsed_seconds)
+            series.last = float(elapsed_seconds)
+            series.maximum = max(series.maximum, float(elapsed_seconds))
+
+    def _connection_metric_recorded(self) -> bool:
+        return bool(
+            self._connection_total
+            or any(self._connection_states.values())
+            or self._connection_reconnect_attempt_total
+            or self._connection_reconnect_success_total
+            or self._connection_auth_failure_total
+            or self._connection_discovery_duration.count
+            or self._connection_validation_duration.count
+        )
+
+    @staticmethod
+    def _duration_snapshot(series: _CommandLatency) -> dict[str, float | int]:
+        return {
+            "count": series.count,
+            "total": series.total,
+            "last": series.last,
+            "max": series.maximum,
+        }

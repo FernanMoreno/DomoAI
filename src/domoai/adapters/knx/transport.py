@@ -30,6 +30,36 @@ class KnxWrite:
     execution_context: ExecutionContext | None = None
 
 
+@dataclass(frozen=True, repr=False)
+class KnxSecureTransportConfig:
+    """Resolved xknx Secure settings, redacted when represented."""
+
+    mode: str
+    interface: str | None = None
+    keyring_path: str | None = None
+    keyring_password: str | None = None
+    user_id: int | None = None
+    user_password: str | None = None
+    device_authentication_password: str | None = None
+    backbone_key: str | None = None
+
+    def __repr__(self) -> str:
+        has_credentials = any(
+            (
+                self.keyring_password,
+                self.user_password,
+                self.device_authentication_password,
+                self.backbone_key,
+            )
+        )
+        return (
+            "KnxSecureTransportConfig("
+            f"mode={self.mode!r}, interface={self.interface!r}, "
+            f"keyring_path={self.keyring_path!r}, "
+            f"user_id={self.user_id!r}, has_credentials={has_credentials})"
+        )
+
+
 class KnxTransport(Protocol):
     async def connect(self) -> None: ...
 
@@ -163,6 +193,7 @@ class XknxTransport:
         gateway_port: int = 3671,
         route_back: bool = False,
         group_dpts: dict[str, str] | None = None,
+        secure_config: KnxSecureTransportConfig | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.gateway_host = gateway_host
@@ -171,6 +202,7 @@ class XknxTransport:
         self.route_back = route_back
         self._clock = clock or SystemClock()
         self.group_dpts = dict(group_dpts or {})
+        self.secure_config = secure_config
         self.writes: list[KnxWrite] = []
         self._xknx: Any = None
         self._callback: Any = None
@@ -199,16 +231,38 @@ class XknxTransport:
             await self.disconnect()
         try:
             from xknx import XKNX
-            from xknx.io import ConnectionConfig, ConnectionType
+            from xknx.io import ConnectionConfig, ConnectionType, SecureConfig
             from xknx.telegram.address import parse_device_group_address
+
+            connection_type = ConnectionType.TUNNELING
+            xknx_secure_config = None
+            if self.secure_config is not None:
+                if self.secure_config.mode in {"ip_secure", "ip_and_data_secure"}:
+                    connection_type = ConnectionType.TUNNELING_TCP_SECURE
+                xknx_secure_config = SecureConfig(
+                    backbone_key=self.secure_config.backbone_key,
+                    user_id=self.secure_config.user_id,
+                    device_authentication_password=(
+                        self.secure_config.device_authentication_password
+                    ),
+                    user_password=self.secure_config.user_password,
+                    knxkeys_file_path=self.secure_config.keyring_path,
+                    knxkeys_password=self.secure_config.keyring_password,
+                )
 
             self._xknx = XKNX(
                 connection_config=ConnectionConfig(
-                    connection_type=ConnectionType.TUNNELING,
+                    connection_type=connection_type,
                     gateway_ip=self.gateway_host,
                     gateway_port=self.gateway_port,
+                    local_ip=(
+                        self.secure_config.interface
+                        if self.secure_config is not None
+                        else None
+                    ),
                     route_back=self.route_back,
                     auto_reconnect=False,
+                    secure_config=xknx_secure_config,
                 )
             )
             self._xknx.group_address_dpt.set(self.group_dpts)

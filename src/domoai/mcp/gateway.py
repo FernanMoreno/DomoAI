@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -47,6 +48,39 @@ class GatewayApplication:
 
     def __post_init__(self) -> None:
         app = self.server.streamable_http_app()
+        connection_manager = getattr(self.runtime, "connection_manager", None)
+        if connection_manager is not None:
+            from domoai.management.api import create_management_app
+            from domoai.mcp.auth import StaticBearerTokenVerifier
+
+            auth_verifier = None
+            if self.runtime.settings.mcp_client_token_file is not None:
+                verifier = StaticBearerTokenVerifier.from_file(
+                    self.runtime.settings.mcp_client_token_file
+                )
+
+                async def verify_management_token(token: str) -> bool:
+                    return await verifier.verify_token(token) is not None
+
+                auth_verifier = verify_management_token
+            management_app = create_management_app(
+                connection_manager,
+                ets_importer=getattr(self.runtime, "ets_importer", None),
+                knx_secure_credentials=getattr(self.runtime, "knx_secure_credentials", None),
+                home_assistant_oauth=getattr(self.runtime, "home_assistant_oauth", None),
+                home_assistant_oauth_config=getattr(
+                    self.runtime, "home_assistant_oauth_config", None
+                ),
+                home_assistant_oauth_discovery=getattr(
+                    self.runtime, "home_assistant_oauth_discovery", None
+                ),
+                repair_engine=getattr(self.runtime, "repair_engine", None),
+                mqtt_discovery=getattr(self.runtime, "mqtt_discovery", None),
+                host=self.runtime.settings.mcp_host,
+                tls_enabled=urlparse(self.runtime.settings.mcp_public_url).scheme == "https",
+                auth_verifier=auth_verifier,
+            )
+            app.mount("", management_app)
         if not self.runtime.settings.mcp_server_sent_events:
             transport_security = _transport_security(self.runtime.settings)
             app.add_middleware(
@@ -226,16 +260,26 @@ async def build_gateway(
     operator_principal_provider: OperatorPrincipalProvider | None = None,
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     require_configured_adapter: bool = True,
+    control_plane_mode: bool = False,
 ) -> GatewayApplication:
     """Build one configured gateway; callers explicitly own start/close."""
 
     from domoai.mcp.configured import build_configured_server
+
+    # The deployment entrypoint has no explicit Settings object. In that
+    # local-first path an unconfigured installation is the expected setup
+    # state; callers supplying Settings retain the strict compatibility
+    # default unless they opt into the control plane explicitly.
+    if settings is None and not control_plane_mode:
+        control_plane_mode = True
+        require_configured_adapter = False
 
     runtime, server = await build_configured_server(
         settings,
         operator_principal_provider=operator_principal_provider,
         operator_approval_assertion_provider=operator_approval_assertion_provider,
         require_configured_adapter=require_configured_adapter,
+        control_plane_mode=control_plane_mode,
     )
     return GatewayApplication(runtime=runtime, server=server)
 

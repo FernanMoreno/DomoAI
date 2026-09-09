@@ -31,7 +31,9 @@
                 "state_topic": {"type": "string", "minLength": 1, "maxLength": 256},
                 "command_topic": {"type": ["string", "null"], "maxLength": 256},
                 "feedback_topic": {"type": ["string", "null"], "maxLength": 256},
-                "require_readback": {"type": "boolean", "default": false}
+                "require_readback": {"type": "boolean", "default": false},
+                "payload_on": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+                "payload_off": {"type": ["string", "null"], "minLength": 1, "maxLength": 64}
               }
             }
           }

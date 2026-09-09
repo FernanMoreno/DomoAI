@@ -309,6 +309,14 @@ export DOMOAI_GENERIC_MQTT_URL="mqtt://mqtt-broker.local:1883"
 export DOMOAI_GENERIC_MQTT_MAPPING_PATH="config/generic-mqtt.json"
 ```
 
+For read-only Home Assistant MQTT Discovery preview/persistence, configure its
+broker independently; persistence still requires explicit operator confirmation:
+
+```bash
+export DOMOAI_GENERIC_MQTT_DISCOVERY_URL="mqtt://mqtt-broker.local:1883"
+export DOMOAI_GENERIC_MQTT_DISCOVERY_PREFIX="homeassistant"
+```
+
 Zigbee2MQTT may run alongside Home Assistant or another configured source. The
 adapter consumes Zigbee2MQTT bridge/device topics and publishes only mapped
 device `/set` commands through the existing plan, policy and executor
@@ -353,9 +361,37 @@ The mapping file declares each entity, semantic capability, state group address,
 command group address and DPT. Unknown fields, malformed addresses, unsupported
 DPTs and writable sensor mappings are rejected at startup. KNX/IP tunnelling is
 optional and can coexist with the other configured adapters; fixture tests use
-an in-memory transport and require no gateway or hardware. ETS import,
-commissioning, routing, secure credentials, arbitrary group-value operations,
-scenes and additional xknx device profiles are not included in v1.
+an in-memory transport and require no gateway or hardware. P2 adds a bounded,
+review-before-write ETS XML/`.knxproj` importer and xknx-backed IP Secure/Data
+Secure configuration through opaque `FileSecretStore` references. Secure
+profiles fail closed and never fall back to ordinary tunnelling.
+
+The management API also supports external Home Assistant OAuth Authorization
+Code + PKCE, encrypted token refresh/revocation and explicit migration from a
+long-lived token. DomoAI remains an OAuth client, not an authorization server.
+Repair plans are deterministic and typed; only `retry` runs without
+confirmation, while configuration, trust and credential actions require an
+operator confirmation.
+
+### Adding another connector
+
+Connector authors can start from a complete, safe scaffold:
+
+```bash
+uv run domoai-admin connector create \
+  --connector-id my_connector \
+  --display-name "My Connector" \
+  --protocol my-protocol \
+  --output ./my-connector
+uv run domoai-admin connector check ./my-connector
+```
+
+The scaffold supplies the five provider entry points and an explicit
+`provider_adapter_not_implemented` check until the real protocol adapter is
+added. Setup fields are declared once in the provider manifest; the generic
+management UI renders them from `GET /api/v1/connection-providers`, so adding
+a connector does not require adding another UI page. See
+[`docs/connection-provider-sdk.md`](docs/connection-provider-sdk.md).
 
 ## Live Modbus TCP runtime
 
@@ -368,6 +404,7 @@ Configure it alongside the other physical sources:
 export DOMOAI_MODBUS_HOST="modbus-controller.local"
 export DOMOAI_MODBUS_PORT="502"
 export DOMOAI_MODBUS_CONFIG_PATH="config/modbus.json"
+export DOMOAI_MODBUS_PROFILE_CATALOG_PATH="data/modbus-profiles"
 export DOMOAI_MODBUS_TIMEOUT_SECONDS="5"
 export DOMOAI_MODBUS_POLL_INTERVAL_SECONDS="5"
 uv run domoai-mcp

@@ -41,6 +41,27 @@ def _snapshot() -> dict[str, object]:
             "leases": {"acquire_total": 5},
             "approvals": {"reserved_total": 6},
             "bundles": {"completed_total": 7},
+            "connections": {
+                "connection_total": 8,
+                "connection_connected": 9,
+                "connection_degraded": 1,
+                "connection_unavailable": 2,
+                "connection_reconnect_attempt_total": 3,
+                "connection_reconnect_success_total": 4,
+                "connection_auth_failure_total": 5,
+                "connection_discovery_duration_seconds": {
+                    "count": 6,
+                    "total": 7.5,
+                    "last": 1.5,
+                    "max": 3.0,
+                },
+                "connection_validation_duration_seconds": {
+                    "count": 8,
+                    "total": 9.5,
+                    "last": 2.5,
+                    "max": 4.0,
+                },
+            },
             "token_hash": "must-not-be-exported",
         },
         "client_id": "codex",
@@ -61,6 +82,8 @@ def test_renderer_is_deterministic_bounded_and_secret_free() -> None:
         'capability="light.set_power"} 8'
     ) in rendered
     assert 'domoai_adapter_connected{adapter_id="bad_adapter"} 0' in rendered
+    assert "domoai_connection_connected 9" in rendered
+    assert "domoai_connection_discovery_duration_seconds_sum 7.5" in rendered
     assert "must-not-be-exported" not in rendered
     assert "codex" not in rendered
     assert "token_hash" not in rendered

@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "OAuthMetadataSource": {
+      "enum": [
+        "oauth_authorization_server",
+        "openid_configuration",
+        "manual"
+      ],
+      "title": "OAuthMetadataSource",
+      "type": "string"
+    },
+    "OAuthProviderMetadata": {
+      "additionalProperties": false,
+      "description": "Discovered OAuth/OIDC endpoints, deliberately excluding credentials.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "issuer": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issuer"
+        },
+        "authorization_url": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Authorization Url",
+          "type": "string"
+        },
+        "token_url": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Token Url",
+          "type": "string"
+        },
+        "revoke_url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revoke Url"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Scopes",
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/OAuthMetadataSource"
+        }
+      },
+      "required": [
+        "authorization_url",
+        "token_url",
+        "source"
+      ],
+      "title": "OAuthProviderMetadata",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Result of bounded metadata discovery with an explicit manual fallback.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OAuthProviderMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "manual_required": {
+      "default": false,
+      "title": "Manual Required",
+      "type": "boolean"
+    },
+    "diagnostic_code": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Diagnostic Code"
+    },
+    "diagnostic_message": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Diagnostic Message"
+    }
+  },
+  "title": "OAuthMetadataDiscoveryResult",
+  "type": "object"
+}

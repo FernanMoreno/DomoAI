@@ -1,0 +1,35 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "maxLength": 256,
+      "minLength": 16,
+      "title": "State",
+      "type": "string"
+    },
+    "authorization_url": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "title": "Authorization Url",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "state",
+    "authorization_url",
+    "expires_at"
+  ],
+  "title": "OAuthAuthorizationRequest",
+  "type": "object"
+}

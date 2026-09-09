@@ -13,7 +13,10 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantDispatchableBatteryBinding,
     HomeAssistantIdentityClaims,
 )
+from domoai.adapters.modbus.profiles import ModbusProfile
+from domoai.adapters.mqtt.discovery import MqttDiscoveryPreview
 from domoai.adapters.sdk import AdapterManifest
+from domoai.application.connection_providers import ConnectionProviderManifest, ConnectionSetup
 from domoai.application.scene import SceneCommitRequest
 from domoai.config.battery_qualification import BatteryHILEvidence, HILIdentityObservation
 from domoai.domain.automation import (
@@ -32,6 +35,18 @@ from domoai.domain.commissioning import (
     CommissioningQualification,
     CommissioningReport,
     CommissioningRoute,
+)
+from domoai.domain.connections import (
+    ConnectionCandidate,
+    ConnectionDiagnostic,
+    ConnectionDraft,
+    ConnectionProfile,
+    OnboardingSession,
+    ProbeResult,
+    ProviderCatalogEntry,
+    SetupFieldDescriptor,
+    SetupStep,
+    SetupTransition,
 )
 from domoai.domain.coordination import FencingToken, LeaseScope, PhysicalIntent
 from domoai.domain.digital_twin import DigitalTwinEvidence
@@ -59,6 +74,21 @@ from domoai.domain.multihost_qualification import (
     GatewayFencingProbeResult,
     MultiHostQualificationEvidence,
 )
+from domoai.domain.p1_completion import (
+    MatterCommissioningSession,
+    ModbusDeviceIdentity,
+    ModbusProfileResolution,
+)
+from domoai.domain.p2_connections import (
+    EtsGroupAddress,
+    EtsImportPreview,
+    EtsImportWarning,
+    KnxSecureOptions,
+    OAuthAuthorizationRequest,
+    OAuthCredentialRecord,
+    OAuthMetadataDiscoveryResult,
+    OAuthProviderMetadata,
+)
 from domoai.domain.privacy import HouseholdDataPolicy, PrivacyDeletion, PrivacyExport
 from domoai.domain.product import (
     ProductAlternative,
@@ -77,6 +107,7 @@ from domoai.domain.provider import (
     ProviderExecutionResult,
     ProviderManifest,
 )
+from domoai.domain.repairs import RepairAction, RepairPlan
 from domoai.domain.solar import SolarInstallationProfile
 from domoai.lab.battery_simulator import BatterySimulationProfile, BatterySimulationState
 from domoai.mcp.ortools_server import OptimizationExplanation
@@ -102,6 +133,7 @@ from domoai.optimizer.providers import (
     TariffSeries,
 )
 from domoai.optimizer.scenario import OptimizationScenario
+from domoai.runtime.connection_provider_loader import ConnectionProviderLoadDiagnostic
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "schemas" / "v1"
@@ -188,6 +220,34 @@ MODELS: dict[str, type[BaseModel]] = {
     "provider-diagnostic": ProviderDiagnostic,
     "provider-discovery-result": ProviderDiscoveryResult,
     "provider-collection-result": ProviderCollectionResult,
+    "connection-profile": ConnectionProfile,
+    "connection-candidate": ConnectionCandidate,
+    "connection-draft": ConnectionDraft,
+    "connection-diagnostic": ConnectionDiagnostic,
+    "probe-result": ProbeResult,
+    "onboarding-session": OnboardingSession,
+    "setup-step": SetupStep,
+    "setup-field-descriptor": SetupFieldDescriptor,
+    "setup-transition": SetupTransition,
+    "connection-provider-manifest": ConnectionProviderManifest,
+    "connection-setup": ConnectionSetup,
+    "provider-catalog-entry": ProviderCatalogEntry,
+    "matter-commissioning-session": MatterCommissioningSession,
+    "modbus-device-identity": ModbusDeviceIdentity,
+    "modbus-profile-resolution": ModbusProfileResolution,
+    "modbus-profile": ModbusProfile,
+    "mqtt-discovery-preview": MqttDiscoveryPreview,
+    "connection-provider-load-diagnostic": ConnectionProviderLoadDiagnostic,
+    "ets-group-address": EtsGroupAddress,
+    "ets-import-preview": EtsImportPreview,
+    "ets-import-warning": EtsImportWarning,
+    "knx-secure-options": KnxSecureOptions,
+    "oauth-authorization-request": OAuthAuthorizationRequest,
+    "oauth-credential-record": OAuthCredentialRecord,
+    "oauth-provider-metadata": OAuthProviderMetadata,
+    "oauth-metadata-discovery-result": OAuthMetadataDiscoveryResult,
+    "repair-action": RepairAction,
+    "repair-plan": RepairPlan,
 }
 
 # Lab-only dataclasses (not Pydantic models) that still need a published

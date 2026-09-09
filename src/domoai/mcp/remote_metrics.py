@@ -212,6 +212,27 @@ def render_prometheus_metrics(
     ):
         _emit_scalar(lines, operational, key, f"domoai_{key}")
 
+    connections = _nested(operational, "connections")
+    for key in (
+        "connection_total",
+        "connection_connected",
+        "connection_degraded",
+        "connection_unavailable",
+        "connection_reconnect_attempt_total",
+        "connection_reconnect_success_total",
+        "connection_auth_failure_total",
+    ):
+        _emit_scalar(lines, connections, key, f"domoai_{key}")
+    for key in (
+        "connection_discovery_duration_seconds",
+        "connection_validation_duration_seconds",
+    ):
+        duration = _nested(connections, key)
+        _emit_scalar(lines, duration, "count", f"domoai_{key}_count")
+        _emit_scalar(lines, duration, "total", f"domoai_{key}_sum")
+        _emit_scalar(lines, duration, "last", f"domoai_{key}_last")
+        _emit_scalar(lines, duration, "max", f"domoai_{key}_max")
+
     latency_series = operational.get("command_latency_ms")
     if isinstance(latency_series, Sequence) and not isinstance(latency_series, (str, bytes)):
         if len(latency_series) > _MAX_DYNAMIC_SERIES:

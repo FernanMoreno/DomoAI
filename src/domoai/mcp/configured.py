@@ -32,8 +32,11 @@ from domoai.runtime.approval_store import (
 def _adapter_ids(adapter: object) -> tuple[str, ...]:
     """Return concrete adapter identities without exposing provider secrets."""
 
-    children = tuple(getattr(adapter, "adapters", ()))
-    if children:
+    child_attribute = getattr(adapter, "adapters", None)
+    if child_attribute is not None:
+        children = tuple(child_attribute)
+        if not children:
+            return ()
         ids = {child_id for child in children for child_id in _adapter_ids(child)}
     else:
         adapter_id = getattr(adapter, "adapter_id", None)
@@ -49,6 +52,7 @@ async def build_configured_server(
     energy_context_provider: EnergyContextProvider | None = None,
     ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     require_configured_adapter: bool = False,
+    control_plane_mode: bool = False,
 ) -> tuple[RuntimeComposition, FastMCP]:
     resolved_settings = settings or Settings.from_environment()
     # Validate deployment credentials before build_runtime opens SQLite,
@@ -64,6 +68,7 @@ async def build_configured_server(
         energy_context_provider=energy_context_provider,
         ev_charging_bindings=ev_charging_bindings,
         require_configured_adapter=require_configured_adapter,
+        control_plane_mode=control_plane_mode,
     )
     optimization_service = OptimizationService(
         runtime.registry,

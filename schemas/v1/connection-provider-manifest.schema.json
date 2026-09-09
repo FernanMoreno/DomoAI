@@ -1,0 +1,184 @@
+{
+  "$defs": {
+    "SetupFieldDescriptor": {
+      "additionalProperties": false,
+      "description": "Secret-free metadata used to render one setup input.",
+      "properties": {
+        "key": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "input_type": {
+          "$ref": "#/$defs/SetupFieldType"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "secret": {
+          "default": false,
+          "title": "Secret",
+          "type": "boolean"
+        },
+        "help_text": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Help Text",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "input_type"
+      ],
+      "title": "SetupFieldDescriptor",
+      "type": "object"
+    },
+    "SetupFieldType": {
+      "description": "Small, renderer-independent vocabulary for provider setup inputs.",
+      "enum": [
+        "text",
+        "url",
+        "password",
+        "number",
+        "select"
+      ],
+      "title": "SetupFieldType",
+      "type": "string"
+    },
+    "SetupStep": {
+      "additionalProperties": false,
+      "description": "One onboarding step described by input names, never input values.",
+      "properties": {
+        "step_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Description",
+          "type": "string"
+        },
+        "input_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Keys",
+          "type": "array"
+        },
+        "secret_input_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Secret Input Keys",
+          "type": "array"
+        },
+        "fields": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SetupFieldDescriptor"
+          },
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "title"
+      ],
+      "title": "SetupStep",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Non-secret identity and setup description for one connector family.",
+  "properties": {
+    "contract_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "connector_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "display_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "protocol": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Protocol",
+      "type": "string"
+    },
+    "version": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    },
+    "supports_discovery": {
+      "default": true,
+      "title": "Supports Discovery",
+      "type": "boolean"
+    },
+    "supports_manual_setup": {
+      "default": true,
+      "title": "Supports Manual Setup",
+      "type": "boolean"
+    },
+    "steps": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    }
+  },
+  "required": [
+    "connector_id",
+    "display_name",
+    "protocol",
+    "version"
+  ],
+  "title": "ConnectionProviderManifest",
+  "type": "object"
+}

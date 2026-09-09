@@ -34,6 +34,16 @@ class ModbusWrite:
     execution_context: ExecutionContext | None = None
 
 
+@dataclass(frozen=True)
+class ModbusIdentificationResponse:
+    """Read Device Identification objects 0/1/2 (vendor/product/revision)."""
+
+    vendor_name: str = ""
+    product_code: str = ""
+    revision: str = ""
+    read_code: int = 1
+
+
 class ModbusTransport(Protocol):
     async def connect(self) -> None: ...
 
@@ -55,12 +65,18 @@ class ModbusTransport(Protocol):
 
     async def health(self) -> bool: ...
 
+    async def identify_device(self, unit_id: int) -> ModbusIdentificationResponse | None: ...
+
 
 class InMemoryModbusTransport:
     """Deterministic Modbus transport for contract and integration tests."""
 
     def __init__(
-        self, samples: Sequence[ModbusSample] | None = None, *, clock: Clock | None = None
+        self,
+        samples: Sequence[ModbusSample] | None = None,
+        *,
+        clock: Clock | None = None,
+        identifications: dict[int, ModbusIdentificationResponse] | None = None,
     ) -> None:
         self.samples = list(samples or [])
         self._clock = clock or SystemClock()
@@ -73,6 +89,8 @@ class InMemoryModbusTransport:
             (sample.unit_id, sample.area, sample.address): sample for sample in self.samples
         }
         self.write_state_map: dict[tuple[int, ModbusArea, int], tuple[int, ModbusArea, int]] = {}
+        self.identifications = dict(identifications or {})
+        self.identification_reads: list[int] = []
         self._waiter = asyncio.Event()
 
     async def connect(self) -> None:
@@ -119,6 +137,13 @@ class InMemoryModbusTransport:
 
     async def health(self) -> bool:
         return self.connected and self.healthy
+
+    async def identify_device(self, unit_id: int) -> ModbusIdentificationResponse | None:
+        self._require_connected()
+        if not isinstance(unit_id, int) or isinstance(unit_id, bool) or not 1 <= unit_id <= 247:
+            raise ValueError("Modbus unit ID must be between 1 and 247")
+        self.identification_reads.append(unit_id)
+        return self.identifications.get(unit_id)
 
     def enqueue(self, sample: ModbusSample) -> None:
         self.samples.append(sample)
@@ -255,6 +280,49 @@ class PyModbusTcpTransport:
 
     async def health(self) -> bool:
         return self._client is not None and bool(getattr(self._client, "connected", True))
+
+    async def identify_device(self, unit_id: int) -> ModbusIdentificationResponse | None:
+        if not isinstance(unit_id, int) or isinstance(unit_id, bool) or not 1 <= unit_id <= 247:
+            raise ValueError("Modbus unit ID must be between 1 and 247")
+        async with self._lock:
+            client = self._require_client()
+            try:
+                method = client.read_device_information
+                try:
+                    response = method(read_code=1, object_id=0, device_id=unit_id)
+                except TypeError as error:
+                    if "device_id" not in str(error) and "slave" not in str(error):
+                        raise
+                    response = method(read_code=1, object_id=0, slave=unit_id)
+                if inspect.isawaitable(response):
+                    response = await asyncio.wait_for(response, self.timeout)
+                if response is None or (hasattr(response, "isError") and response.isError()):
+                    raise ConnectionError("Modbus server returned a Device Identification error")
+                objects = getattr(response, "information", None)
+                if objects is None:
+                    objects = getattr(response, "objects", {})
+                if not isinstance(objects, dict):
+                    objects = {}
+                values: dict[int, str] = {}
+                for key, value in objects.items():
+                    try:
+                        object_id = int(key)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(value, bytes):
+                        values[object_id] = value.decode("utf-8", errors="replace").strip()
+                    elif isinstance(value, str):
+                        values[object_id] = value.strip()
+                return ModbusIdentificationResponse(
+                    vendor_name=values.get(0, ""),
+                    product_code=values.get(1, ""),
+                    revision=values.get(2, ""),
+                    read_code=int(getattr(response, "read_code", 1) or 1),
+                )
+            except (ConnectionError, OSError, TimeoutError, ValueError) as error:
+                raise ConnectionError("Modbus Device Identification failed") from error
+            except Exception as error:
+                raise ConnectionError("Modbus Device Identification failed") from error
 
     async def _request(self, client: Any, method_name: str, *args: Any) -> Any:
         method = getattr(client, method_name)

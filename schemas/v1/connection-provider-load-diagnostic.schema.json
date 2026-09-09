@@ -1,0 +1,31 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "entry_point": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Entry Point",
+      "type": "string"
+    },
+    "message": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "entry_point",
+    "message"
+  ],
+  "title": "ConnectionProviderLoadDiagnostic",
+  "type": "object"
+}

@@ -7,10 +7,16 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from domoai.admin.connector_scaffold import (
+    ConnectorScaffoldRequest,
+    check_connector_scaffold,
+    create_connector_scaffold,
+)
 from domoai.admin.deployment_preflight import DeploymentPreflightRequest, run_preflight
 from domoai.application.etcd_coordination import (
     build_external_etcd_http_client,
@@ -171,6 +177,22 @@ def _parser() -> argparse.ArgumentParser:
     revoke = token_commands.add_parser("revoke")
     revoke.add_argument("--file", type=Path, required=True)
     revoke.add_argument("--client-id", required=True)
+
+    connector = commands.add_parser(
+        "connector", help="create and validate a third-party connection provider"
+    )
+    connector_commands = connector.add_subparsers(dest="connector_command", required=True)
+    connector_create = connector_commands.add_parser(
+        "create", help="generate a provider package with the five SDK entry points"
+    )
+    connector_create.add_argument("--connector-id", required=True)
+    connector_create.add_argument("--display-name", required=True)
+    connector_create.add_argument("--protocol", required=True)
+    connector_create.add_argument("--output", type=Path, required=True)
+    connector_check = connector_commands.add_parser(
+        "check", help="check a generated or existing provider package"
+    )
+    connector_check.add_argument("root", type=Path)
     return parser
 
 
@@ -409,7 +431,33 @@ def _token_command(args: argparse.Namespace) -> dict[str, object]:
     raise ValueError("unknown token command")
 
 
+def _connector_command(args: argparse.Namespace) -> dict[str, object]:
+    try:
+        if args.connector_command == "create":
+            scaffold_result = create_connector_scaffold(
+                ConnectorScaffoldRequest(
+                    connector_id=args.connector_id,
+                    display_name=args.display_name,
+                    protocol=args.protocol,
+                    output=args.output,
+                )
+            )
+            return asdict(scaffold_result)
+        if args.connector_command == "check":
+            check_result = check_connector_scaffold(args.root)
+            return {
+                "status": check_result.status,
+                "connector_id": check_result.connector_id,
+                "diagnostics": [asdict(item) for item in check_result.diagnostics],
+            }
+        raise ValueError("unknown connector command")
+    except (OSError, ValueError):
+        raise BackupError("connector_scaffold_rejected") from None
+
+
 def _run(args: argparse.Namespace) -> dict[str, object]:
+    if args.command == "connector":
+        return _connector_command(args)
     if args.command == "tokens":
         return _token_command(args)
     if args.command == "migrate-postgres":
@@ -461,7 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = _run(args)
         print(json.dumps(result, sort_keys=True))
-        return 2 if result.get("status") == "failed" else 0
+        return 2 if result.get("status") in {"failed", "incomplete"} else 0
     except BackupError as error:
         print(json.dumps({"error": {"code": error.code}}, sort_keys=True))
         return 2

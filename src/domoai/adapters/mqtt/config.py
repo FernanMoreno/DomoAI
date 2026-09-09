@@ -22,6 +22,8 @@ class MqttCapabilityMapping(StrictModel):
     command_topic: str | None = Field(default=None, min_length=1, max_length=256)
     feedback_topic: str | None = Field(default=None, min_length=1, max_length=256)
     require_readback: bool = False
+    payload_on: str | None = Field(default=None, min_length=1, max_length=64)
+    payload_off: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def reject_wildcard_write_topic(self) -> MqttCapabilityMapping:
@@ -33,6 +35,16 @@ class MqttCapabilityMapping(StrictModel):
                 raise ValueError(f"wildcard {label} topics are forbidden")
         if self.require_readback and (self.command_topic is None or self.feedback_topic is None):
             raise ValueError("required readback needs command and feedback topics")
+        if (
+            self.payload_on is not None or self.payload_off is not None
+        ) and self.kind is not CapabilityKind.BOOLEAN:
+            raise ValueError("payload_on/payload_off require a boolean capability")
+        if (
+            self.payload_on is not None
+            and self.payload_off is not None
+            and self.payload_on == self.payload_off
+        ):
+            raise ValueError("payload_on and payload_off must be different")
         if len(set(self.commands)) != len(self.commands):
             raise ValueError("commands must contain unique values")
         if self.commands and self.command_topic is None:

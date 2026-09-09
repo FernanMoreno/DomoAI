@@ -312,6 +312,20 @@ están de acuerdo en la física, no son dos implementaciones independientes.
 
 Requisitos: Docker Compose y `uv`.
 
+### Docker Desktop desde WSL
+
+Si la configuración global de Docker Desktop referencia un credential helper
+que no está instalado dentro de WSL, ejecuta las pruebas Docker mediante la
+configuración efímera del repositorio. No modifica credenciales ni el
+`config.json` global:
+
+```bash
+scripts/with_disposable_docker_config.sh uv run pytest -q
+scripts/composition_check.sh
+```
+
+El wrapper conserva un `DOCKER_CONFIG` explícito si ya fue proporcionado.
+
 Si esta distro WSL no expone `docker` en el `PATH` aunque Docker Desktop esté
 integrado, el daemon puede usarse mediante el ejecutable Windows:
 

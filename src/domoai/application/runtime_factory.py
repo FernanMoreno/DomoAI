@@ -17,25 +17,38 @@ from domoai.adapters.home_assistant.config import (
     HomeAssistantMappingDocument,
     load_home_assistant_mapping,
 )
+from domoai.adapters.home_assistant.connection import HomeAssistantConnectionProvider
+from domoai.adapters.home_assistant.oauth import (
+    HomeAssistantOAuthClient,
+    HomeAssistantOAuthConfig,
+)
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.adapters.knx.adapter import KnxAdapter
 from domoai.adapters.knx.config import load_mapping
+from domoai.adapters.knx.connection import KnxConnectionProvider
+from domoai.adapters.knx.ets import EtsImporter
 from domoai.adapters.knx.transport import XknxTransport
 from domoai.adapters.matter.adapter import MatterServerAdapter
+from domoai.adapters.matter.connection import MatterConnectionProvider
 from domoai.adapters.matter.transport import MatterServerWebSocketTransport
 from domoai.adapters.modbus.adapter import ModbusAdapter
 from domoai.adapters.modbus.config import load_mapping as load_modbus_mapping
+from domoai.adapters.modbus.connection import ModbusConnectionProvider
 from domoai.adapters.modbus.transport import PyModbusTcpTransport
 from domoai.adapters.mqtt.adapter import GenericMqttAdapter
 from domoai.adapters.mqtt.config import load_mapping as load_mqtt_mapping
+from domoai.adapters.mqtt.discovery import MqttDiscoveryImporter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
+from domoai.adapters.zigbee2mqtt.connection import Zigbee2MqttConnectionProvider
 from domoai.application.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.application.commissioning import (
     CommissioningPersistenceError,
     CommissioningQualificationRepository,
     CommissioningService,
 )
+from domoai.application.connection_manager import ConnectionManager
+from domoai.application.connection_providers import ConnectionProviderRegistry
 from domoai.application.coordination import FencingGuard
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.dynamic_safety import DynamicSafetyGuard
@@ -44,11 +57,16 @@ from domoai.application.event_consumer import RuntimeEventConsumer
 from domoai.application.execution_admission import ExecutionAdmission
 from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
+from domoai.application.home_assistant_oauth import HomeAssistantOAuthService
+from domoai.application.home_assistant_oauth_discovery import HomeAssistantOAuthMetadataService
 from domoai.application.household_queue import HouseholdWorkQueues
+from domoai.application.knx_secure import KnxSecureCredentialStore
 from domoai.application.local_automation import LocalAutomationEngine
+from domoai.application.modbus_profiles import ModbusProfileCatalog
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.recovery import PlanRecoveryService
+from domoai.application.repair_engine import RepairEngine
 from domoai.application.runtime_bootstrap import RuntimeBootstrap, RuntimeBootstrapManifest
 from domoai.application.runtime_lifecycle import RuntimeLifecycle
 from domoai.application.runtime_ownership import RuntimeOwnership
@@ -90,6 +108,8 @@ from domoai.persistence.backup import (
     BackupSource,
     load_backup_encryption_key,
 )
+from domoai.persistence.connection_documents import ConnectionDocumentRepository
+from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.coordination import MetricHistoryRepository, PhysicalIntentRepository
 from domoai.persistence.postgres import PostgresDatabase
 from domoai.persistence.qualification import SQLiteCommissioningQualificationRepository
@@ -127,6 +147,7 @@ from domoai.runtime.control_takeover import (
 )
 from domoai.runtime.events import AuditLog
 from domoai.runtime.instance import InstanceIdentity
+from domoai.runtime.managed_adapter_set import ManagedAdapterSet
 from domoai.runtime.mqtt_transport import AiomqttTransport
 from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 from domoai.runtime.ports import AdapterPort
@@ -135,6 +156,7 @@ from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.risk_classifier import RiskClassifier
 from domoai.runtime.safety_kernel import SafetyKernel
 from domoai.runtime.state_store import StateStore
+from domoai.security.secrets import FileSecretStore
 
 
 def create_adapter(
@@ -146,6 +168,7 @@ def create_adapter(
     dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
     ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     require_configured_adapter: bool = False,
+    control_plane_mode: bool = False,
 ) -> AdapterPort:
     adapters = _create_configured_adapters(
         settings,
@@ -159,7 +182,20 @@ def create_adapter(
             raise ValueError(
                 "no configured adapter is available; refusing to select SimulatedHomeAdapter"
             )
+        if control_plane_mode:
+            return ManagedAdapterSet(
+                registry=registry,
+                event_queue_max_size=settings.composite_event_queue_max_size,
+                reconnect_on_stream_end=True,
+            )
         return SimulatedHomeAdapter(clock=clock)
+    if control_plane_mode:
+        return ManagedAdapterSet(
+            adapters,
+            registry=registry,
+            event_queue_max_size=settings.composite_event_queue_max_size,
+            reconnect_on_stream_end=True,
+        )
     if len(adapters) == 1:
         return adapters[0]
     return CompositeAdapter(
@@ -313,6 +349,29 @@ def _matching_home_assistant_ev_mappings(
         if binding.device_id in active_device_ids
         or binding.canonical_device_id in active_device_ids
     }
+
+
+def _home_assistant_oauth_config(settings: Settings) -> HomeAssistantOAuthConfig | None:
+    required = (
+        settings.home_assistant_oauth_authorization_url,
+        settings.home_assistant_oauth_token_url,
+        settings.home_assistant_oauth_client_id,
+        settings.home_assistant_oauth_redirect_uri,
+    )
+    if not all(value is not None for value in required):
+        return None
+    assert settings.home_assistant_oauth_authorization_url is not None
+    assert settings.home_assistant_oauth_token_url is not None
+    assert settings.home_assistant_oauth_client_id is not None
+    assert settings.home_assistant_oauth_redirect_uri is not None
+    return HomeAssistantOAuthConfig(
+        authorization_url=settings.home_assistant_oauth_authorization_url,
+        token_url=settings.home_assistant_oauth_token_url,
+        revoke_url=settings.home_assistant_oauth_revoke_url,
+        client_id=settings.home_assistant_oauth_client_id,
+        redirect_uri=settings.home_assistant_oauth_redirect_uri,
+        scopes=settings.home_assistant_oauth_scopes,
+    )
 
 
 def _create_configured_adapters(
@@ -590,6 +649,15 @@ class RuntimeComposition:
     facade: DomoticsFacade
     event_consumer: RuntimeEventConsumer
     scheduler: Scheduler
+    connection_manager: ConnectionManager | None = None
+    connection_provider_registry: ConnectionProviderRegistry | None = None
+    ets_importer: EtsImporter | None = None
+    knx_secure_credentials: KnxSecureCredentialStore | None = None
+    home_assistant_oauth: HomeAssistantOAuthService | None = None
+    home_assistant_oauth_config: HomeAssistantOAuthConfig | None = None
+    home_assistant_oauth_discovery: HomeAssistantOAuthMetadataService | None = None
+    repair_engine: RepairEngine | None = None
+    mqtt_discovery: MqttDiscoveryImporter | None = None
     physical_intent_repository: PhysicalIntentRepository | None = None
     metric_history_repository: MetricHistoryRepository | None = None
     household_work_queues: HouseholdWorkQueues | None = None
@@ -748,7 +816,12 @@ class RuntimeComposition:
         try:
             if self.control_supervisor is not None:
                 await self.control_supervisor.shutdown()
-            await self.adapter.disconnect()
+            try:
+                mqtt_discovery = getattr(self, "mqtt_discovery", None)
+                if mqtt_discovery is not None:
+                    await mqtt_discovery.close()
+            finally:
+                await self.adapter.disconnect()
         finally:
             # Release the singleton only after background workers and physical
             # adapters have stopped, but before any storage cleanup that can
@@ -817,6 +890,7 @@ async def build_runtime(
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     clock: Clock | None = None,
     require_configured_adapter: bool = False,
+    control_plane_mode: bool = False,
     lease_coordinator: LeaseCoordinator | None = None,
 ) -> RuntimeComposition:
     """Build a runtime and release every partial resource on failure."""
@@ -834,6 +908,7 @@ async def build_runtime(
             operator_approval_assertion_provider=operator_approval_assertion_provider,
             clock=clock,
             require_configured_adapter=require_configured_adapter,
+            control_plane_mode=control_plane_mode,
             lease_coordinator=lease_coordinator,
             _cleanup=cleanup,
         )
@@ -856,6 +931,7 @@ async def _build_runtime(
     operator_approval_assertion_provider: OperatorApprovalAssertionProvider | None = None,
     clock: Clock | None = None,
     require_configured_adapter: bool = False,
+    control_plane_mode: bool = False,
     lease_coordinator: LeaseCoordinator | None = None,
     _cleanup: _PartialRuntimeBuild,
 ) -> RuntimeComposition:
@@ -984,7 +1060,15 @@ async def _build_runtime(
         dispatchable_battery_binding=dispatchable_battery_binding,
         ev_charging_bindings=ev_charging_bindings,
         require_configured_adapter=require_configured_adapter,
+        control_plane_mode=control_plane_mode,
     )
+    if control_plane_mode and not isinstance(selected_adapter, ManagedAdapterSet):
+        selected_adapter = ManagedAdapterSet(
+            (selected_adapter,),
+            registry=registry,
+            event_queue_max_size=resolved_settings.composite_event_queue_max_size,
+            reconnect_on_stream_end=True,
+        )
     _cleanup.adapter = selected_adapter
     if resolved_settings.multi_host_enabled and not bool(
         getattr(selected_adapter, "supports_fencing", False)
@@ -1543,6 +1627,131 @@ async def _build_runtime(
         local_automation_runner=local_automation.evaluate_time,
         clock=clock,
     )
+    connection_manager: ConnectionManager | None = None
+    connection_provider_registry: ConnectionProviderRegistry | None = None
+    ets_importer: EtsImporter | None = None
+    knx_secure_credentials: KnxSecureCredentialStore | None = None
+    home_assistant_oauth: HomeAssistantOAuthService | None = None
+    home_assistant_oauth_config: HomeAssistantOAuthConfig | None = None
+    home_assistant_oauth_discovery: HomeAssistantOAuthMetadataService | None = None
+    repair_engine: RepairEngine | None = None
+    mqtt_discovery: MqttDiscoveryImporter | None = None
+    if control_plane_mode:
+        if not isinstance(selected_adapter, ManagedAdapterSet):
+            raise RuntimeError("control-plane runtime requires ManagedAdapterSet")
+        secret_store = FileSecretStore(resolved_settings.connection_master_key_path)
+        ets_importer = EtsImporter()
+        knx_secure_credentials = KnxSecureCredentialStore(secret_store, audit=audit)
+        secure_defaults = {
+            key: value
+            for key, value in {
+                "secure_mode": resolved_settings.knx_secure_mode,
+                "secure_keyring_path": (
+                    str(resolved_settings.knx_secure_keyring_path)
+                    if resolved_settings.knx_secure_keyring_path is not None
+                    else None
+                ),
+                "secure_interface": resolved_settings.knx_secure_interface,
+                "secure_user_id": resolved_settings.knx_secure_user_id,
+                "credential_ref": resolved_settings.knx_secure_credential_ref,
+            }.items()
+            if value is not None
+        }
+        built_in_providers = (
+            HomeAssistantConnectionProvider(secret_resolver=secret_store),
+            KnxConnectionProvider(
+                secret_resolver=secret_store,
+                secure_defaults=secure_defaults,
+            ),
+            Zigbee2MqttConnectionProvider(secret_resolver=secret_store),
+            MatterConnectionProvider(
+                lambda url: MatterServerWebSocketTransport(
+                    url, timeout=resolved_settings.mqtt_timeout_seconds
+                ),
+                default_endpoint=resolved_settings.matter_server_url or "ws://127.0.0.1:5580/ws",
+                discovery_timeout=resolved_settings.mqtt_timeout_seconds,
+            ),
+            ModbusConnectionProvider(
+                lambda host, port: PyModbusTcpTransport(
+                    host,
+                    port=port,
+                    timeout=resolved_settings.modbus_timeout_seconds,
+                ),
+                default_host=resolved_settings.modbus_host or "127.0.0.1",
+                default_port=resolved_settings.modbus_port,
+                timeout=resolved_settings.modbus_timeout_seconds,
+                profile_catalog=ModbusProfileCatalog.from_directory(
+                    resolved_settings.modbus_profile_catalog_path
+                ),
+            ),
+        )
+        connection_provider_registry = ConnectionProviderRegistry.from_entry_points(
+            builtins=built_in_providers,
+            operational_metrics=operational_metrics,
+        )
+        connection_repository = cast(
+            ConnectionRepository,
+            SerializedRepositoryProxy(ConnectionRepository(database, clock=clock), storage),
+        )
+        connection_manager = ConnectionManager(
+            repository=connection_repository,
+            providers=connection_provider_registry,
+            runtime=selected_adapter,
+            secret_store=secret_store,
+            audit=audit,
+            clock=clock,
+            refresh_inventory=discovery.refresh,
+            legacy_settings=resolved_settings,
+        )
+        home_assistant_oauth_config = _home_assistant_oauth_config(resolved_settings)
+        oauth_client = HomeAssistantOAuthClient(clock=clock)
+        home_assistant_oauth = HomeAssistantOAuthService(
+            secret_store,
+            oauth_client,
+            clock=clock,
+            audit=audit,
+        )
+        home_assistant_oauth_discovery = HomeAssistantOAuthMetadataService(oauth_client)
+        repair_engine = RepairEngine(connection_manager, clock=clock)
+        if resolved_settings.generic_mqtt_discovery_url is not None:
+            parsed_discovery = urlparse(resolved_settings.generic_mqtt_discovery_url)
+            if (
+                parsed_discovery.scheme not in {"mqtt", "mqtts"}
+                or parsed_discovery.hostname is None
+            ):
+                raise ValueError(
+                    "DOMOAI_GENERIC_MQTT_DISCOVERY_URL must be a valid mqtt:// or mqtts:// URL"
+                )
+            use_tls = parsed_discovery.scheme == "mqtts"
+            discovery_transport = AiomqttTransport(
+                parsed_discovery.hostname,
+                port=parsed_discovery.port or (8883 if use_tls else 1883),
+                username=(
+                    resolved_settings.mqtt_username
+                    if resolved_settings.mqtt_username is not None
+                    else None
+                ),
+                password=(
+                    resolved_settings.mqtt_password.get_secret_value()
+                    if resolved_settings.mqtt_password is not None
+                    else None
+                ),
+                timeout=resolved_settings.mqtt_timeout_seconds,
+                tls=use_tls,
+                ca_cert_path=resolved_settings.mqtt_ca_cert_path,
+                client_cert_path=resolved_settings.mqtt_client_cert_path,
+                client_key_path=resolved_settings.mqtt_client_key_path,
+                tls_insecure=resolved_settings.mqtt_tls_insecure,
+            )
+            document_repository = cast(
+                ConnectionDocumentRepository,
+                SerializedRepositoryProxy(ConnectionDocumentRepository(database), storage),
+            )
+            mqtt_discovery = MqttDiscoveryImporter(
+                discovery_transport,
+                discovery_prefix=resolved_settings.generic_mqtt_discovery_prefix,
+                repository=document_repository,
+            )
     plans: dict[str, Plan] = {}
     bundle_commit_service = BundleCommitService(
         facade=facade,
@@ -1586,6 +1795,15 @@ async def _build_runtime(
         automation_rule_repository=automation_rule_repository,
         registry=registry,
         provider_registry=provider_registry,
+        connection_manager=connection_manager,
+        connection_provider_registry=connection_provider_registry,
+        ets_importer=ets_importer,
+        knx_secure_credentials=knx_secure_credentials,
+        home_assistant_oauth=home_assistant_oauth,
+        home_assistant_oauth_config=home_assistant_oauth_config,
+        home_assistant_oauth_discovery=home_assistant_oauth_discovery,
+        repair_engine=repair_engine,
+        mqtt_discovery=mqtt_discovery,
         state_store=state_store,
         operational_metrics=operational_metrics,
         physical_intent_repository=physical_intent_repository,

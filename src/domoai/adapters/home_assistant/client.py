@@ -137,6 +137,10 @@ class HomeAssistantClient:
     async def health(self) -> bool:
         try:
             await self.fetch_states()
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403}:
+                raise PermissionError("Home Assistant authentication failed") from error
+            return False
         except (httpx.HTTPError, TimeoutError, ValueError):
             return False
         return True

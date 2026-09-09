@@ -1,0 +1,377 @@
+{
+  "$defs": {
+    "CapabilityKind": {
+      "enum": [
+        "boolean",
+        "integer",
+        "number",
+        "enum",
+        "text",
+        "timestamp"
+      ],
+      "title": "CapabilityKind",
+      "type": "string"
+    },
+    "ConnectionDiagnostic": {
+      "additionalProperties": false,
+      "description": "Actionable connection information that cannot contain secret material.",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "user_action": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Action"
+        },
+        "message": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "technical_details": {
+          "$ref": "#/$defs/ScalarMap"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "retryable",
+        "message"
+      ],
+      "title": "ConnectionDiagnostic",
+      "type": "object"
+    },
+    "DiagnosticSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "DiagnosticSeverity",
+      "type": "string"
+    },
+    "MqttAdapterMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "adapter_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "$ref": "#/$defs/MqttDeviceMapping"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Devices",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "adapter_id",
+        "devices"
+      ],
+      "title": "MqttAdapterMapping",
+      "type": "object"
+    },
+    "MqttCapabilityMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 96,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind",
+          "default": "boolean"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "enum_values": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Commands",
+          "type": "array"
+        },
+        "state_topic": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "State Topic",
+          "type": "string"
+        },
+        "command_topic": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Topic"
+        },
+        "feedback_topic": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feedback Topic"
+        },
+        "require_readback": {
+          "default": false,
+          "title": "Require Readback",
+          "type": "boolean"
+        },
+        "payload_on": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Payload On"
+        },
+        "payload_off": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Payload Off"
+        }
+      },
+      "required": [
+        "name",
+        "state_topic"
+      ],
+      "title": "MqttCapabilityMapping",
+      "type": "object"
+    },
+    "MqttDeviceMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/MqttCapabilityMapping"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "type",
+        "capabilities"
+      ],
+      "title": "MqttDeviceMapping",
+      "type": "object"
+    },
+    "ScalarMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "The only value a caller needs before it explicitly persists a mapping.",
+  "properties": {
+    "adapter_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Adapter Id",
+      "type": "string"
+    },
+    "mapping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MqttAdapterMapping"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "mapping_digest": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mapping Digest"
+    },
+    "source_topics": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Topics",
+      "type": "array"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConnectionDiagnostic"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "persistable": {
+      "default": false,
+      "title": "Persistable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "adapter_id"
+  ],
+  "title": "MqttDiscoveryPreview",
+  "type": "object"
+}

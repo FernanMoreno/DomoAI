@@ -78,6 +78,19 @@ def _physical_readiness(runtime: Any) -> dict[str, str]:
     return payload
 
 
+def _physical_source_count(runtime: Any) -> int:
+    """Count concrete runtime children without treating the fixture as hardware."""
+
+    adapter = getattr(runtime, "adapter", None)
+    children = getattr(adapter, "adapters", None)
+    if children is not None:
+        return len(children)
+    if adapter is None:
+        return 0
+    adapter_id = str(getattr(adapter, "adapter_id", ""))
+    return 0 if adapter_id in {"simulated", "fixture"} else 1
+
+
 async def healthz(_: Request) -> JSONResponse:
     """Return process liveness without exposing configuration or secrets."""
 
@@ -105,6 +118,7 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
     ownership = getattr(runtime, "ownership", None)
     ownership_ready = ownership is None or not bool(getattr(ownership, "released", True))
     physical = _physical_readiness(runtime)
+    physical_sources = _physical_source_count(runtime)
     multi_host_enabled = bool(getattr(runtime.settings, "multi_host_enabled", False))
     fencing_guard = getattr(runtime, "fencing_guard", None)
     coordination_ready = not multi_host_enabled or (
@@ -171,6 +185,7 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         },
         "freshness": freshness,
         "physical": physical,
+        "physical_sources": physical_sources,
         "reason_codes": reason_codes,
     }
     return JSONResponse(payload, status_code=200 if is_ready else 503)

@@ -47,11 +47,15 @@ class ModbusAdapter:
         transport: ModbusTransport,
         mapping: ModbusMappingDocument | Path,
         *,
+        adapter_id: str = "modbus",
         discovery_timeout: float = 5.0,
         poll_interval: float = 5.0,
         clock: Clock | None = None,
     ) -> None:
         self.transport = transport
+        if not adapter_id or len(adapter_id) > 64:
+            raise ValueError("Modbus adapter_id must be a non-empty bounded value")
+        self.adapter_id = adapter_id
         self.mapping = load_mapping(mapping) if isinstance(mapping, Path) else mapping
         self.discovery_timeout = discovery_timeout
         self.poll_interval = poll_interval

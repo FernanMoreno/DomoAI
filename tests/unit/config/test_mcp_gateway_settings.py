@@ -90,3 +90,9 @@ def test_generic_mqtt_url_and_mapping_must_be_configured_together(tmp_path: Path
 
     with pytest.raises(ValidationError, match="GENERIC_MQTT"):
         Settings(generic_mqtt_mapping_path=tmp_path / "mapping.json")
+
+
+def test_generic_mqtt_discovery_url_is_an_independent_read_only_source() -> None:
+    settings = Settings(generic_mqtt_discovery_url="mqtt://localhost:1883")
+
+    assert settings.generic_mqtt_discovery_url == "mqtt://localhost:1883"

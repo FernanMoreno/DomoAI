@@ -113,12 +113,13 @@ async def build_configured_server(
         household_work_queues=runtime.household_work_queues,
     )
     context = DomoticsMcpContext(
+        household_preferences=runtime.household_preferences,
         discovery=runtime.discovery,
         state_service=StateService(runtime.state_store),
         facade=runtime.facade,
         registry=runtime.registry,
         policies=runtime.plan_service.policy_engine.policies,
-        active_provider_ids=_adapter_ids(runtime.adapter),
+        active_provider_ids_supplier=lambda: _adapter_ids(runtime.adapter),
         battery_qualification=runtime.battery_qualification,
         plan_repository=runtime.plan_repository,
         state_history_repository=runtime.state_history_repository,
@@ -179,6 +180,10 @@ async def build_configured_server(
         optimization_service=optimization_service,
         optimization_worker=worker,
         max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
+        authority_policy=AuthorityPolicy(
+            tenant_id=runtime.settings.mcp_tenant_id,
+            household_id=runtime.settings.mcp_household_id,
+        ),
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context),

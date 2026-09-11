@@ -244,6 +244,7 @@ async def test_mcp_v1_exposes_stable_semantic_surface() -> None:
         "domotics://areas",
         "domotics://capabilities",
         "domotics://coverage",
+        "domotics://coverage-evidence",
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",

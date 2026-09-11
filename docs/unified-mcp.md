@@ -64,6 +64,17 @@ adapter; it does not add an MQTT-specific MCP operation.
   capability: readable/writable flags, recognized commands, units/limits and
   confirmation guarantees. Missing routes remain unavailable and never become
   executable merely because a protocol is present.
+- `domotics://coverage-evidence` is a separate, typed v1 inspection resource.
+  It groups visible canonical device/capability rows, shows each route's source
+  availability and current runtime membership, and lists gaps for lighting,
+  metered plugs, covers, HVAC and schedulable loads. Evidence remains
+  `unknown` / `not_verified`; protocol, profile, firmware, observed identity
+  and test dates are null. Declared guarantees and imported recipes are not
+  hardware qualification. Route availability grants no execution authority.
+  Consumers should use this single response rather than combine resources
+  assuming that a shared inventory revision freezes operational availability.
+  The legacy coverage response is unchanged. See
+  [`coverage-evidence.schema.json`](../schemas/v1/coverage-evidence.schema.json).
 - `inspect_commissioning` and `domotics://commissioning` are authenticated
   read-only views of the same sanitized battery/EV commissioning report. A
   candidate is preparation evidence only; it cannot create a binding, lease,
@@ -203,3 +214,53 @@ adapter fencing-aware y gateway físico que rechace epochs antiguos. La guía
 operativa está en [`deploy/multihost/README.md`](../deploy/multihost/README.md).
 
 Active-active no forma parte del contrato habilitado.
+
+### Runtime contract compatibility (package 253)
+
+Plans without deployment or execution-lease metadata retain the v1 contract. A
+Plan carrying either field uses v2; its configured runtime binds deployment and
+version before validation or consent. AutomationRule follows its template
+version, and OptimizationResult uses v2 when either `plan` or any `plans` member
+uses v2. An empty result remains v1. Explicit contradictory labels are rejected.
+The five historical v1 artifacts remain byte-identical. Select the corresponding
+v2 Plan, AutomationRule, OptimizationResult, AutomationEvent or PhysicalIntent
+schema for new shapes; EnergyContext and OptimizationScenario keep their
+independent A09 version selection.
+
+State events omit an absent target. Time events require `target_rule_id` and
+cannot replay an old broadcast event. Physical intent owner, attempt and lease
+metadata remain present when recorded; an absent optional identity is omitted.
+Neither internal type gains an in-band version field.
+
+Active Plan lookup rechecks durable compatibility even when a cached object
+exists. An incompatible stored definition whose scope has not been verified is
+unavailable through active lookup, with the same public result as an absent
+ID. Historical classification is exposed only through authorized diagnostics
+or scoped offline administration. They cannot be executed, approved, scheduled or bundled by
+passing a historical wrapper. Existing scheduled-plan and local-rule lists keep
+compatible entries and add `compatibility: {records, next_offset}`. Each record
+contains only its kind, safe ID and reason. `compatibility_offset` selects the
+next diagnostic page; tenant, household and deployment are filtered before
+pagination. No public history getter is added.
+
+The offline `domoai-admin runtime-contract history --record-kind plan
+--record-id ID` command uses the configured administrative database and scope.
+It returns sanitized original evidence in a wrapper with `executable: false`;
+it never reconstructs a current Plan or reissues consent. Use
+`domoai-admin runtime-contract preflight --limit 100 --offset 0` to inventory
+compatibility blocks. Explicit revalidation creates a new definition through
+normal validation and consent; retain the old identity and approval evidence.
+
+For device-, area- or capability-restricted readers, compatible lists keep
+their normal filtering, but the compatibility inventory is not queried. Its
+constant response is `{"status":"unavailable","reason":"whole_household_authority_required","records":[],"next_offset":null}`.
+This means inventory unavailable, not no affected records. Full-household
+authority retains the scoped diagnostic pages described above.
+
+Bundle receipt retries also require current authority over every canonical member.
+An authorized retry retains its existing terminal result without dispatching again;
+revoked access or a foreign member tenant cannot reveal the stored receipt.
+Historical incompatible members produce the same unavailable response as absent IDs.
+
+Canonical scheduled plans and rules are also filtered by their stored tenant,
+even when a different tenant uses the same household and device identifiers.

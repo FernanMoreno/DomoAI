@@ -1,7 +1,7 @@
-# Replace the certificate policy for the deployment. The hostname is supplied
-# by DOMOAI_CADDY_HOSTNAME in Compose.
+# Production edge certificate material is supplied by the operator through
+# read-only Compose mounts. The hostname is supplied by DOMOAI_CADDY_HOSTNAME.
 {$DOMOAI_CADDY_HOSTNAME} {
-    tls internal
+    tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
 
     @mcp path /mcp /mcp/*
     handle @mcp {

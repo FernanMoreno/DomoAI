@@ -191,8 +191,30 @@ class OptimizationScenario(StrictModel):
     solver_time_limit_seconds: float = Field(default=5.0, ge=0)
     conservative: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def select_scenario_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "schema_version" not in value:
+            context = value.get("energy_context")
+            if isinstance(context, dict):
+                context_version = context.get("schema_version")
+                if context_version is None and context.get("base_load_source") is not None:
+                    context_version = "v2"
+            else:
+                context_version = getattr(context, "schema_version", None)
+            if context_version == "v2":
+                return {**value, "schema_version": "v2"}
+        return value
+
     @model_validator(mode="after")
     def validate_loads(self) -> OptimizationScenario:
+        context_is_v2 = (
+            self.energy_context is not None and self.energy_context.schema_version == "v2"
+        )
+        # Historical outer labels were unrestricted strings. Reserve v2 for
+        # this contract without narrowing other labels on legacy contexts.
+        if (self.schema_version == "v2") != context_is_v2:
+            raise ValueError("scenario version must match its energy context version")
         load_ids = (
             [load.id for load in self.loads]
             + [load.id for load in self.ev_loads]
@@ -351,6 +373,18 @@ def validate_scenario(
         thermal = scenario.energy_context.thermal
         if thermal is not None and thermal.actuator is not None:
             errors.extend(_validate_hvac_actuator(registry, thermal.actuator))
+    if (
+        scenario.terminal_soc_policy is not None
+        and scenario.terminal_soc_policy.value_eur_per_kwh is not None
+        and scenario.energy_context is not None
+        and scenario.energy_context.currency != "EUR"
+    ):
+        errors.append(
+            _diagnostic(
+                "terminal_soc_currency_mismatch",
+                "Terminal SOC monetary valuation requires EUR tariffs",
+            )
+        )
     if scenario.terminal_soc_policy is not None:
         battery = scenario.energy_context.battery if scenario.energy_context else None
         if battery is None:

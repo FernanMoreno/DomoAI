@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from domoai.domain.coordination import PhysicalIntent, PhysicalIntentStatus
 from domoai.domain.models import Command, Plan, RecurrenceRule
+from domoai.persistence.coordination import PhysicalIntentRepository
 from domoai.persistence.repositories import (
     DeviceRepository,
     PlanRepository,
@@ -237,3 +239,38 @@ async def test_recurring_schedule_repository_advance_stamps_updated_at_from_the_
         )
         == FIXED.now().isoformat()
     )
+
+
+@pytest.mark.asyncio
+async def test_physical_intent_settlement_stamps_updated_at_from_the_injected_clock(
+    tmp_path: Path,
+) -> None:
+    database = await _database(tmp_path)
+    repository = PhysicalIntentRepository(database, clock=FIXED)
+    intent = PhysicalIntent(
+        tenant_id="tenant-a",
+        household_id="home-a",
+        deployment_id="gw-a",
+        idempotency_key="intent-clock-test",
+        plan_id="plan-clock-test",
+        command_id="command-clock-test",
+        fencing_epoch=1,
+        owner_id="owner-clock-test",
+        execution_attempt_id="attempt-clock-test",
+        created_at=FIXED.now(),
+        updated_at=FIXED.now(),
+    )
+
+    claimed = await repository.claim_for_dispatch(intent)
+    settled = await repository.settle(
+        intent=claimed.intent,
+        status=PhysicalIntentStatus.ACKNOWLEDGED,
+    )
+
+    assert settled.updated_at == FIXED.now()
+    row = database.connection.execute(
+        "SELECT updated_at FROM physical_intents WHERE household_id = ? AND idempotency_key = ?",
+        ("home-a", "intent-clock-test"),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == FIXED.now().isoformat()

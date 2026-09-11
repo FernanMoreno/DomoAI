@@ -1,0 +1,265 @@
+"""Bounded, read-only compatibility classification of durable runtime evidence."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from pydantic import ValidationError
+
+from domoai.domain.automation import AutomationRule
+from domoai.domain.errors import DomainError, ErrorCode
+from domoai.domain.models import Plan
+from domoai.runtime.events import redact_payload
+
+SUPPORTED_RUNTIME_READER = 2
+
+
+class UnsupportedRuntimeContract(RuntimeError):
+    """Opening this store would violate its persisted runtime reader floor."""
+
+
+def check_runtime_floor(connection: Any, *, postgres: bool = False) -> tuple[Any, ...] | None:
+    """Read the floor before any bootstrap writes; missing means legacy store."""
+    try:
+        if postgres:
+            present = connection.execute(
+                "SELECT to_regclass('public.runtime_contract_floor')"
+            ).fetchone()
+            exists = present is not None and present[0] is not None
+        else:
+            exists = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='runtime_contract_floor'"
+                ).fetchone()
+                is not None
+            )
+        if not exists:
+            return None
+        rows = connection.execute(
+            "SELECT singleton, minimum_reader, checkpoint_id, created_at "
+            "FROM runtime_contract_floor"
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError("invalid singleton")
+        row = tuple(rows[0])
+        if (
+            row[0] != 1
+            or type(row[1]) is not int
+            or not 1 <= row[1] <= SUPPORTED_RUNTIME_READER
+            or not isinstance(row[2], str)
+            or not 1 <= len(row[2]) <= 200
+            or not isinstance(row[3], str)
+            or not row[3]
+        ):
+            raise ValueError("unsupported floor")
+        datetime.fromisoformat(row[3])
+        return row
+    except Exception:
+        raise UnsupportedRuntimeContract(
+            "Unsupported or malformed runtime contract floor"
+        ) from None
+
+
+_TERMINAL = frozenset({"completed", "partially_failed", "failed", "cancelled", "unknown"})
+_SOURCES = {
+    "plan": ("plans", "id"),
+    "scheduled_plan": ("scheduled_plans", "plan_id"),
+    "automation_rule": ("automation_rules", "rule_id"),
+    "bundle": ("bundle_commits", "id"),
+    "physical_intent": ("physical_intents", "idempotency_key"),
+}
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
+
+
+def compatibility_error(record_id: str, status: str = "draft") -> DomainError:
+    reason = "historical_only" if status in _TERMINAL else "revalidation_required"
+    return DomainError(
+        ErrorCode.PLAN_IDENTITY_CONFLICT,
+        "Stored contract requires explicit revalidation; historical evidence is read-only",
+        details={"record_id": safe_record_id(record_id), "reason": reason},
+    )
+
+
+def safe_record_id(value: str) -> str:
+    return (
+        value
+        if _SAFE_ID.fullmatch(value)
+        else "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+    )
+
+
+def read_active_plan(payload: str | dict[str, Any], *, record_id: str | None = None) -> Plan:
+    value: Any = payload
+    try:
+        value = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(value, dict):
+            raise ValueError("stored contract is not an object")
+        return Plan.model_validate(value)
+    except (ValidationError, ValueError):
+        known = value if isinstance(value, dict) else {}
+        raise compatibility_error(
+            record_id or str(known.get("id", "unknown")), str(known.get("status", "draft"))
+        ) from None
+
+
+def read_active_rule(payload: str | dict[str, Any]) -> AutomationRule:
+    value: Any = payload
+    try:
+        value = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(value, dict):
+            raise ValueError("stored contract is not an object")
+        return AutomationRule.model_validate(value)
+    except (ValidationError, ValueError):
+        known = value if isinstance(value, dict) else {}
+        raise compatibility_error(str(known.get("id", "unknown"))) from None
+
+
+def _in_scope(
+    payload: dict[str, Any], *, tenant_id: str, household_id: str, deployment_id: str
+) -> bool:
+    authority = payload.get("authority", {})
+    if not isinstance(authority, dict):
+        return False
+    tenant = payload.get("tenant_id", authority.get("tenant_id"))
+    household = payload.get("household_id", authority.get("household_id"))
+    template = payload.get("plan_template", {})
+    deployment = payload.get(
+        "deployment_id", template.get("deployment_id") if isinstance(template, dict) else None
+    )
+    return tenant == tenant_id and household == household_id and deployment in {None, deployment_id}
+
+
+@dataclass(frozen=True)
+class HistoricalRecord:
+    record_kind: str
+    record_id: str
+    raw_payload: str
+    compatibility_reason: str
+
+    @property
+    def payload_sha256(self) -> str:
+        return hashlib.sha256(self.raw_payload.encode()).hexdigest()
+
+    def as_response(self) -> dict[str, Any]:
+        payload = json.loads(self.raw_payload)
+        return {
+            "record_kind": "historical_" + self.record_kind,
+            "record_id": safe_record_id(self.record_id),
+            "executable": False,
+            "compatibility_reason": self.compatibility_reason,
+            "original_schema_version": payload.get("schema_version"),
+            "payload": redact_payload(payload),
+        }
+
+
+def inspect_record(
+    connection: Any,
+    *,
+    record_kind: str,
+    record_id: str,
+    tenant_id: str,
+    household_id: str,
+    deployment_id: str,
+) -> HistoricalRecord:
+    if record_kind not in _SOURCES or not _SAFE_ID.fullmatch(record_id):
+        raise ValueError("unsupported historical record selector")
+    table, identity = _SOURCES[record_kind]
+    # Physical intent identity is household-local, so scope the SQL lookup too.
+    query = f"SELECT payload FROM {table} WHERE {identity} = ?"
+    params: tuple[str, ...] = (record_id,)
+    if record_kind == "physical_intent":
+        query += " AND household_id = ?"
+        params += (household_id,)
+    row = connection.execute(query, params).fetchone()
+    if row is None:
+        raise DomainError(ErrorCode.INSUFFICIENT_SCOPE, "Historical record is unavailable")
+    try:
+        payload = json.loads(row[0])
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not _in_scope(
+        payload, tenant_id=tenant_id, household_id=household_id, deployment_id=deployment_id
+    ):
+        raise DomainError(ErrorCode.INSUFFICIENT_SCOPE, "Historical record is unavailable")
+    reason = "historical_only" if payload.get("status") in _TERMINAL else "revalidation_required"
+    return HistoricalRecord(record_kind, record_id, row[0], reason)
+
+
+def compatibility_diagnostics(
+    connection: Any,
+    *,
+    record_kind: str,
+    tenant_id: str,
+    household_id: str,
+    deployment_id: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return one bounded page; every affected ID is available through pagination."""
+    if record_kind not in {"plan", "scheduled_plan", "automation_rule"}:
+        raise ValueError("unsupported compatibility diagnostic kind")
+    if not 1 <= limit <= 1000 or offset < 0:
+        raise ValueError("compatibility diagnostic limit must be in 1..1000")
+    table, identity = _SOURCES[record_kind]
+    # Filter before pagination. Foreign or unverifiably scoped records cannot
+    # affect public page cursors, counts, or empty-page density.
+    valid_object = (
+        "payload IS JSON OBJECT"
+        if hasattr(connection, "pgconn")
+        else "CASE WHEN json_valid(payload) THEN json_type(payload) = 'object' ELSE 0 END"
+    )
+    deployment_path = (
+        "$.plan_template.deployment_id" if record_kind == "automation_rule" else "$.deployment_id"
+    )
+    scoped = f"""CASE WHEN {valid_object} THEN
+        json_extract(payload, '$.authority.tenant_id') = ?
+        AND json_extract(payload, '$.authority.household_id') = ?
+        AND (json_extract(payload, '{deployment_path}') IS NULL
+             OR json_extract(payload, '{deployment_path}') = ?)
+        ELSE FALSE END"""
+    rows = connection.execute(
+        f"SELECT {identity}, payload FROM {table} WHERE {scoped} "
+        f"ORDER BY {identity} LIMIT ? OFFSET ?",
+        (tenant_id, household_id, deployment_id, limit, offset),
+    )
+    result = []
+    examined = 0
+    try:
+        for record_id, raw in rows:
+            examined += 1
+            try:
+                value = json.loads(raw)
+            except ValueError:
+                value = None
+            if not isinstance(value, dict):
+                continue
+            if not _in_scope(
+                value, tenant_id=tenant_id, household_id=household_id, deployment_id=deployment_id
+            ):
+                continue
+            try:
+                if record_kind == "automation_rule":
+                    rule = read_active_rule(value)
+                    if rule.plan_template.deployment_id is None:
+                        raise compatibility_error(record_id)
+                else:
+                    parsed = read_active_plan(value)
+                    if parsed.deployment_id is None and parsed.status.value != "draft":
+                        raise compatibility_error(record_id, parsed.status.value)
+            except DomainError as error:
+                result.append(
+                    {
+                        "record_kind": record_kind,
+                        "record_id": safe_record_id(record_id),
+                        "reason": str(error.details["reason"]),
+                    }
+                )
+    finally:
+        rows.close()
+    return {"records": result, "next_offset": offset + examined if examined == limit else None}

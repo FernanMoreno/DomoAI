@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import re
 import sys
 import tomllib
@@ -10,11 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml  # type: ignore[import-untyped]
+
 from domoai.admin.connector_conformance import validate_provider
+from domoai.domain.connector_recipes import ConnectorRecipe
 from domoai.runtime.connection_provider_base import ConnectionProviderIncompleteError
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _PYTHON_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+_MAX_RECIPE_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,7 @@ class ConnectorScaffoldRequest:
     display_name: str
     protocol: str
     output: Path
+    recipe: ConnectorRecipe | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,23 @@ class ConnectorCheckResult:
     diagnostics: tuple[ConnectorDiagnostic, ...]
 
 
+def load_connector_recipe(path: Path) -> ConnectorRecipe:
+    """Load one bounded, non-executable YAML recipe from disk."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("recipe file is unavailable")
+    raw = path.read_bytes()
+    if len(raw) > _MAX_RECIPE_BYTES:
+        raise ValueError("recipe file is too large")
+    try:
+        document = yaml.safe_load(raw)
+        if not isinstance(document, dict):
+            raise ValueError("recipe must contain a mapping")
+        return ConnectorRecipe.model_validate(document)
+    except (OSError, yaml.YAMLError, TypeError, ValueError) as error:
+        raise ValueError("recipe is invalid") from error
+
+
 def create_connector_scaffold(request: ConnectorScaffoldRequest) -> ConnectorScaffoldResult:
     _validate_request(request)
     output = request.output
@@ -64,6 +87,11 @@ def create_connector_scaffold(request: ConnectorScaffoldRequest) -> ConnectorSca
         f"src/{package}/adapter.py": _adapter(package),
         "tests/test_provider_contract.py": _provider_test(package),
     }
+    if request.recipe is not None:
+        files["recipe.yaml"] = yaml.safe_dump(
+            request.recipe.model_dump(mode="json"), sort_keys=False
+        )
+        files[f"src/{package}/recipe.py"] = _recipe_module(request.recipe)
     for relative, content in files.items():
         path = output / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +208,13 @@ def _validate_request(request: ConnectorScaffoldRequest) -> None:
         for marker in ("token", "password", "secret", "credential", "authorization")
     ):
         raise ValueError("provider metadata must not contain sensitive material")
+    if request.recipe is not None:
+        if request.recipe.connector_id != request.connector_id:
+            raise ValueError("recipe connector ID must match scaffold metadata")
+        if request.recipe.display_name != request.display_name:
+            raise ValueError("recipe display name must match scaffold metadata")
+        if request.recipe.transport_family.value != request.protocol:
+            raise ValueError("recipe transport family must match scaffold protocol")
 
 
 def _read_project(root: Path) -> dict[str, Any]:
@@ -215,6 +250,23 @@ packages = ["src/{package}"]
 
 
 def _readme(request: ConnectorScaffoldRequest) -> str:
+    if request.recipe is not None:
+        return f'''# {request.display_name} DomoAI connector
+
+Generated with `domoai-admin connector create --recipe`.
+
+The public mapping is stored in `recipe.yaml` and loaded into the provider
+manifest. The generated provider delegates onboarding to DomoAI's bounded
+recipe engines. It remains `incomplete` until the runtime supplies the
+transport and discovery engines for `{request.recipe.transport_family.value}`.
+
+Run:
+
+```bash
+uv run domoai-admin connector check .
+uv run pytest
+```
+'''
     return f'''# {request.display_name} DomoAI connector
 
 Generated with `domoai-admin connector create`.
@@ -241,6 +293,118 @@ __all__ = ["{class_name}", "create_provider"]
 
 def _provider(request: ConnectorScaffoldRequest, package: str) -> str:
     class_name = f"{package.title().replace('_', '')}ConnectionProvider"
+    if request.recipe is not None:
+        family = request.recipe.transport_family.value
+        if family == "mqtt":
+            transport_imports = """from urllib.parse import urlsplit
+
+from domoai.adapters.mqtt.recipe_adapter import MqttRecipeTransportFactory
+from domoai.runtime.connection_ports import ConnectionProviderManifest, ConnectionSetup
+from domoai.runtime.mqtt_transport import AiomqttTransport
+"""
+            transport_factory = """
+def _mqtt_transport(setup: ConnectionSetup) -> AiomqttTransport:
+    endpoint = setup.draft.endpoint
+    raw_url = endpoint.get("url") or endpoint.get("base_url")
+    parsed = urlsplit(str(raw_url)) if raw_url is not None else None
+    host_value = endpoint.get("host") or (parsed.hostname if parsed is not None else None)
+    if not isinstance(host_value, str) or not host_value:
+        raise ValueError("MQTT setup requires a broker host")
+    tls = endpoint.get("tls") is True or (
+        parsed is not None and parsed.scheme.casefold() == "mqtts"
+    )
+    default_port = 8883 if tls else 1883
+    port_value = endpoint.get("port", default_port)
+    if not isinstance(port_value, int) or isinstance(port_value, bool):
+        raise ValueError("MQTT setup port is invalid")
+    return AiomqttTransport(host_value, port=port_value, tls=tls)
+"""
+            engine_setup = 'transport_engines={"mqtt": MqttRecipeTransportFactory(_mqtt_transport)}'
+        elif family == "modbus":
+            transport_imports = (
+                "from domoai.adapters.modbus.recipe_adapter import "
+                "ModbusRecipeTransport\n"
+                "from domoai.adapters.modbus.recipe_discovery import "
+                "ModbusRecipeDiscovery\n"
+                "from domoai.runtime.connection_ports import ConnectionProviderManifest\n"
+            )
+            transport_factory = """
+def _modbus_transport(host: str, port: int):
+    raise RuntimeError(
+        "Supply the deployment-owned ModbusTransport factory before activation"
+    )
+"""
+            engine_setup = (
+                'discovery_engines={"manual": ModbusRecipeDiscovery()}, '
+                'transport_engines={"modbus": ModbusRecipeTransport(_modbus_transport)}'
+            )
+        elif family == "knx":
+            transport_imports = (
+                "from domoai.adapters.knx.recipe_adapter import KnxRecipeTransport\n"
+                "from domoai.adapters.knx.recipe_discovery import KnxRecipeDiscovery\n"
+                "from domoai.runtime.connection_ports import ConnectionProviderManifest\n"
+            )
+            transport_factory = """
+def _knx_transport(host: str, port: int, secure_mode: str):
+    raise RuntimeError(
+        "Supply the deployment-owned KNX transport factory before activation"
+    )
+"""
+            engine_setup = (
+                'discovery_engines={"manual": KnxRecipeDiscovery()}, '
+                'transport_engines={"knx": KnxRecipeTransport(_knx_transport)}'
+            )
+        elif family == "matter":
+            transport_imports = (
+                "from domoai.adapters.matter.recipe_adapter import "
+                "MatterRecipeTransport\n"
+                "from domoai.adapters.matter.recipe_discovery import "
+                "MatterRecipeDiscovery\n"
+                "from domoai.runtime.connection_ports import ConnectionProviderManifest\n"
+            )
+            transport_factory = """
+def _matter_transport(endpoint: str):
+    raise RuntimeError(
+        "Supply the deployment-owned commissioned Matter transport factory before activation"
+    )
+"""
+            engine_setup = (
+                'discovery_engines={"manual": MatterRecipeDiscovery()}, '
+                'transport_engines={"matter": MatterRecipeTransport(_matter_transport)}'
+            )
+        else:
+            transport_imports = (
+                "from domoai.runtime.connection_ports import ConnectionProviderManifest\n"
+            )
+            transport_factory = ""
+            engine_setup = ""
+        return f'''"""Generated recipe-backed DomoAI connection provider."""
+
+from domoai.application.connector_recipes import RecipeConnectionProvider
+{transport_imports}
+
+from .recipe import RECIPE
+
+PROVIDER_IMPLEMENTATION_STATUS = "incomplete"
+{transport_factory}
+
+
+class {class_name}(RecipeConnectionProvider):
+    manifest = ConnectionProviderManifest(
+        connector_id="{request.connector_id}",
+        display_name="{request.display_name}",
+        protocol="{request.protocol}",
+        version="0.1.0",
+        recipe=RECIPE,
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self.manifest, {engine_setup})
+
+
+def create_provider() -> {class_name}:
+    return {class_name}()
+'''
     return f'''"""Generated DomoAI connection provider scaffold."""
 
 from domoai.domain.connections import ConnectionCandidate, ProbeResult, ValidationResult
@@ -288,6 +452,18 @@ def _adapter(package: str) -> str:
 '''
 
 
+def _recipe_module(recipe: ConnectorRecipe) -> str:
+    payload = json.dumps(recipe.model_dump(mode="json"), sort_keys=True)
+    return f'''"""Generated public connector recipe."""
+
+import json
+
+from domoai.domain.connector_recipes import ConnectorRecipe
+
+RECIPE = ConnectorRecipe.model_validate(json.loads({payload!r}))
+'''
+
+
 def _provider_test(package: str) -> str:
     return f'''from {package}.provider import create_provider
 
@@ -306,4 +482,5 @@ __all__ = [
     "ConnectorScaffoldResult",
     "check_connector_scaffold",
     "create_connector_scaffold",
+    "load_connector_recipe",
 ]

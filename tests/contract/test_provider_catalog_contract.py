@@ -12,7 +12,37 @@ from domoai.domain.connections import (
     SetupFieldType,
     SetupStep,
 )
+from domoai.domain.connector_recipes import ConnectorRecipe
 from domoai.runtime.connection_ports import ConnectionProviderManifest
+
+
+def test_provider_manifest_and_catalog_can_carry_a_secret_free_recipe() -> None:
+    recipe = ConnectorRecipe.model_validate(
+        {
+            "connector_id": "fixture_recipe",
+            "display_name": "Fixture Recipe",
+            "transport_family": "mqtt",
+            "capabilities": [
+                {
+                    "capability_id": "power",
+                    "kind": "boolean",
+                    "state_topic": "fixture/{device_id}/state",
+                }
+            ],
+        }
+    )
+    manifest = ConnectionProviderManifest(
+        connector_id="fixture_recipe",
+        display_name="Fixture Recipe",
+        protocol="mqtt",
+        version="1.0",
+        recipe=recipe,
+    )
+
+    catalog = ProviderCatalogEntry.from_manifest(manifest)
+
+    assert catalog.recipe == recipe
+    assert "token-value" not in catalog.model_dump_json()
 
 
 def test_setup_field_descriptor_describes_a_secret_url_without_a_value() -> None:

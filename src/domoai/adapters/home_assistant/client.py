@@ -46,7 +46,7 @@ class HomeAssistantClient:
         host = self.base_url.removeprefix("https://").removeprefix("http://")
         return f"{scheme}://{host}/api/websocket"
 
-    async def fetch_states(self) -> list[dict[str, Any]]:
+    async def fetch_states(self) -> list[Any]:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
@@ -59,7 +59,9 @@ class HomeAssistantClient:
                     payload = response.json()
                     if not isinstance(payload, list):
                         raise ValueError("Home Assistant /api/states returned a non-list payload")
-                    return [dict(item) for item in payload]
+                    # Preserve individual payloads for provider-level validation;
+                    # one bad entity must not discard its valid neighbors.
+                    return payload
             except (httpx.HTTPError, TimeoutError, ValueError) as error:
                 last_error = error
                 if attempt == 0:
@@ -145,7 +147,7 @@ class HomeAssistantClient:
             return False
         return True
 
-    async def subscribe_state_events(self) -> AsyncIterator[dict[str, Any]]:
+    async def subscribe_state_events(self) -> AsyncIterator[object]:
         """Stream state changes and reconnect once after a dropped socket."""
 
         reconnects = 0
@@ -174,7 +176,7 @@ class HomeAssistantClient:
                         # reconnect loop.
                         raw_message = await socket.recv()
                         message = json.loads(raw_message)
-                        if message.get("type") == "event":
+                        if not isinstance(message, dict) or message.get("type") == "event":
                             yield message
                 return
             except (

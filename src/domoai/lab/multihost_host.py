@@ -21,6 +21,7 @@ from domoai.domain.coordination import (
     FencingToken,
     LeaseScope,
     PhysicalIntent,
+    PhysicalIntentClaimDecision,
     PhysicalIntentStatus,
 )
 from domoai.domain.models import AuditEvent, AuthorityContext, PrincipalRole, StrictModel
@@ -210,16 +211,26 @@ class HostAgent:
             created_at=now,
             updated_at=now,
         )
-        claimed = await self._database_call(lambda: self.physical_intents.claim(intent))
-        if claimed.status is not PhysicalIntentStatus.PREPARED:
-            return _response("duplicate", intent_status=claimed.status.value, epoch=token.epoch)
+        claimed = await self._database_call(
+            lambda: self.physical_intents.claim_for_dispatch(
+                intent.model_copy(
+                    update={
+                        "owner_id": token.owner_id,
+                        "execution_attempt_id": uuid4().hex,
+                    }
+                )
+            )
+        )
+        if claimed.decision is not PhysicalIntentClaimDecision.ACQUIRED:
+            return _response(
+                "duplicate", intent_status=claimed.intent.status.value, epoch=token.epoch
+            )
         if request.crash_after_claim:
             os._exit(97)
         result = await self.gateway.probe(token, safe_command="lab-safe-noop")
         settled = await self._database_call(
             lambda: self.physical_intents.settle(
-                household_id=token.scope.household_id,
-                idempotency_key=intent.idempotency_key,
+                intent=claimed.intent,
                 status=(
                     PhysicalIntentStatus.CONFIRMED
                     if result.accepted

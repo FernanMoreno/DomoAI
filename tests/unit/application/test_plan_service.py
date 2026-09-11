@@ -820,3 +820,105 @@ async def test_validate_keeps_future_plan_valid_through_execution_window() -> No
 
     assert validated.expires_at == initial + PlanService.VALIDATION_TTL
     assert validated.expires_at != execute_at + PlanService.DEFAULT_PLAN_TTL
+
+
+@pytest.mark.asyncio
+async def test_configured_definition_is_versioned_before_validation_and_claim(tmp_path) -> None:
+    from domoai.domain.models import PlanExecutionLease
+    from domoai.persistence.repositories import PlanRepository
+    from domoai.persistence.sqlite import SQLiteDatabase
+
+    _, original = await build_service_with_adapter()
+    service = PlanService(
+        original.registry,
+        original.state_store,
+        original.policy_engine,
+        original.audit,
+        deployment_id="deployment",
+    )
+    device = next(item for item in service.registry.devices if item.type.value == "light")
+    command = Command(
+        id="compat-command", device_id=device.id, command="turn_on", idempotency_key="compat-intent"
+    )
+    draft = service.create_plan("compat-plan", [command])
+    assert draft.schema_version == "v2"
+    assert draft.deployment_id == "deployment"
+    validated = service.validate(draft)
+    assert validated.schema_version == "v2"
+    digest = validated.definition_digest
+    validation_digest = validated.validation.digest
+    database = SQLiteDatabase(tmp_path / "compat.sqlite")
+    await database.initialize()
+    try:
+        repository = PlanRepository(database, deployment_id="deployment")
+        await repository.save_validation(validated)
+        lease = PlanExecutionLease(
+            deployment_id="deployment",
+            owner_id="owner",
+            lease_id="lease",
+            fencing_epoch=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        )
+        claimed = validated.model_copy(
+            update={"status": PlanStatus.EXECUTING, "execution_lease": lease}
+        )
+        assert await repository.claim_for_execution(
+            claimed, allowed_statuses=frozenset({validated.status})
+        )
+        stored = await repository.get(validated.id)
+        assert stored.schema_version == "v2"
+        assert stored.definition_digest == digest
+        assert stored.validation.digest == validation_digest
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_configured_service_rejects_client_deployment_and_lease() -> None:
+    from domoai.domain.models import PlanExecutionLease
+
+    _, original = await build_service_with_adapter()
+    service = PlanService(
+        original.registry,
+        original.state_store,
+        original.policy_engine,
+        original.audit,
+        deployment_id="deployment",
+    )
+    device = next(item for item in service.registry.devices if item.type.value == "light")
+    command = Command(id="c", device_id=device.id, command="turn_on", idempotency_key="i")
+    foreign = Plan(id="foreign", commands=[command], deployment_id="other")
+    with pytest.raises(DomainError):
+        service.validate(foreign)
+    injected = Plan(
+        id="injected",
+        commands=[command],
+        deployment_id="deployment",
+        execution_lease=PlanExecutionLease(
+            deployment_id="deployment",
+            owner_id="attacker",
+            lease_id="client",
+            fencing_epoch=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        ),
+    )
+    with pytest.raises(DomainError):
+        service.validate(injected)
+
+
+@pytest.mark.asyncio
+async def test_protected_legacy_definition_cannot_be_promoted_on_save(tmp_path) -> None:
+    from domoai.persistence.repositories import PlanRepository
+    from domoai.persistence.sqlite import SQLiteDatabase
+
+    _, service = await build_service_with_adapter()
+    device = next(item for item in service.registry.devices if item.type.value == "light")
+    command = Command(id="c", device_id=device.id, command="turn_on", idempotency_key="i")
+    legacy = service.validate(service.create_plan("legacy", [command]))
+    database = SQLiteDatabase(tmp_path / "legacy.sqlite")
+    await database.initialize()
+    try:
+        with pytest.raises(DomainError, match="revalidation"):
+            await PlanRepository(database, deployment_id="deployment").save_validation(legacy)
+    finally:
+        await database.close()

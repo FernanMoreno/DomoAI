@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
+from mcp.server.auth.provider import AccessToken
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
 from domoai.adapters.home_assistant.oauth import HomeAssistantOAuthConfig
 from domoai.adapters.knx.ets import EtsImporter, EtsImportError
 from domoai.adapters.mqtt.discovery import MqttDiscoveryPreview
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.connection_manager import ConnectionManagerError
 from domoai.application.connection_providers import ConnectionSetup
 from domoai.application.home_assistant_oauth import (
@@ -25,6 +30,10 @@ from domoai.application.home_assistant_oauth import (
 )
 from domoai.application.home_assistant_oauth_discovery import (
     HomeAssistantOAuthMetadataService,
+)
+from domoai.application.household_onboarding import (
+    HouseholdOnboardingService,
+    OnboardingProjectionError,
 )
 from domoai.application.knx_secure import KnxSecureError
 from domoai.application.repair_engine import RepairEngineError
@@ -34,14 +43,34 @@ from domoai.domain.connections import (
     ConnectionProfile,
     ProviderCatalogEntry,
 )
+from domoai.domain.errors import DomainError
+from domoai.domain.models import StrictModel
 from domoai.domain.p1_completion import CommissioningMethod
 from domoai.domain.p2_connections import EtsImportPreview, OAuthCredentialRecord
 from domoai.domain.repairs import RepairPlan
-from domoai.management.auth import ManagementAuth
+from domoai.management.auth import (
+    ManagementAuth,
+    ManagementPrincipal,
+    authority_operation_for_scope,
+    is_public_management_shell,
+    required_management_scope,
+)
 from domoai.management.rate_limit import RateLimiter
 from domoai.management.ui import first_install_page
 
+logger = logging.getLogger(__name__)
+
 _CONTROL_OPERATIONS = frozenset({"activate", "disable", "reauth", "repair"})
+_DEFAULT_MAX_REQUEST_BODY_SIZE = 4 * 1024 * 1024
+_MAX_JSON_DEPTH = 32
+_MAX_JSON_KEYS = 1000
+_MAX_JSON_STRING_LENGTH = 64 * 1024
+
+
+class _RequestBudgetExceeded(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def create_management_app(
@@ -59,9 +88,19 @@ def create_management_app(
     auth_token: str | None = None,
     tls_enabled: bool = False,
     rate_limit: int = 60,
-    auth_verifier: Callable[[str], Awaitable[bool]] | None = None,
+    max_request_body_size: int = _DEFAULT_MAX_REQUEST_BODY_SIZE,
+    auth_verifier: Callable[[str], Awaitable[AccessToken | None]] | None = None,
+    authority_policy: AuthorityPolicy | None = None,
+    household_onboarding: HouseholdOnboardingService | None = None,
 ) -> Starlette:
     """Create a local-first management app around one ConnectionManager."""
+
+    if isinstance(max_request_body_size, bool) or not isinstance(max_request_body_size, int):
+        raise ValueError("max_request_body_size must be a positive integer")
+    if max_request_body_size <= 0:
+        raise ValueError("max_request_body_size must be a positive integer")
+    if auth_verifier is not None and authority_policy is None:
+        raise ValueError("verified management authentication requires a server authority policy")
 
     ets_importer = ets_importer or EtsImporter()
     auth = ManagementAuth(
@@ -71,30 +110,165 @@ def create_management_app(
         external_auth=auth_verifier is not None,
     )
     limiter = RateLimiter(rate_limit)
+    script_hashes = " ".join(
+        "'sha256-" + base64.b64encode(hashlib.sha256(script).digest()).decode("ascii") + "'"
+        for script in re.findall(rb"<script[^>]*>(.*?)</script>", first_install_page().body, re.S)
+    )
 
     async def protected(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        client_host = request.client.host if request.client is not None else "unknown"
+        if is_public_management_shell(request.method, request.url.path):
+            response: Response = (
+                await call_next(request)
+                if limiter.allow("public:" + client_host)
+                else JSONResponse({"error": "rate_limited"}, status_code=429)
+            )
+        else:
+            response = await authenticated(request, call_next)
+            if response.status_code in {401, 403} and not limiter.allow("rejected:" + client_host):
+                response = JSONResponse({"error": "rate_limited"}, status_code=429)
+        return secured_response(response)
+
+    def secured_response(response: Response) -> Response:
+        response.headers.update(
+            {
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Content-Security-Policy": (
+                    "default-src 'self'; object-src 'none'; base-uri 'none'; "
+                    "frame-ancestors 'none'; form-action 'self'; connect-src 'self'; "
+                    f"script-src 'self' {script_hashes}; style-src 'self' 'unsafe-inline'"
+                ),
+            }
+        )
+        return response
+
+    async def unhandled_error(_request: Request, _error: Exception) -> Response:
+        # ServerErrorMiddleware owns unexpected failures outside call_next.
+        # Keep its legacy sanitized body, decorating the actual 500 response.
+        return secured_response(PlainTextResponse("Internal Server Error", status_code=500))
+
+    async def authenticated(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        request.state.management_max_request_body_size = max_request_body_size
         authorization = request.headers.get("authorization")
         if auth_verifier is not None:
             token = _bearer_token(authorization)
-            authorized = token is not None and await auth_verifier(token)
+            verified_token = token is not None and await auth_verifier(token)
+            if not isinstance(verified_token, AccessToken):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                principal = ManagementPrincipal.from_access_token(verified_token)
+            except (TypeError, ValueError):
+                logger.warning("Management request rejected: invalid authority claims")
+                return JSONResponse({"error": "forbidden"}, status_code=403)
         else:
-            authorized = auth.authorized(authorization)
+            if not auth.authorized(authorization):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            principal = ManagementPrincipal.static(
+                authority_policy.local_context() if authority_policy is not None else None
+            )
+        required_scope = required_management_scope(request.method, request.url.path)
+        authorized = principal.allows(required_scope)
+        if authorized and authority_policy is not None:
+            try:
+                authority_policy.authorize(
+                    principal.authority,
+                    operation=authority_operation_for_scope(required_scope),
+                )
+            except DomainError:
+                authorized = False
         if not authorized:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            _audit_management_decision(
+                manager,
+                request,
+                principal,
+                required_scope=required_scope,
+                result="rejected",
+            )
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        request.state.management_principal = principal
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            _audit_management_decision(
+                manager,
+                request,
+                principal,
+                required_scope=required_scope,
+                result="authorized",
+            )
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not _same_origin(request):
             return JSONResponse({"error": "origin_forbidden"}, status_code=403)
         client_host = request.client.host if request.client is not None else "unknown"
-        if not limiter.allow(client_host):
+        if not limiter.allow("authorized:" + client_host):
             return JSONResponse({"error": "rate_limited"}, status_code=429)
         return await call_next(request)
 
     async def ui(_request: Request) -> Response:
         return first_install_page()
 
+    async def onboarding_projection(request: Request) -> Response:
+        try:
+            if household_onboarding is None:
+                raise OnboardingProjectionError("onboarding_unavailable", 503)
+            principal = request.state.management_principal
+            path = request.url.path
+            is_device_read = "device_id" in request.path_params
+            is_inventory = path == "/api/v1/onboarding/inventory"
+            allowed = (
+                {"capability", "connection_id"}
+                if is_device_read
+                else {"limit", "cursor"}
+                if is_inventory
+                else set()
+            )
+            parameters = dict(request.query_params)
+            if set(parameters) - allowed or len(request.query_params.multi_items()) != len(
+                parameters
+            ):
+                raise ValueError("invalid parameters")
+            payload: StrictModel
+            if not is_device_read and not is_inventory:
+                payload = await household_onboarding.status(
+                    principal.authority,
+                    auth_mode=(
+                        "verified_bearer"
+                        if auth_verifier
+                        else "static_bearer"
+                        if auth_token
+                        else "local_loopback"
+                    ),
+                    manage_scope=principal.allows("manage"),
+                )
+            elif is_inventory:
+                payload = household_onboarding.inventory(
+                    principal.authority,
+                    limit=int(parameters.get("limit", "50")),
+                    cursor=parameters.get("cursor"),
+                )
+            else:
+                payload = await household_onboarding.read(
+                    principal.authority,
+                    request.path_params["device_id"],
+                    capability=parameters.get("capability"),
+                    connection_id=UUID(parameters["connection_id"])
+                    if "connection_id" in parameters
+                    else None,
+                )
+            return JSONResponse(payload.model_dump(mode="json"))
+        except OnboardingProjectionError as error:
+            return JSONResponse({"error": error.code}, status_code=error.status)
+        except Exception as error:
+            return _error_response(error)
+
     async def list_connections(_request: Request) -> Response:
-        profiles = await manager.list()
+        try:
+            profiles = await manager.list()
+        except ConnectionManagerError as error:
+            return _error_response(error)
         return JSONResponse({"connections": [_profile_payload(profile) for profile in profiles]})
 
     async def list_provider_catalog(_request: Request) -> Response:
@@ -141,6 +315,8 @@ def create_management_app(
                     status_code=201,
                 )
             session_id = _body_uuid(body, "session_id")
+            if action == "cancel":
+                return JSONResponse({"cancelled": await manager.cancel_setup(session_id)})
             if action == "select":
                 candidate = await manager.select_setup(
                     session_id, _required_string(body, "candidate_id")
@@ -174,9 +350,7 @@ def create_management_app(
                 if not isinstance(activate, bool):
                     raise ValueError("activate must be a boolean")
                 profile = await manager.create_setup(session_id, activate=activate)
-                return JSONResponse(
-                    {"connection": _profile_payload(profile)}, status_code=201
-                )
+                return JSONResponse({"connection": _profile_payload(profile)}, status_code=201)
             raise ValueError("setup action is not supported")
         except Exception as error:  # noqa: BLE001
             return _error_response(error)
@@ -430,9 +604,7 @@ def create_management_app(
                 )
             body = await _json_body(request)
             config = _oauth_config(body, home_assistant_oauth_config)
-            result = await home_assistant_oauth.refresh(
-                config, _oauth_record(body)
-            )
+            result = await home_assistant_oauth.refresh(config, _oauth_record(body))
             return JSONResponse(_model_payload(result))
         except Exception as error:  # noqa: BLE001
             return _error_response(error)
@@ -475,11 +647,11 @@ def create_management_app(
                     "oauth_reauth_unavailable", "OAuth reauthentication is unavailable"
                 )
             body = await _json_body(request)
+            connection_id = UUID(_required_string(body, "connection_id"))
+            await manager.get(connection_id)
             record = _oauth_record(body)
             home_assistant_oauth.validate_record(record)
-            result = await reauth_ref(
-                UUID(_required_string(body, "connection_id")), record.credential_ref
-            )
+            result = await reauth_ref(connection_id, record.credential_ref)
             return JSONResponse({"connection": _profile_payload(result)})
         except Exception as error:  # noqa: BLE001
             return _error_response(error)
@@ -515,6 +687,8 @@ def create_management_app(
             if credential is not None and not isinstance(credential, str):
                 raise ValueError("credential must be a string")
             plan = RepairPlan.model_validate(plan_payload)
+            if UUID(plan.connection_id) != _path_uuid(request):
+                raise ValueError("repair connection does not match route")
             result = await repair_engine.execute(
                 plan,
                 request.path_params["action_id"],
@@ -615,6 +789,9 @@ def create_management_app(
 
     routes = [
         Route("/", ui, methods=["GET"]),
+        Route("/api/v1/onboarding/status", onboarding_projection, methods=["GET"]),
+        Route("/api/v1/onboarding/inventory", onboarding_projection, methods=["GET"]),
+        Route("/api/v1/onboarding/state/{device_id}", onboarding_projection, methods=["GET"]),
         Route("/api/v1/connections", list_connections, methods=["GET"]),
         Route("/api/v1/connection-providers", list_provider_catalog, methods=["GET"]),
         Route("/api/v1/connections", create_connection, methods=["POST"]),
@@ -688,16 +865,88 @@ def create_management_app(
             methods=["DELETE"],
         ),
     ]
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, exception_handlers={Exception: unhandled_error})
     app.add_middleware(BaseHTTPMiddleware, dispatch=protected)
     return app
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
-    payload = await request.json()
+    max_request_body_size = getattr(
+        request.state,
+        "management_max_request_body_size",
+        _DEFAULT_MAX_REQUEST_BODY_SIZE,
+    )
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_request_body_size:
+            _log_body_rejection(request, "payload_too_large", max_request_body_size)
+            raise _RequestBudgetExceeded("payload_too_large")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > max_request_body_size:
+            _log_body_rejection(request, "payload_too_large", max_request_body_size)
+            raise _RequestBudgetExceeded("payload_too_large")
+        body.extend(chunk)
+    try:
+        payload = json.loads(bytes(body))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("request body is invalid") from error
+    _validate_json_shape(payload)
     if not isinstance(payload, dict):
         raise ValueError("request body must be an object")
     return payload
+
+
+def _validate_json_shape(value: object, *, depth: int = 0, key_count: int = 0) -> int:
+    if isinstance(value, str):
+        if len(value) > _MAX_JSON_STRING_LENGTH:
+            raise _RequestBudgetExceeded("payload_too_complex")
+        return key_count
+    if isinstance(value, dict):
+        next_depth = depth + 1
+        if next_depth > _MAX_JSON_DEPTH:
+            raise _RequestBudgetExceeded("payload_too_complex")
+        next_key_count = key_count + len(value)
+        if next_key_count > _MAX_JSON_KEYS:
+            raise _RequestBudgetExceeded("payload_too_complex")
+        for key, nested in value.items():
+            _validate_json_shape(key, depth=depth, key_count=next_key_count)
+            next_key_count = _validate_json_shape(
+                nested,
+                depth=next_depth,
+                key_count=next_key_count,
+            )
+            if next_key_count > _MAX_JSON_KEYS:
+                raise _RequestBudgetExceeded("payload_too_complex")
+        return next_key_count
+    if isinstance(value, list):
+        next_depth = depth + 1
+        if next_depth > _MAX_JSON_DEPTH:
+            raise _RequestBudgetExceeded("payload_too_complex")
+        next_key_count = key_count
+        for nested in value:
+            next_key_count = _validate_json_shape(
+                nested,
+                depth=next_depth,
+                key_count=next_key_count,
+            )
+        return next_key_count
+    return key_count
+
+
+def _log_body_rejection(request: Request, code: str, limit: int) -> None:
+    logger.warning(
+        "management request rejected: %s method=%s path=%s limit=%d",
+        code,
+        request.method,
+        request.url.path,
+        limit,
+    )
 
 
 def _required_string(body: Mapping[str, Any], key: str) -> str:
@@ -731,6 +980,37 @@ def _bearer_token(header: str | None) -> str | None:
     if scheme.casefold() != "bearer" or not separator or not value.strip():
         return None
     return value.strip()
+
+
+def _audit_management_decision(
+    manager: Any,
+    request: Request,
+    principal: ManagementPrincipal,
+    *,
+    required_scope: str,
+    result: str,
+) -> None:
+    audit = getattr(manager, "audit", None)
+    append = getattr(audit, "append", None)
+    if not callable(append):
+        return
+    append(
+        event_type=(
+            "management_request_authorized"
+            if result == "authorized"
+            else "management_authorization_rejected"
+        ),
+        actor=f"management:{principal.client_id}",
+        subject_id=request.url.path,
+        payload={
+            "method": request.method,
+            "path": request.url.path,
+            "required_scope": required_scope,
+            "result": result,
+            "client_id": principal.client_id,
+            "authority": principal.authority.model_dump(mode="json"),
+        },
+    )
 
 
 async def _profile(manager: Any, request: Request) -> ConnectionProfile:
@@ -876,6 +1156,15 @@ def _model_payload(value: object) -> object:
 
 
 def _error_response(error: Exception) -> JSONResponse:
+    if isinstance(error, _RequestBudgetExceeded):
+        messages = {
+            "payload_too_large": "request body exceeds configured limit",
+            "payload_too_complex": "request body exceeds JSON complexity limits",
+        }
+        return JSONResponse(
+            {"error": error.code, "message": messages[error.code]},
+            status_code=413,
+        )
     if isinstance(error, EtsImportError):
         message = str(error)
         status = 409 if "confirmation" in message or "digest" in message else 400
@@ -884,9 +1173,7 @@ def _error_response(error: Exception) -> JSONResponse:
         status = 404 if error.code == "not_found" else 409
         return JSONResponse({"error": error.code, "message": str(error)}, status_code=status)
     if isinstance(error, (HomeAssistantOAuthServiceError, RepairEngineError, KnxSecureError)):
-        return JSONResponse(
-            {"error": "operation_rejected", "message": str(error)}, status_code=409
-        )
+        return JSONResponse({"error": "operation_rejected", "message": str(error)}, status_code=409)
     if isinstance(error, (ValueError, json.JSONDecodeError)):
         return JSONResponse(
             {"error": "invalid_request", "message": "request is invalid"}, status_code=400

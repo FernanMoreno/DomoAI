@@ -1,0 +1,4090 @@
+{
+  "src/domoai/adapters/home_assistant/mapper.py": {
+    "exists": true,
+    "sha256": "8e569dfd64bfbcb32ccaf8a910ac8429f4c2fb5189c6fd2e9717cd157e3027fe",
+    "symbols": [
+      {
+        "name": "HomeAssistantMapper",
+        "line": 16
+      },
+      {
+        "name": "_registry_values",
+        "line": 219
+      },
+      {
+        "name": "_registry_value",
+        "line": 225
+      },
+      {
+        "name": "to_snapshot",
+        "line": 19
+      },
+      {
+        "name": "_normalize_entity",
+        "line": 52
+      },
+      {
+        "name": "_source_metadata",
+        "line": 66
+      },
+      {
+        "name": "_device_type",
+        "line": 98
+      },
+      {
+        "name": "_capabilities",
+        "line": 113
+      },
+      {
+        "name": "_states",
+        "line": 200
+      }
+    ]
+  },
+  "src/domoai/adapters/home_assistant/provider.py": {
+    "exists": true,
+    "sha256": "7d7e24fe491bc155b31a59505500d4af72f71789f44c78ca171972d7e7e49509",
+    "symbols": [
+      {
+        "name": "_manifest",
+        "line": 42
+      },
+      {
+        "name": "HomeAssistantProvider",
+        "line": 143
+      },
+      {
+        "name": "_state_changed_payload",
+        "line": 1406
+      },
+      {
+        "name": "_finite_number",
+        "line": 1421
+      },
+      {
+        "name": "_merge_capabilities",
+        "line": 1425
+      },
+      {
+        "name": "_with_feature",
+        "line": 1434
+      },
+      {
+        "name": "_sensor_measurement",
+        "line": 1439
+      },
+      {
+        "name": "_on_state",
+        "line": 1450
+      },
+      {
+        "name": "_scalar",
+        "line": 1454
+      },
+      {
+        "name": "_timestamp",
+        "line": 1471
+      },
+      {
+        "name": "_optional_text",
+        "line": 1484
+      },
+      {
+        "name": "_first_text",
+        "line": 1488
+      },
+      {
+        "name": "_unique_strings",
+        "line": 1496
+      },
+      {
+        "name": "_registry_values",
+        "line": 1502
+      },
+      {
+        "name": "__init__",
+        "line": 153
+      },
+      {
+        "name": "connect",
+        "line": 196
+      },
+      {
+        "name": "disconnect",
+        "line": 201
+      },
+      {
+        "name": "discover",
+        "line": 207
+      },
+      {
+        "name": "snapshot",
+        "line": 250
+      },
+      {
+        "name": "get_measurements",
+        "line": 255
+      },
+      {
+        "name": "execute",
+        "line": 260
+      },
+      {
+        "name": "subscribe",
+        "line": 306
+      },
+      {
+        "name": "_load_snapshot",
+        "line": 323
+      },
+      {
+        "name": "_project_battery_control_capabilities",
+        "line": 337
+      },
+      {
+        "name": "_project_ev_charging_capabilities",
+        "line": 374
+      },
+      {
+        "name": "_ev_control_capability",
+        "line": 489
+      },
+      {
+        "name": "_apply_configured_canonical_ids",
+        "line": 504
+      },
+      {
+        "name": "_battery_control_capability",
+        "line": 566
+      },
+      {
+        "name": "_numeric_route_bounds",
+        "line": 581
+      },
+      {
+        "name": "_merge_entity_registry",
+        "line": 604
+      },
+      {
+        "name": "_remember_routes",
+        "line": 646
+      },
+      {
+        "name": "_resolve_configured_device_ids",
+        "line": 663
+      },
+      {
+        "name": "_resolve_dispatch_device_ids",
+        "line": 676
+      },
+      {
+        "name": "_resolve_ev_device_ids",
+        "line": 702
+      },
+      {
+        "name": "_resolve_binding_device_id",
+        "line": 721
+      },
+      {
+        "name": "_entity_matches_identity",
+        "line": 773
+      },
+      {
+        "name": "_validate_capacity_bindings",
+        "line": 782
+      },
+      {
+        "name": "validate_battery_dispatch_routes",
+        "line": 789
+      },
+      {
+        "name": "validate_ev_charging_routes",
+        "line": 874
+      },
+      {
+        "name": "_validate_ev_telemetry_route",
+        "line": 941
+      },
+      {
+        "name": "_validate_ev_connected_route",
+        "line": 984
+      },
+      {
+        "name": "_validate_battery_telemetry_route",
+        "line": 1014
+      },
+      {
+        "name": "_validate_battery_capacity_route",
+        "line": 1057
+      },
+      {
+        "name": "_validate_battery_command_route",
+        "line": 1095
+      },
+      {
+        "name": "_measurements_for_snapshot",
+        "line": 1161
+      },
+      {
+        "name": "_metric_for",
+        "line": 1232
+      },
+      {
+        "name": "semantic_capability",
+        "line": 1240
+      },
+      {
+        "name": "_normalize_entity",
+        "line": 1264
+      },
+      {
+        "name": "_translate_command",
+        "line": 1311
+      },
+      {
+        "name": "_battery_route",
+        "line": 1351
+      },
+      {
+        "name": "_ev_route",
+        "line": 1360
+      },
+      {
+        "name": "_translate_numeric_battery_route",
+        "line": 1370
+      },
+      {
+        "name": "_result",
+        "line": 1388
+      }
+    ]
+  },
+  "src/domoai/admin/cli.py": {
+    "exists": true,
+    "sha256": "7f03846526cb7f454ea79230656b8ade3204a2a8ac8c4a649d0d4daee0a57fdb",
+    "symbols": [
+      {
+        "name": "_preflight_timeout",
+        "line": 54
+      },
+      {
+        "name": "_positive_hours",
+        "line": 64
+      },
+      {
+        "name": "_parser",
+        "line": 74
+      },
+      {
+        "name": "_create_backup",
+        "line": 213
+      },
+      {
+        "name": "_restore_backup",
+        "line": 249
+      },
+      {
+        "name": "_release_stale_owner",
+        "line": 265
+      },
+      {
+        "name": "_migrate_postgres",
+        "line": 299
+      },
+      {
+        "name": "_qualify_multihost",
+        "line": 335
+      },
+      {
+        "name": "_token_command",
+        "line": 414
+      },
+      {
+        "name": "_connector_command",
+        "line": 448
+      },
+      {
+        "name": "_oauth_command",
+        "line": 494
+      },
+      {
+        "name": "_run",
+        "line": 500
+      },
+      {
+        "name": "main",
+        "line": 551
+      }
+    ]
+  },
+  "src/domoai/admin/deployment_preflight.py": {
+    "exists": true,
+    "sha256": "955f6629ac9d2ae16247383314f2b2030b1e2d82f7d6fe2886a44ed79d02b8bc",
+    "symbols": [
+      {
+        "name": "DeploymentPreflightRequest",
+        "line": 32
+      },
+      {
+        "name": "PreflightCheck",
+        "line": 48
+      },
+      {
+        "name": "DeploymentPreflightReport",
+        "line": 58
+      },
+      {
+        "name": "_check",
+        "line": 73
+      },
+      {
+        "name": "_safe_regular_file",
+        "line": 77
+      },
+      {
+        "name": "_read_text",
+        "line": 84
+      },
+      {
+        "name": "_parse_env",
+        "line": 93
+      },
+      {
+        "name": "_is_loopback",
+        "line": 121
+      },
+      {
+        "name": "_valid_url",
+        "line": 130
+      },
+      {
+        "name": "_url_port",
+        "line": 143
+      },
+      {
+        "name": "_port",
+        "line": 156
+      },
+      {
+        "name": "_validate_environment",
+        "line": 164
+      },
+      {
+        "name": "_service_block",
+        "line": 209
+      },
+      {
+        "name": "_validate_compose",
+        "line": 218
+      },
+      {
+        "name": "_validate_proxy",
+        "line": 241
+      },
+      {
+        "name": "_host_path",
+        "line": 263
+      },
+      {
+        "name": "_compose_mount_source",
+        "line": 268
+      },
+      {
+        "name": "_validate_referenced_files",
+        "line": 280
+      },
+      {
+        "name": "_client_checks",
+        "line": 316
+      },
+      {
+        "name": "_dependency_endpoints",
+        "line": 344
+      },
+      {
+        "name": "_probe",
+        "line": 372
+      },
+      {
+        "name": "_network_check",
+        "line": 388
+      },
+      {
+        "name": "run_preflight",
+        "line": 401
+      },
+      {
+        "name": "__post_init__",
+        "line": 42
+      },
+      {
+        "name": "to_dict",
+        "line": 53
+      },
+      {
+        "name": "to_dict",
+        "line": 64
+      }
+    ]
+  },
+  "src/domoai/application/authority.py": {
+    "exists": true,
+    "sha256": "65ebe5d850d34565dd0373af95a59d2b1930d0523584ecac166e92129ca85bd3",
+    "symbols": [
+      {
+        "name": "roles_from_scopes",
+        "line": 47
+      },
+      {
+        "name": "authority_from_token_claims",
+        "line": 59
+      },
+      {
+        "name": "AuthorityPolicy",
+        "line": 77
+      },
+      {
+        "name": "local_context",
+        "line": 88
+      },
+      {
+        "name": "authorize",
+        "line": 99
+      },
+      {
+        "name": "bind_plan",
+        "line": 169
+      },
+      {
+        "name": "_narrow_scope",
+        "line": 235
+      },
+      {
+        "name": "_deny",
+        "line": 259
+      }
+    ]
+  },
+  "src/domoai/application/commissioning.py": {
+    "exists": true,
+    "sha256": "b42518af3ab1107ef3f40bbf51f6268c5e2631847b1319705a243c1c2c3a82df",
+    "symbols": [
+      {
+        "name": "CommissioningPersistenceError",
+        "line": 33
+      },
+      {
+        "name": "CommissioningQualificationRepository",
+        "line": 37
+      },
+      {
+        "name": "CommissioningService",
+        "line": 47
+      },
+      {
+        "name": "_digest",
+        "line": 425
+      },
+      {
+        "name": "save",
+        "line": 38
+      },
+      {
+        "name": "__init__",
+        "line": 55
+      },
+      {
+        "name": "inspect",
+        "line": 66
+      },
+      {
+        "name": "verify_evidence",
+        "line": 92
+      },
+      {
+        "name": "_asset_types",
+        "line": 158
+      },
+      {
+        "name": "_matches",
+        "line": 172
+      },
+      {
+        "name": "_assess",
+        "line": 181
+      },
+      {
+        "name": "_route",
+        "line": 340
+      },
+      {
+        "name": "_next_actions",
+        "line": 353
+      },
+      {
+        "name": "_build_report",
+        "line": 368
+      },
+      {
+        "name": "_persist",
+        "line": 392
+      }
+    ]
+  },
+  "src/domoai/application/execution_admission.py": {
+    "exists": true,
+    "sha256": "fc4e9da1a0c9a62eadcdcc8242dceeecc3c63a1048d80f32ab87af6e905e541e",
+    "symbols": [
+      {
+        "name": "_serialized_json_bytes",
+        "line": 34
+      },
+      {
+        "name": "_bounded_audit_identifier",
+        "line": 38
+      },
+      {
+        "name": "AdmissionOperation",
+        "line": 61
+      },
+      {
+        "name": "AdmissionDecision",
+        "line": 70
+      },
+      {
+        "name": "ExecutionAdmission",
+        "line": 76
+      },
+      {
+        "name": "__init__",
+        "line": 88
+      },
+      {
+        "name": "issue_aggregate_capability",
+        "line": 106
+      },
+      {
+        "name": "admit",
+        "line": 141
+      },
+      {
+        "name": "_valid_aggregate_capability",
+        "line": 253
+      },
+      {
+        "name": "_verify_non_member_execution",
+        "line": 272
+      },
+      {
+        "name": "_verify_execution",
+        "line": 295
+      },
+      {
+        "name": "_reject_bundle_member",
+        "line": 305
+      },
+      {
+        "name": "_verify_approval",
+        "line": 332
+      }
+    ]
+  },
+  "src/domoai/application/executor.py": {
+    "exists": true,
+    "sha256": "7045a284fe2c743d49a601800d2e03dd915240735c40825bd99f6cbdb2ebeb2b",
+    "symbols": [
+      {
+        "name": "_PreflightResult",
+        "line": 59
+      },
+      {
+        "name": "_PreconditionFailure",
+        "line": 66
+      },
+      {
+        "name": "_ExecutionAttempt",
+        "line": 78
+      },
+      {
+        "name": "_ReadbackPersistenceError",
+        "line": 85
+      },
+      {
+        "name": "_ControlLeaseExpired",
+        "line": 89
+      },
+      {
+        "name": "_PhysicalIntentUnknown",
+        "line": 93
+      },
+      {
+        "name": "_PhysicalIntentConflict",
+        "line": 97
+      },
+      {
+        "name": "PlanExecutor",
+        "line": 101
+      },
+      {
+        "name": "as_payload",
+        "line": 70
+      },
+      {
+        "name": "__init__",
+        "line": 102
+      },
+      {
+        "name": "execute",
+        "line": 153
+      },
+      {
+        "name": "_execute_impl",
+        "line": 180
+      },
+      {
+        "name": "_release_control_lease",
+        "line": 894
+      },
+      {
+        "name": "_mark_unknown_after_exception",
+        "line": 926
+      },
+      {
+        "name": "_release_after_exception",
+        "line": 955
+      },
+      {
+        "name": "_safety_violation",
+        "line": 972
+      },
+      {
+        "name": "_preflight",
+        "line": 989
+      },
+      {
+        "name": "_preflight_outcomes",
+        "line": 1057
+      },
+      {
+        "name": "_failed_preconditions",
+        "line": 1086
+      },
+      {
+        "name": "_projected_postcondition",
+        "line": 1130
+      },
+      {
+        "name": "_readback",
+        "line": 1152
+      },
+      {
+        "name": "_persist_snapshot",
+        "line": 1197
+      },
+      {
+        "name": "_reconcile_post_write",
+        "line": 1214
+      },
+      {
+        "name": "_readback_until_settled",
+        "line": 1316
+      },
+      {
+        "name": "_postcondition_matches",
+        "line": 1357
+      },
+      {
+        "name": "_terminal_plan_status",
+        "line": 1414
+      }
+    ]
+  },
+  "src/domoai/application/household_queue.py": {
+    "exists": true,
+    "sha256": "134643b0d2496c86916984211464e0b762db5eb2387f3bac03439f6705037521",
+    "symbols": [
+      {
+        "name": "QueueOverloaded",
+        "line": 15
+      },
+      {
+        "name": "QueueClosed",
+        "line": 19
+      },
+      {
+        "name": "_WorkItem",
+        "line": 24
+      },
+      {
+        "name": "HouseholdWorkQueues",
+        "line": 29
+      },
+      {
+        "name": "__init__",
+        "line": 32
+      },
+      {
+        "name": "submit",
+        "line": 46
+      },
+      {
+        "name": "depths",
+        "line": 69
+      },
+      {
+        "name": "close",
+        "line": 72
+      },
+      {
+        "name": "_run",
+        "line": 89
+      }
+    ]
+  },
+  "src/domoai/application/local_automation.py": {
+    "exists": true,
+    "sha256": "a351f02def24d87291fe74e18c8d4c26ac45f42f951d006e0a65bd22c0e6303c",
+    "symbols": [
+      {
+        "name": "LocalAutomationEngine",
+        "line": 34
+      },
+      {
+        "name": "__init__",
+        "line": 37
+      },
+      {
+        "name": "_now",
+        "line": 56
+      },
+      {
+        "name": "register",
+        "line": 59
+      },
+      {
+        "name": "update",
+        "line": 78
+      },
+      {
+        "name": "set_status",
+        "line": 118
+      },
+      {
+        "name": "list_rules",
+        "line": 137
+      },
+      {
+        "name": "handle_state_event",
+        "line": 140
+      },
+      {
+        "name": "evaluate_time",
+        "line": 160
+      },
+      {
+        "name": "handle_event",
+        "line": 184
+      },
+      {
+        "name": "_execute_claimed",
+        "line": 240
+      },
+      {
+        "name": "_conditions_match",
+        "line": 298
+      },
+      {
+        "name": "_matches_trigger",
+        "line": 325
+      },
+      {
+        "name": "_assert_consent",
+        "line": 337
+      },
+      {
+        "name": "_consent_is_current",
+        "line": 349
+      },
+      {
+        "name": "_evaluation",
+        "line": 363
+      },
+      {
+        "name": "_audit_evaluation",
+        "line": 381
+      },
+      {
+        "name": "_source_event_id",
+        "line": 399
+      },
+      {
+        "name": "_safe_reason",
+        "line": 409
+      }
+    ]
+  },
+  "src/domoai/application/runtime_factory.py": {
+    "exists": true,
+    "sha256": "24a1f0a472089e12a15cde4a0502324dfd8a44b626004ff0f81bc00535daf2cb",
+    "symbols": [
+      {
+        "name": "create_adapter",
+        "line": 170
+      },
+      {
+        "name": "_select_control_adapter",
+        "line": 217
+      },
+      {
+        "name": "_select_provider_adapter",
+        "line": 226
+      },
+      {
+        "name": "_close_partial_runtime_build",
+        "line": 244
+      },
+      {
+        "name": "_PartialRuntimeBuild",
+        "line": 297
+      },
+      {
+        "name": "_close_partial_runtime_build_safely",
+        "line": 332
+      },
+      {
+        "name": "_matching_home_assistant_ev_mappings",
+        "line": 344
+      },
+      {
+        "name": "_home_assistant_oauth_config",
+        "line": 362
+      },
+      {
+        "name": "_create_configured_adapters",
+        "line": 385
+      },
+      {
+        "name": "_create_energy_context_provider",
+        "line": 571
+      },
+      {
+        "name": "ClosableWorker",
+        "line": 616
+      },
+      {
+        "name": "RuntimeComposition",
+        "line": 629
+      },
+      {
+        "name": "_battery_operational_status",
+        "line": 879
+      },
+      {
+        "name": "build_runtime",
+        "line": 907
+      },
+      {
+        "name": "_build_runtime",
+        "line": 950
+      },
+      {
+        "name": "attempt",
+        "line": 260
+      },
+      {
+        "name": "close",
+        "line": 313
+      },
+      {
+        "name": "close",
+        "line": 622
+      },
+      {
+        "name": "__post_init__",
+        "line": 700
+      },
+      {
+        "name": "battery_supervisor_task",
+        "line": 719
+      },
+      {
+        "name": "start",
+        "line": 724
+      },
+      {
+        "name": "create_backup",
+        "line": 727
+      },
+      {
+        "name": "register_blocking_worker",
+        "line": 749
+      },
+      {
+        "name": "run_battery_control_supervisor",
+        "line": 764
+      },
+      {
+        "name": "run_control_supervisor",
+        "line": 782
+      },
+      {
+        "name": "run_coordination_supervisor",
+        "line": 805
+      },
+      {
+        "name": "run_audit_outbox_dispatcher",
+        "line": 824
+      },
+      {
+        "name": "close",
+        "line": 840
+      },
+      {
+        "name": "reconcile_runtime",
+        "line": 1491
+      }
+    ]
+  },
+  "src/domoai/application/runtime_lifecycle.py": {
+    "exists": true,
+    "sha256": "0c0571b59bc7ceb1f010ebceef239cb609406532b7b4f443017dbe54131d0d29",
+    "symbols": [
+      {
+        "name": "RuntimeLifecycle",
+        "line": 13
+      },
+      {
+        "name": "running_task_count",
+        "line": 27
+      },
+      {
+        "name": "started",
+        "line": 31
+      },
+      {
+        "name": "closed",
+        "line": 35
+      },
+      {
+        "name": "task",
+        "line": 38
+      },
+      {
+        "name": "start",
+        "line": 44
+      },
+      {
+        "name": "close",
+        "line": 64
+      }
+    ]
+  },
+  "src/domoai/application/scene.py": {
+    "exists": true,
+    "sha256": "b46d36f8b51e3fec9dec0aaf761293c1e28d050e42b2aadf942d96f9c0da345d",
+    "symbols": [
+      {
+        "name": "SceneCommitRequest",
+        "line": 14
+      },
+      {
+        "name": "scene_commit_digest",
+        "line": 25
+      }
+    ]
+  },
+  "src/domoai/application/state_refresher.py": {
+    "exists": true,
+    "sha256": "4b6a0fc6674bae81461f6e87d208a1e62111fd4e6eb08214bd5f1f9ef113e539",
+    "symbols": [
+      {
+        "name": "RuntimeStateRefresher",
+        "line": 17
+      },
+      {
+        "name": "__init__",
+        "line": 20
+      },
+      {
+        "name": "refresh_once",
+        "line": 76
+      },
+      {
+        "name": "_run_retention_maintenance",
+        "line": 100
+      },
+      {
+        "name": "_inventory_refresh_due",
+        "line": 121
+      },
+      {
+        "name": "_refresh_polled_state",
+        "line": 125
+      },
+      {
+        "name": "_refresh_static_state",
+        "line": 132
+      },
+      {
+        "name": "_refresh_inventory",
+        "line": 145
+      },
+      {
+        "name": "_mark_disconnected_sources",
+        "line": 158
+      },
+      {
+        "name": "run",
+        "line": 187
+      },
+      {
+        "name": "_mark_sources_unavailable",
+        "line": 198
+      },
+      {
+        "name": "_mark_source_unavailable",
+        "line": 223
+      }
+    ]
+  },
+  "src/domoai/domain/automation.py": {
+    "exists": true,
+    "sha256": "85764feb5fb1ca7922d6632bbbdf3e2e2495cac0817df931e2e5dca20867b8ca",
+    "symbols": [
+      {
+        "name": "AutomationRuleStatus",
+        "line": 23
+      },
+      {
+        "name": "AutomationTrigger",
+        "line": 29
+      },
+      {
+        "name": "AutomationCondition",
+        "line": 60
+      },
+      {
+        "name": "AutomationConsent",
+        "line": 67
+      },
+      {
+        "name": "AutomationRule",
+        "line": 87
+      },
+      {
+        "name": "AutomationEvent",
+        "line": 125
+      },
+      {
+        "name": "AutomationEvaluation",
+        "line": 157
+      },
+      {
+        "name": "automation_rule_digest",
+        "line": 166
+      },
+      {
+        "name": "validate_shape",
+        "line": 38
+      },
+      {
+        "name": "validate_window",
+        "line": 77
+      },
+      {
+        "name": "validate_template",
+        "line": 102
+      },
+      {
+        "name": "validate_event",
+        "line": 134
+      }
+    ]
+  },
+  "src/domoai/domain/models.py": {
+    "exists": true,
+    "sha256": "bc6d223b2dba63199ef95459d2601870b1f4b6975d4f1a44ac46b81649905306",
+    "symbols": [
+      {
+        "name": "StrictModel",
+        "line": 25
+      },
+      {
+        "name": "AvailabilityMode",
+        "line": 33
+      },
+      {
+        "name": "CommissioningRequirement",
+        "line": 40
+      },
+      {
+        "name": "CapabilityGuarantees",
+        "line": 48
+      },
+      {
+        "name": "PrincipalRole",
+        "line": 84
+      },
+      {
+        "name": "AuthorityContext",
+        "line": 94
+      },
+      {
+        "name": "DeviceType",
+        "line": 134
+      },
+      {
+        "name": "AvailabilityStatus",
+        "line": 145
+      },
+      {
+        "name": "StateStatus",
+        "line": 152
+      },
+      {
+        "name": "SourceOrderingPolicy",
+        "line": 159
+      },
+      {
+        "name": "SourceCursor",
+        "line": 164
+      },
+      {
+        "name": "ControlLeaseStatus",
+        "line": 172
+      },
+      {
+        "name": "CapabilityKind",
+        "line": 180
+      },
+      {
+        "name": "RiskClass",
+        "line": 189
+      },
+      {
+        "name": "PolicyAction",
+        "line": 195
+      },
+      {
+        "name": "PlanStatus",
+        "line": 201
+      },
+      {
+        "name": "ValidationStatus",
+        "line": 215
+      },
+      {
+        "name": "DependencyKind",
+        "line": 222
+      },
+      {
+        "name": "ExecutionStatus",
+        "line": 228
+      },
+      {
+        "name": "BundleCommitStatus",
+        "line": 238
+      },
+      {
+        "name": "BundleMemberCommitStatus",
+        "line": 248
+      },
+      {
+        "name": "SourceRef",
+        "line": 262
+      },
+      {
+        "name": "Area",
+        "line": 277
+      },
+      {
+        "name": "Capability",
+        "line": 284
+      },
+      {
+        "name": "Device",
+        "line": 337
+      },
+      {
+        "name": "StateSnapshot",
+        "line": 361
+      },
+      {
+        "name": "ExecutionWindow",
+        "line": 398
+      },
+      {
+        "name": "Precondition",
+        "line": 438
+      },
+      {
+        "name": "SafetyLimit",
+        "line": 445
+      },
+      {
+        "name": "CommandPostcondition",
+        "line": 460
+      },
+      {
+        "name": "Command",
+        "line": 515
+      },
+      {
+        "name": "ErrorDetail",
+        "line": 528
+      },
+      {
+        "name": "PlanDependencies",
+        "line": 538
+      },
+      {
+        "name": "ValidationResult",
+        "line": 546
+      },
+      {
+        "name": "Policy",
+        "line": 556
+      },
+      {
+        "name": "PolicyDecision",
+        "line": 566
+      },
+      {
+        "name": "Approval",
+        "line": 573
+      },
+      {
+        "name": "ExecutionOutcome",
+        "line": 615
+      },
+      {
+        "name": "ExecutionSummary",
+        "line": 629
+      },
+      {
+        "name": "execution_outcome_digest",
+        "line": 633
+      },
+      {
+        "name": "PlanExecutionLease",
+        "line": 644
+      },
+      {
+        "name": "ControlLease",
+        "line": 661
+      },
+      {
+        "name": "PhysicalBaseline",
+        "line": 682
+      },
+      {
+        "name": "TakeoverResult",
+        "line": 705
+      },
+      {
+        "name": "ExecutionDependencyEvidence",
+        "line": 738
+      },
+      {
+        "name": "execution_dependency_evidence_digest",
+        "line": 770
+      },
+      {
+        "name": "BundleMemberCommit",
+        "line": 798
+      },
+      {
+        "name": "BundleCommit",
+        "line": 830
+      },
+      {
+        "name": "AggregateExecutionCapability",
+        "line": 855
+      },
+      {
+        "name": "Plan",
+        "line": 872
+      },
+      {
+        "name": "RecurrenceRule",
+        "line": 922
+      },
+      {
+        "name": "AuditEvent",
+        "line": 944
+      },
+      {
+        "name": "AdapterSnapshot",
+        "line": 974
+      },
+      {
+        "name": "AdapterHealth",
+        "line": 981
+      },
+      {
+        "name": "AdapterIdentityObservation",
+        "line": 988
+      },
+      {
+        "name": "AdapterExecutionAck",
+        "line": 1003
+      },
+      {
+        "name": "StateChangedEvent",
+        "line": 1009
+      },
+      {
+        "name": "AvailabilityChangedEvent",
+        "line": 1042
+      },
+      {
+        "name": "DeviceMembershipChangedEvent",
+        "line": 1064
+      },
+      {
+        "name": "MetadataChangedEvent",
+        "line": 1088
+      },
+      {
+        "name": "AdapterDiagnosticEvent",
+        "line": 1112
+      },
+      {
+        "name": "_decode_event_payload",
+        "line": 1145
+      },
+      {
+        "name": "validate_values",
+        "line": 68
+      },
+      {
+        "name": "validate_scope_values",
+        "line": 115
+      },
+      {
+        "name": "validate_value_domain",
+        "line": 301
+      },
+      {
+        "name": "validate_source_refs",
+        "line": 354
+      },
+      {
+        "name": "validate_timestamps",
+        "line": 374
+      },
+      {
+        "name": "validate_window",
+        "line": 408
+      },
+      {
+        "name": "canonical_payload",
+        "line": 420
+      },
+      {
+        "name": "digest",
+        "line": 433
+      },
+      {
+        "name": "validate_bounds",
+        "line": 452
+      },
+      {
+        "name": "validate_tolerance",
+        "line": 472
+      },
+      {
+        "name": "validate_settling",
+        "line": 493
+      },
+      {
+        "name": "validate_reconciliation",
+        "line": 507
+      },
+      {
+        "name": "validate_expiry",
+        "line": 593
+      },
+      {
+        "name": "require_aware_expiry",
+        "line": 655
+      },
+      {
+        "name": "validate_window",
+        "line": 674
+      },
+      {
+        "name": "validate_observation",
+        "line": 695
+      },
+      {
+        "name": "validate_result",
+        "line": 724
+      },
+      {
+        "name": "validate_capture_time",
+        "line": 750
+      },
+      {
+        "name": "validate_execute_at",
+        "line": 812
+      },
+      {
+        "name": "all_predecessor_plan_ids",
+        "line": 826
+      },
+      {
+        "name": "validate_timestamps",
+        "line": 845
+      },
+      {
+        "name": "validate_expiry",
+        "line": 866
+      },
+      {
+        "name": "validate_timestamps",
+        "line": 901
+      },
+      {
+        "name": "validate_days_of_week",
+        "line": 933
+      },
+      {
+        "name": "serialize_compactly",
+        "line": 954
+      },
+      {
+        "name": "validate_observation",
+        "line": 997
+      },
+      {
+        "name": "decode_legacy_payload",
+        "line": 1025
+      },
+      {
+        "name": "decode_legacy_payload",
+        "line": 1052
+      },
+      {
+        "name": "decode_legacy_payload",
+        "line": 1075
+      },
+      {
+        "name": "decode_legacy_payload",
+        "line": 1099
+      },
+      {
+        "name": "decode_legacy_payload",
+        "line": 1123
+      },
+      {
+        "name": "canonical",
+        "line": 421
+      }
+    ]
+  },
+  "src/domoai/domain/product.py": {
+    "exists": true,
+    "sha256": "7d470549e6edf0379594167f8a446ee51f63e92f017bd750959110cacb1402ac",
+    "symbols": [
+      {
+        "name": "ProductAlternative",
+        "line": 10
+      },
+      {
+        "name": "ProductSummary",
+        "line": 17
+      },
+      {
+        "name": "ScenarioComparisonVariation",
+        "line": 39
+      },
+      {
+        "name": "ScenarioComparison",
+        "line": 48
+      }
+    ]
+  },
+  "src/domoai/management/api.py": {
+    "exists": true,
+    "sha256": "9937231c0403bafc464ea5994c368f3b3333ed9259dfdfe2b3c0f96469084c5f",
+    "symbols": [
+      {
+        "name": "_RequestBudgetExceeded",
+        "line": 62
+      },
+      {
+        "name": "create_management_app",
+        "line": 68
+      },
+      {
+        "name": "_json_body",
+        "line": 758
+      },
+      {
+        "name": "_validate_json_shape",
+        "line": 790
+      },
+      {
+        "name": "_log_body_rejection",
+        "line": 827
+      },
+      {
+        "name": "_required_string",
+        "line": 837
+      },
+      {
+        "name": "_body_uuid",
+        "line": 844
+      },
+      {
+        "name": "_same_origin",
+        "line": 852
+      },
+      {
+        "name": "_bearer_token",
+        "line": 861
+      },
+      {
+        "name": "_audit_management_decision",
+        "line": 870
+      },
+      {
+        "name": "_profile",
+        "line": 901
+      },
+      {
+        "name": "_path_uuid",
+        "line": 905
+      },
+      {
+        "name": "_setup_for",
+        "line": 910
+      },
+      {
+        "name": "_profile_payload",
+        "line": 930
+      },
+      {
+        "name": "_manual_candidate_id",
+        "line": 946
+      },
+      {
+        "name": "_oauth_config",
+        "line": 957
+      },
+      {
+        "name": "_oauth_config_optional",
+        "line": 968
+      },
+      {
+        "name": "_oauth_config_for_start",
+        "line": 981
+      },
+      {
+        "name": "_oauth_record",
+        "line": 1027
+      },
+      {
+        "name": "_model_payload",
+        "line": 1034
+      },
+      {
+        "name": "_error_response",
+        "line": 1043
+      },
+      {
+        "name": "__init__",
+        "line": 63
+      },
+      {
+        "name": "protected",
+        "line": 103
+      },
+      {
+        "name": "ui",
+        "line": 155
+      },
+      {
+        "name": "list_connections",
+        "line": 158
+      },
+      {
+        "name": "list_provider_catalog",
+        "line": 162
+      },
+      {
+        "name": "discover",
+        "line": 180
+      },
+      {
+        "name": "setup_session",
+        "line": 190
+      },
+      {
+        "name": "create_connection",
+        "line": 246
+      },
+      {
+        "name": "validate_connection",
+        "line": 290
+      },
+      {
+        "name": "operation",
+        "line": 298
+      },
+      {
+        "name": "reconfigure",
+        "line": 313
+      },
+      {
+        "name": "diagnostics",
+        "line": 334
+      },
+      {
+        "name": "import_legacy",
+        "line": 341
+      },
+      {
+        "name": "mqtt_discovery_preview",
+        "line": 357
+      },
+      {
+        "name": "ets_preview",
+        "line": 368
+      },
+      {
+        "name": "ets_persist",
+        "line": 377
+      },
+      {
+        "name": "knx_secure_rotate",
+        "line": 399
+      },
+      {
+        "name": "knx_secure_diagnostics",
+        "line": 425
+      },
+      {
+        "name": "oauth_start",
+        "line": 435
+      },
+      {
+        "name": "oauth_callback",
+        "line": 452
+      },
+      {
+        "name": "oauth_discover",
+        "line": 468
+      },
+      {
+        "name": "oauth_refresh",
+        "line": 487
+      },
+      {
+        "name": "oauth_revoke",
+        "line": 502
+      },
+      {
+        "name": "oauth_migrate",
+        "line": 515
+      },
+      {
+        "name": "oauth_reauth",
+        "line": 528
+      },
+      {
+        "name": "repair_plan",
+        "line": 549
+      },
+      {
+        "name": "repair_execute",
+        "line": 560
+      },
+      {
+        "name": "mqtt_discovery_persist",
+        "line": 591
+      },
+      {
+        "name": "matter_commissioning_start",
+        "line": 613
+      },
+      {
+        "name": "matter_commissioning_action",
+        "line": 652
+      },
+      {
+        "name": "delete_connection",
+        "line": 671
+      }
+    ]
+  },
+  "src/domoai/management/auth.py": {
+    "exists": true,
+    "sha256": "b8afe0f3bc31a181f89169c478246a3376c545bcdf41b8accc059ce76546811a",
+    "symbols": [
+      {
+        "name": "is_loopback_host",
+        "line": 29
+      },
+      {
+        "name": "ManagementAuth",
+        "line": 38
+      },
+      {
+        "name": "ManagementPrincipal",
+        "line": 72
+      },
+      {
+        "name": "required_management_scope",
+        "line": 110
+      },
+      {
+        "name": "authority_operation_for_scope",
+        "line": 124
+      },
+      {
+        "name": "__init__",
+        "line": 39
+      },
+      {
+        "name": "authorized",
+        "line": 58
+      },
+      {
+        "name": "from_access_token",
+        "line": 80
+      },
+      {
+        "name": "static",
+        "line": 92
+      },
+      {
+        "name": "allows",
+        "line": 103
+      }
+    ]
+  },
+  "src/domoai/management/ui.py": {
+    "exists": true,
+    "sha256": "e4136e6c3479142058c2589bb53a3adb4eb45e12dcdb32576376c55fa6fbfe50",
+    "symbols": [
+      {
+        "name": "first_install_page",
+        "line": 8
+      }
+    ]
+  },
+  "src/domoai/mcp/auth.py": {
+    "exists": true,
+    "sha256": "06a20a059bbce8a31d3edb730795fb0b3b6d1fede0f97de142ec620de78383e4",
+    "symbols": [
+      {
+        "name": "ClientTokenRecord",
+        "line": 20
+      },
+      {
+        "name": "ClientTokenDocument",
+        "line": 66
+      },
+      {
+        "name": "StaticBearerTokenVerifier",
+        "line": 83
+      },
+      {
+        "name": "require_client_scope",
+        "line": 159
+      },
+      {
+        "name": "authority_from_access_token",
+        "line": 171
+      },
+      {
+        "name": "_roles_from_scopes",
+        "line": 181
+      },
+      {
+        "name": "current_access_token",
+        "line": 187
+      },
+      {
+        "name": "current_client_id",
+        "line": 195
+      },
+      {
+        "name": "current_authority",
+        "line": 202
+      },
+      {
+        "name": "validate_expiry",
+        "line": 41
+      },
+      {
+        "name": "validate_unique_clients",
+        "line": 72
+      },
+      {
+        "name": "_load_records",
+        "line": 90
+      },
+      {
+        "name": "from_file",
+        "line": 95
+      },
+      {
+        "name": "reload",
+        "line": 102
+      },
+      {
+        "name": "verify_token",
+        "line": 113
+      },
+      {
+        "name": "__repr__",
+        "line": 155
+      }
+    ]
+  },
+  "src/domoai/mcp/domotics_server.py": {
+    "exists": true,
+    "sha256": "bc1509d60e2b174d0edb5d07db68a422dccfe448e80e60ab1f8ed69f9f5a0a7d",
+    "symbols": [
+      {
+        "name": "DomoticsMcpContext",
+        "line": 79
+      },
+      {
+        "name": "_parse_timezone_aware_datetime",
+        "line": 111
+      },
+      {
+        "name": "_require_mutation_scope",
+        "line": 118
+      },
+      {
+        "name": "_authority_policy",
+        "line": 122
+      },
+      {
+        "name": "_authorize_mutation",
+        "line": 127
+      },
+      {
+        "name": "_authorize_read",
+        "line": 152
+      },
+      {
+        "name": "_visible_devices",
+        "line": 177
+      },
+      {
+        "name": "_bind_request_plan",
+        "line": 189
+      },
+      {
+        "name": "_authorize_existing_plan",
+        "line": 204
+      },
+      {
+        "name": "_audit_client_request",
+        "line": 225
+      },
+      {
+        "name": "_resolve_plan",
+        "line": 239
+      },
+      {
+        "name": "_admit_mcp_operation",
+        "line": 248
+      },
+      {
+        "name": "_persist_plan",
+        "line": 268
+      },
+      {
+        "name": "_persist_validated_plan",
+        "line": 275
+      },
+      {
+        "name": "_command_validation_response",
+        "line": 282
+      },
+      {
+        "name": "_plan_validation_response",
+        "line": 296
+      },
+      {
+        "name": "_validate_command",
+        "line": 309
+      },
+      {
+        "name": "_validate_plan",
+        "line": 331
+      },
+      {
+        "name": "_persist_approved_plan",
+        "line": 346
+      },
+      {
+        "name": "register_domotics_tools",
+        "line": 353
+      },
+      {
+        "name": "create_domotics_server",
+        "line": 1826
+      },
+      {
+        "name": "discover_devices",
+        "line": 365
+      },
+      {
+        "name": "get_state",
+        "line": 514
+      },
+      {
+        "name": "get_history",
+        "line": 550
+      },
+      {
+        "name": "get_energy_context",
+        "line": 614
+      },
+      {
+        "name": "preview_command",
+        "line": 660
+      },
+      {
+        "name": "prepare_command",
+        "line": 675
+      },
+      {
+        "name": "preview_plan",
+        "line": 692
+      },
+      {
+        "name": "prepare_plan",
+        "line": 705
+      },
+      {
+        "name": "validate_command",
+        "line": 722
+      },
+      {
+        "name": "validate_plan",
+        "line": 741
+      },
+      {
+        "name": "request_approval",
+        "line": 765
+      },
+      {
+        "name": "execute_plan",
+        "line": 839
+      },
+      {
+        "name": "schedule_plan",
+        "line": 897
+      },
+      {
+        "name": "cancel_scheduled_plan",
+        "line": 1129
+      },
+      {
+        "name": "reschedule_plan",
+        "line": 1157
+      },
+      {
+        "name": "list_scheduled_plans",
+        "line": 1219
+      },
+      {
+        "name": "schedule_recurring_plan",
+        "line": 1264
+      },
+      {
+        "name": "cancel_recurring_schedule",
+        "line": 1370
+      },
+      {
+        "name": "list_recurring_schedules",
+        "line": 1389
+      },
+      {
+        "name": "create_local_automation_rule",
+        "line": 1430
+      },
+      {
+        "name": "update_local_automation_rule",
+        "line": 1497
+      },
+      {
+        "name": "list_local_automation_rules",
+        "line": 1562
+      },
+      {
+        "name": "set_local_automation_status",
+        "line": 1611
+      },
+      {
+        "name": "list_audit_events",
+        "line": 1636
+      },
+      {
+        "name": "areas_resource",
+        "line": 1668
+      },
+      {
+        "name": "capabilities_resource",
+        "line": 1686
+      },
+      {
+        "name": "coverage_resource",
+        "line": 1700
+      },
+      {
+        "name": "devices_resource",
+        "line": 1715
+      },
+      {
+        "name": "energy_resource",
+        "line": 1730
+      },
+      {
+        "name": "policies_resource",
+        "line": 1744
+      },
+      {
+        "name": "metrics_resource",
+        "line": 1757
+      },
+      {
+        "name": "runtime_resource",
+        "line": 1768
+      },
+      {
+        "name": "discover_domotics_inventory_prompt",
+        "line": 1803
+      },
+      {
+        "name": "diagnose_domotics_device_prompt",
+        "line": 1810
+      },
+      {
+        "name": "prepare_energy_plan_prompt",
+        "line": 1817
+      },
+      {
+        "name": "inspect_commissioning",
+        "line": 404
+      },
+      {
+        "name": "verify_commissioning",
+        "line": 433
+      },
+      {
+        "name": "export_household_data",
+        "line": 466
+      },
+      {
+        "name": "delete_household_data",
+        "line": 493
+      },
+      {
+        "name": "commit_or_schedule_bundle",
+        "line": 981
+      },
+      {
+        "name": "execute_scene",
+        "line": 1034
+      },
+      {
+        "name": "commissioning_resource",
+        "line": 1786
+      }
+    ]
+  },
+  "src/domoai/mcp/gateway.py": {
+    "exists": true,
+    "sha256": "e93830b6f2eff74d0a3d03b17a939c7d49b6bacfa26e29fd839811a1ea116e16",
+    "symbols": [
+      {
+        "name": "create_gateway_server",
+        "line": 32
+      },
+      {
+        "name": "GatewayApplication",
+        "line": 44
+      },
+      {
+        "name": "_terminate_active_http_sessions",
+        "line": 144
+      },
+      {
+        "name": "_RejectServerSentEventsMiddleware",
+        "line": 163
+      },
+      {
+        "name": "_close_gateway_safely",
+        "line": 241
+      },
+      {
+        "name": "build_gateway",
+        "line": 264
+      },
+      {
+        "name": "run_gateway",
+        "line": 294
+      },
+      {
+        "name": "_handle_sigterm",
+        "line": 306
+      },
+      {
+        "name": "main",
+        "line": 312
+      },
+      {
+        "name": "__post_init__",
+        "line": 51
+      },
+      {
+        "name": "app",
+        "line": 117
+      },
+      {
+        "name": "start",
+        "line": 120
+      },
+      {
+        "name": "close",
+        "line": 123
+      },
+      {
+        "name": "close_http_sessions",
+        "line": 127
+      },
+      {
+        "name": "http_client",
+        "line": 133
+      },
+      {
+        "name": "__init__",
+        "line": 175
+      },
+      {
+        "name": "_matches",
+        "line": 189
+      },
+      {
+        "name": "__call__",
+        "line": 200
+      },
+      {
+        "name": "managed_lifespan",
+        "line": 102
+      },
+      {
+        "name": "verify_management_token",
+        "line": 64
+      }
+    ]
+  },
+  "src/domoai/mcp/health.py": {
+    "exists": true,
+    "sha256": "3ab9fd6389f69fef71710febb737478899197f5658d40443ffd5fffa68ac98a2",
+    "symbols": [
+      {
+        "name": "_adapter_health",
+        "line": 12
+      },
+      {
+        "name": "_safe_adapter_health",
+        "line": 21
+      },
+      {
+        "name": "_freshness_report",
+        "line": 49
+      },
+      {
+        "name": "_physical_readiness",
+        "line": 69
+      },
+      {
+        "name": "_physical_source_count",
+        "line": 81
+      },
+      {
+        "name": "healthz",
+        "line": 94
+      },
+      {
+        "name": "readyz",
+        "line": 100
+      }
+    ]
+  },
+  "src/domoai/mcp/ortools_server.py": {
+    "exists": true,
+    "sha256": "fb61dfa587070b10943eff36c489d0651fafd9abb765924686fff27b449c9bd9",
+    "symbols": [
+      {
+        "name": "OptimizationExplanation",
+        "line": 46
+      },
+      {
+        "name": "OrtoolsMcpContext",
+        "line": 66
+      },
+      {
+        "name": "_request_authority",
+        "line": 79
+      },
+      {
+        "name": "_authorize_resources",
+        "line": 83
+      },
+      {
+        "name": "_scenario_resources",
+        "line": 107
+      },
+      {
+        "name": "_authorize_scenario",
+        "line": 144
+      },
+      {
+        "name": "_plan_resources",
+        "line": 149
+      },
+      {
+        "name": "_authorize_result",
+        "line": 162
+      },
+      {
+        "name": "explain_result",
+        "line": 173
+      },
+      {
+        "name": "_forecast_assumptions",
+        "line": 278
+      },
+      {
+        "name": "register_ortools_tools",
+        "line": 292
+      },
+      {
+        "name": "create_ortools_server",
+        "line": 485
+      },
+      {
+        "name": "runtime_revision",
+        "line": 75
+      },
+      {
+        "name": "add",
+        "line": 111
+      },
+      {
+        "name": "validate_scenario",
+        "line": 309
+      },
+      {
+        "name": "optimize_scenario",
+        "line": 334
+      },
+      {
+        "name": "explain_solution",
+        "line": 374
+      },
+      {
+        "name": "summarize_solution",
+        "line": 391
+      },
+      {
+        "name": "compare_scenarios",
+        "line": 409
+      }
+    ]
+  },
+  "src/domoai/mcp/resources.py": {
+    "exists": true,
+    "sha256": "fcef879997d74a9e42c2b876d178d277760645893c37e2107f0a014bff3499b1",
+    "symbols": [
+      {
+        "name": "inventory_snapshot",
+        "line": 14
+      },
+      {
+        "name": "capabilities_snapshot",
+        "line": 38
+      },
+      {
+        "name": "runtime_snapshot",
+        "line": 62
+      },
+      {
+        "name": "coverage_snapshot",
+        "line": 109
+      },
+      {
+        "name": "policies_snapshot",
+        "line": 154
+      },
+      {
+        "name": "energy_snapshot",
+        "line": 164
+      },
+      {
+        "name": "energy_context_snapshot",
+        "line": 186
+      },
+      {
+        "name": "as_json",
+        "line": 196
+      }
+    ]
+  },
+  "src/domoai/optimizer/counterfactual.py": {
+    "exists": true,
+    "sha256": "36393650fd753dd9eeede48f21a994c32339aa4779a0948dc377e6dfc984bb3f",
+    "symbols": [
+      {
+        "name": "VariationOutcome",
+        "line": 25
+      },
+      {
+        "name": "CounterfactualResult",
+        "line": 30
+      },
+      {
+        "name": "ScenarioComparisonRequest",
+        "line": 35
+      },
+      {
+        "name": "AsyncOptimizerPort",
+        "line": 42
+      },
+      {
+        "name": "_diff",
+        "line": 46
+      },
+      {
+        "name": "CounterfactualAnalyzer",
+        "line": 55
+      },
+      {
+        "name": "optimize",
+        "line": 43
+      },
+      {
+        "name": "__init__",
+        "line": 58
+      },
+      {
+        "name": "compare",
+        "line": 61
+      },
+      {
+        "name": "compare_async",
+        "line": 78
+      }
+    ]
+  },
+  "src/domoai/optimizer/cp_sat.py": {
+    "exists": true,
+    "sha256": "27e052988faaf32076ae2815f1760a2c62964f9c00b1e0bd3f65eac48059ae8e",
+    "symbols": [
+      {
+        "name": "CpSatOptimizer",
+        "line": 34
+      },
+      {
+        "name": "solve_validated_scenario",
+        "line": 50
+      },
+      {
+        "name": "_optimize_legacy",
+        "line": 69
+      },
+      {
+        "name": "_optimize_energy",
+        "line": 129
+      },
+      {
+        "name": "_start_variables",
+        "line": 604
+      },
+      {
+        "name": "_active_load_terms",
+        "line": 622
+      },
+      {
+        "name": "_add_energy_constraints",
+        "line": 639
+      },
+      {
+        "name": "_add_terminal_soc_constraints",
+        "line": 706
+      },
+      {
+        "name": "_objective_terms",
+        "line": 736
+      },
+      {
+        "name": "_energy_objective_tiers",
+        "line": 808
+      },
+      {
+        "name": "_solve_tiers",
+        "line": 816
+      },
+      {
+        "name": "_scenario_fingerprint",
+        "line": 925
+      },
+      {
+        "name": "_reported_soft_violations",
+        "line": 930
+      },
+      {
+        "name": "_load_power",
+        "line": 944
+      },
+      {
+        "name": "_selected_slots",
+        "line": 953
+      },
+      {
+        "name": "_proposal_plan",
+        "line": 960
+      },
+      {
+        "name": "_solve",
+        "line": 1263
+      },
+      {
+        "name": "_failure_result",
+        "line": 1271
+      },
+      {
+        "name": "_status",
+        "line": 1305
+      },
+      {
+        "name": "_status_for_tiers",
+        "line": 1309
+      },
+      {
+        "name": "to_solver_int",
+        "line": 1315
+      },
+      {
+        "name": "to_energy_int",
+        "line": 1323
+      },
+      {
+        "name": "to_temperature_int",
+        "line": 1327
+      },
+      {
+        "name": "_objective_weight",
+        "line": 1331
+      },
+      {
+        "name": "__init__",
+        "line": 35
+      },
+      {
+        "name": "optimize",
+        "line": 38
+      },
+      {
+        "name": "_slot_execute_at",
+        "line": 968
+      }
+    ]
+  },
+  "src/domoai/optimizer/energy.py": {
+    "exists": true,
+    "sha256": "acfca2dae0ca592383c92423e62fd6ade878d210d486b3ede9f3d07d15c84ae9",
+    "symbols": [
+      {
+        "name": "TariffPoint",
+        "line": 30
+      },
+      {
+        "name": "ConfidenceBand",
+        "line": 39
+      },
+      {
+        "name": "SolarForecastPoint",
+        "line": 50
+      },
+      {
+        "name": "ExteriorTemperaturePoint",
+        "line": 65
+      },
+      {
+        "name": "BaseLoadPoint",
+        "line": 71
+      },
+      {
+        "name": "EVState",
+        "line": 86
+      },
+      {
+        "name": "EnergyContext",
+        "line": 115
+      },
+      {
+        "name": "StaticEnergyContextProvider",
+        "line": 179
+      },
+      {
+        "name": "validate_bounds",
+        "line": 44
+      },
+      {
+        "name": "validate_confidence",
+        "line": 57
+      },
+      {
+        "name": "validate_confidence",
+        "line": 78
+      },
+      {
+        "name": "validate_state",
+        "line": 103
+      },
+      {
+        "name": "validate_series",
+        "line": 132
+      },
+      {
+        "name": "__init__",
+        "line": 182
+      },
+      {
+        "name": "get_context",
+        "line": 185
+      }
+    ]
+  },
+  "src/domoai/optimizer/ports.py": {
+    "exists": true,
+    "sha256": "629b0ab70f8954fc49192187cb9737755f2996560ea26c5c8996c4077b8f92d9",
+    "symbols": [
+      {
+        "name": "OptimizationStatus",
+        "line": 16
+      },
+      {
+        "name": "SolvedTier",
+        "line": 28
+      },
+      {
+        "name": "SolverEvidence",
+        "line": 41
+      },
+      {
+        "name": "AlternativeEvidence",
+        "line": 53
+      },
+      {
+        "name": "OptimizationResult",
+        "line": 61
+      },
+      {
+        "name": "OptimizerPort",
+        "line": 76
+      },
+      {
+        "name": "BoundedOptimizerWorkerPort",
+        "line": 80
+      },
+      {
+        "name": "EnergyContextProvider",
+        "line": 89
+      },
+      {
+        "name": "build_result",
+        "line": 95
+      },
+      {
+        "name": "optimize",
+        "line": 77
+      },
+      {
+        "name": "optimize",
+        "line": 86
+      },
+      {
+        "name": "get_context",
+        "line": 92
+      }
+    ]
+  },
+  "src/domoai/optimizer/product.py": {
+    "exists": true,
+    "sha256": "7b504175823362a7d0bab463511ff1919b3184293c85bcf2b0e3fba068006bee",
+    "symbols": [
+      {
+        "name": "build_product_summary",
+        "line": 18
+      }
+    ]
+  },
+  "src/domoai/optimizer/providers.py": {
+    "exists": true,
+    "sha256": "ca38191aeadef8000f35e62974bf1f99035fce9970f39c7460233b2ffec28490",
+    "symbols": [
+      {
+        "name": "_validate_slots",
+        "line": 44
+      },
+      {
+        "name": "ProviderMetadata",
+        "line": 61
+      },
+      {
+        "name": "TariffSeries",
+        "line": 77
+      },
+      {
+        "name": "SolarForecastSeries",
+        "line": 88
+      },
+      {
+        "name": "ExteriorTemperatureSeries",
+        "line": 99
+      },
+      {
+        "name": "BatteryState",
+        "line": 110
+      },
+      {
+        "name": "EnergyProviderDiagnostic",
+        "line": 140
+      },
+      {
+        "name": "EnergyProviderError",
+        "line": 151
+      },
+      {
+        "name": "validate_nominal_capacity_trust",
+        "line": 159
+      },
+      {
+        "name": "battery_capacity_evidence_from_measurement",
+        "line": 200
+      },
+      {
+        "name": "battery_soc_observation_from_measurement",
+        "line": 255
+      },
+      {
+        "name": "battery_soc_observation_from_percentage_measurement",
+        "line": 301
+      },
+      {
+        "name": "TariffProvider",
+        "line": 389
+      },
+      {
+        "name": "SolarForecastProvider",
+        "line": 397
+      },
+      {
+        "name": "BatteryProvider",
+        "line": 405
+      },
+      {
+        "name": "EVProvider",
+        "line": 413
+      },
+      {
+        "name": "ExteriorTemperatureProvider",
+        "line": 421
+      },
+      {
+        "name": "_safe_provider_id",
+        "line": 435
+      },
+      {
+        "name": "_provider_error",
+        "line": 450
+      },
+      {
+        "name": "_is_retryable_exception",
+        "line": 469
+      },
+      {
+        "name": "ComposedEnergyContextProvider",
+        "line": 473
+      },
+      {
+        "name": "StaticTariffProvider",
+        "line": 752
+      },
+      {
+        "name": "StaticSolarForecastProvider",
+        "line": 769
+      },
+      {
+        "name": "StaticBatteryProvider",
+        "line": 786
+      },
+      {
+        "name": "StaticExteriorTemperatureProvider",
+        "line": 803
+      },
+      {
+        "name": "StateStoreBatteryProvider",
+        "line": 820
+      },
+      {
+        "name": "StateStoreEVProvider",
+        "line": 991
+      },
+      {
+        "name": "validate_timestamp",
+        "line": 71
+      },
+      {
+        "name": "validate_points",
+        "line": 83
+      },
+      {
+        "name": "validate_points",
+        "line": 94
+      },
+      {
+        "name": "validate_points",
+        "line": 105
+      },
+      {
+        "name": "validate_dispatchable_soc",
+        "line": 116
+      },
+      {
+        "name": "__init__",
+        "line": 154
+      },
+      {
+        "name": "get_tariffs",
+        "line": 394
+      },
+      {
+        "name": "get_forecast",
+        "line": 402
+      },
+      {
+        "name": "get_state",
+        "line": 410
+      },
+      {
+        "name": "get_state",
+        "line": 418
+      },
+      {
+        "name": "get_forecast",
+        "line": 432
+      },
+      {
+        "name": "__init__",
+        "line": 476
+      },
+      {
+        "name": "get_context",
+        "line": 499
+      },
+      {
+        "name": "_get_ev",
+        "line": 587
+      },
+      {
+        "name": "_get_tariffs",
+        "line": 610
+      },
+      {
+        "name": "_get_export_tariffs",
+        "line": 613
+      },
+      {
+        "name": "_get_tariff_series",
+        "line": 617
+      },
+      {
+        "name": "_get_solar",
+        "line": 642
+      },
+      {
+        "name": "_get_battery",
+        "line": 665
+      },
+      {
+        "name": "_get_exterior_temperature",
+        "line": 689
+      },
+      {
+        "name": "_validate_result_horizon",
+        "line": 713
+      },
+      {
+        "name": "_validate_freshness",
+        "line": 723
+      },
+      {
+        "name": "_validate_observation_freshness",
+        "line": 726
+      },
+      {
+        "name": "_validate_observed_at",
+        "line": 729
+      },
+      {
+        "name": "__init__",
+        "line": 755
+      },
+      {
+        "name": "get_tariffs",
+        "line": 759
+      },
+      {
+        "name": "__init__",
+        "line": 772
+      },
+      {
+        "name": "get_forecast",
+        "line": 776
+      },
+      {
+        "name": "__init__",
+        "line": 789
+      },
+      {
+        "name": "get_state",
+        "line": 793
+      },
+      {
+        "name": "__init__",
+        "line": 806
+      },
+      {
+        "name": "get_forecast",
+        "line": 810
+      },
+      {
+        "name": "__init__",
+        "line": 823
+      },
+      {
+        "name": "from_binding",
+        "line": 851
+      },
+      {
+        "name": "get_state",
+        "line": 872
+      },
+      {
+        "name": "_source_revision",
+        "line": 980
+      },
+      {
+        "name": "__init__",
+        "line": 999
+      },
+      {
+        "name": "from_binding",
+        "line": 1005
+      },
+      {
+        "name": "get_state",
+        "line": 1010
+      },
+      {
+        "name": "_read_departure",
+        "line": 1071
+      },
+      {
+        "name": "_required_snapshot",
+        "line": 1085
+      },
+      {
+        "name": "_optional_snapshot",
+        "line": 1093
+      },
+      {
+        "name": "_check_identity",
+        "line": 1106
+      },
+      {
+        "name": "_error",
+        "line": 1116
+      },
+      {
+        "name": "_source_revision",
+        "line": 1119
+      }
+    ]
+  },
+  "src/domoai/persistence/coordination.py": {
+    "exists": true,
+    "sha256": "010c542f7104ff75a6e383267229a0fca78800f09a40d21b4d3f119c2dd7f78a",
+    "symbols": [
+      {
+        "name": "PhysicalIntentRepository",
+        "line": 24
+      },
+      {
+        "name": "MetricHistoryRepository",
+        "line": 232
+      },
+      {
+        "name": "__init__",
+        "line": 27
+      },
+      {
+        "name": "claim_for_dispatch",
+        "line": 31
+      },
+      {
+        "name": "_same_logical_identity",
+        "line": 87
+      },
+      {
+        "name": "get",
+        "line": 104
+      },
+      {
+        "name": "settle",
+        "line": 112
+      },
+      {
+        "name": "recover_inflight",
+        "line": 161
+      },
+      {
+        "name": "count",
+        "line": 225
+      },
+      {
+        "name": "__init__",
+        "line": 235
+      },
+      {
+        "name": "append",
+        "line": 239
+      },
+      {
+        "name": "count",
+        "line": 291
+      }
+    ]
+  },
+  "src/domoai/persistence/postgres.py": {
+    "exists": true,
+    "sha256": "925b9040d3278706317d9d32ff3f7aa590e68394466be1cacc9ebc75820f1799",
+    "symbols": [
+      {
+        "name": "_PostgresConnectionProxy",
+        "line": 21
+      },
+      {
+        "name": "PostgresDatabase",
+        "line": 35
+      },
+      {
+        "name": "__init__",
+        "line": 22
+      },
+      {
+        "name": "execute",
+        "line": 25
+      },
+      {
+        "name": "__getattr__",
+        "line": 31
+      },
+      {
+        "name": "__init__",
+        "line": 44
+      },
+      {
+        "name": "adapt_sql",
+        "line": 60
+      },
+      {
+        "name": "schema_sql",
+        "line": 74
+      },
+      {
+        "name": "build_dsn",
+        "line": 78
+      },
+      {
+        "name": "initialize",
+        "line": 94
+      },
+      {
+        "name": "open_existing",
+        "line": 137
+      },
+      {
+        "name": "connection",
+        "line": 141
+      },
+      {
+        "name": "advisory_lock",
+        "line": 146
+      },
+      {
+        "name": "backup_to",
+        "line": 151
+      },
+      {
+        "name": "close",
+        "line": 154
+      }
+    ]
+  },
+  "src/domoai/persistence/repositories.py": {
+    "exists": true,
+    "sha256": "5b3763197c039e5d7563b4c94899f287d3820622b871aafc62871ad289041e0c",
+    "symbols": [
+      {
+        "name": "_audit_event_from_outbox_row",
+        "line": 51
+      },
+      {
+        "name": "RuntimeOwnershipConflict",
+        "line": 63
+      },
+      {
+        "name": "RuntimeOwnershipRecoveryError",
+        "line": 67
+      },
+      {
+        "name": "RuntimeOwnershipRepository",
+        "line": 75
+      },
+      {
+        "name": "ApprovalGrantRepository",
+        "line": 177
+      },
+      {
+        "name": "SQLiteJsonRepository",
+        "line": 458
+      },
+      {
+        "name": "AuditEventRepository",
+        "line": 492
+      },
+      {
+        "name": "PlanRepository",
+        "line": 736
+      },
+      {
+        "name": "BundleCommitRepository",
+        "line": 1014
+      },
+      {
+        "name": "DeviceRepository",
+        "line": 1273
+      },
+      {
+        "name": "_require_aware_datetime",
+        "line": 1294
+      },
+      {
+        "name": "_in_clause",
+        "line": 1299
+      },
+      {
+        "name": "StateHistoryRecord",
+        "line": 1304
+      },
+      {
+        "name": "StateHistoryRepository",
+        "line": 1309
+      },
+      {
+        "name": "StateSnapshotRepository",
+        "line": 1450
+      },
+      {
+        "name": "RuntimeStateMetadataRepository",
+        "line": 1501
+      },
+      {
+        "name": "RuntimeStatePersistenceRepository",
+        "line": 1629
+      },
+      {
+        "name": "ExecutionOutcomeRepository",
+        "line": 1738
+      },
+      {
+        "name": "ScheduledPlanRepository",
+        "line": 1785
+      },
+      {
+        "name": "RecurringScheduleRepository",
+        "line": 1942
+      },
+      {
+        "name": "AutomationRuleRecord",
+        "line": 2079
+      },
+      {
+        "name": "AutomationRuleRepository",
+        "line": 2086
+      },
+      {
+        "name": "__init__",
+        "line": 70
+      },
+      {
+        "name": "__init__",
+        "line": 78
+      },
+      {
+        "name": "acquire",
+        "line": 82
+      },
+      {
+        "name": "release",
+        "line": 125
+      },
+      {
+        "name": "release_stale",
+        "line": 142
+      },
+      {
+        "name": "__init__",
+        "line": 187
+      },
+      {
+        "name": "save",
+        "line": 190
+      },
+      {
+        "name": "save_sync",
+        "line": 193
+      },
+      {
+        "name": "get",
+        "line": 216
+      },
+      {
+        "name": "get_sync",
+        "line": 219
+      },
+      {
+        "name": "consume_if_pending",
+        "line": 235
+      },
+      {
+        "name": "consume_if_pending_sync",
+        "line": 238
+      },
+      {
+        "name": "is_pending_sync",
+        "line": 252
+      },
+      {
+        "name": "reservation_status_sync",
+        "line": 259
+      },
+      {
+        "name": "list_reservation_approval_ids_sync",
+        "line": 267
+      },
+      {
+        "name": "reserve_if_pending_sync",
+        "line": 277
+      },
+      {
+        "name": "commit_reservation_sync",
+        "line": 333
+      },
+      {
+        "name": "commit_reservation_batch_sync",
+        "line": 377
+      },
+      {
+        "name": "release_reservation_sync",
+        "line": 428
+      },
+      {
+        "name": "is_consumed_sync",
+        "line": 442
+      },
+      {
+        "name": "nonce_exists_sync",
+        "line": 449
+      },
+      {
+        "name": "__init__",
+        "line": 459
+      },
+      {
+        "name": "save",
+        "line": 466
+      },
+      {
+        "name": "get",
+        "line": 477
+      },
+      {
+        "name": "list_all",
+        "line": 485
+      },
+      {
+        "name": "__init__",
+        "line": 493
+      },
+      {
+        "name": "append",
+        "line": 496
+      },
+      {
+        "name": "append_event",
+        "line": 517
+      },
+      {
+        "name": "list_pending_outbox",
+        "line": 550
+      },
+      {
+        "name": "claim_pending_outbox",
+        "line": 564
+      },
+      {
+        "name": "mark_outbox_delivered",
+        "line": 625
+      },
+      {
+        "name": "record_outbox_retry",
+        "line": 645
+      },
+      {
+        "name": "list_all",
+        "line": 664
+      },
+      {
+        "name": "list_events",
+        "line": 686
+      },
+      {
+        "name": "__init__",
+        "line": 737
+      },
+      {
+        "name": "_bind_deployment",
+        "line": 748
+      },
+      {
+        "name": "save_validation",
+        "line": 776
+      },
+      {
+        "name": "save_approval",
+        "line": 781
+      },
+      {
+        "name": "settle_execution",
+        "line": 788
+      },
+      {
+        "name": "save",
+        "line": 806
+      },
+      {
+        "name": "get",
+        "line": 852
+      },
+      {
+        "name": "mark_unknown_if_executing",
+        "line": 856
+      },
+      {
+        "name": "claim_for_execution",
+        "line": 924
+      },
+      {
+        "name": "list_by_status",
+        "line": 986
+      },
+      {
+        "name": "__init__",
+        "line": 1017
+      },
+      {
+        "name": "save",
+        "line": 1021
+      },
+      {
+        "name": "get",
+        "line": 1043
+      },
+      {
+        "name": "get_by_digest",
+        "line": 1051
+      },
+      {
+        "name": "get_for_plan",
+        "line": 1059
+      },
+      {
+        "name": "record_member_outcome",
+        "line": 1069
+      },
+      {
+        "name": "_aggregate_fulfillment_status",
+        "line": 1149
+      },
+      {
+        "name": "list_non_terminal",
+        "line": 1179
+      },
+      {
+        "name": "is_scheduled_member",
+        "line": 1196
+      },
+      {
+        "name": "schedule_members_transaction",
+        "line": 1213
+      },
+      {
+        "name": "__init__",
+        "line": 1274
+      },
+      {
+        "name": "save",
+        "line": 1277
+      },
+      {
+        "name": "get",
+        "line": 1280
+      },
+      {
+        "name": "list_all",
+        "line": 1284
+      },
+      {
+        "name": "delete",
+        "line": 1287
+      },
+      {
+        "name": "__init__",
+        "line": 1314
+      },
+      {
+        "name": "append",
+        "line": 1331
+      },
+      {
+        "name": "purge_expired",
+        "line": 1341
+      },
+      {
+        "name": "append_without_commit",
+        "line": 1360
+      },
+      {
+        "name": "list_history",
+        "line": 1396
+      },
+      {
+        "name": "__init__",
+        "line": 1451
+      },
+      {
+        "name": "save",
+        "line": 1460
+      },
+      {
+        "name": "_save_without_commit",
+        "line": 1473
+      },
+      {
+        "name": "list_all",
+        "line": 1488
+      },
+      {
+        "name": "delete",
+        "line": 1494
+      },
+      {
+        "name": "__init__",
+        "line": 1504
+      },
+      {
+        "name": "get",
+        "line": 1508
+      },
+      {
+        "name": "save",
+        "line": 1594
+      },
+      {
+        "name": "__init__",
+        "line": 1632
+      },
+      {
+        "name": "persist",
+        "line": 1643
+      },
+      {
+        "name": "delete",
+        "line": 1675
+      },
+      {
+        "name": "delete_capability",
+        "line": 1686
+      },
+      {
+        "name": "_save_metadata_without_commit",
+        "line": 1702
+      },
+      {
+        "name": "__init__",
+        "line": 1739
+      },
+      {
+        "name": "save",
+        "line": 1742
+      },
+      {
+        "name": "list_for_plan",
+        "line": 1764
+      },
+      {
+        "name": "list_attempts_for_plan",
+        "line": 1774
+      },
+      {
+        "name": "__init__",
+        "line": 1788
+      },
+      {
+        "name": "schedule",
+        "line": 1792
+      },
+      {
+        "name": "get",
+        "line": 1824
+      },
+      {
+        "name": "list_pending",
+        "line": 1835
+      },
+      {
+        "name": "mark_executed",
+        "line": 1844
+      },
+      {
+        "name": "reconcile_terminal",
+        "line": 1847
+      },
+      {
+        "name": "mark_missed",
+        "line": 1856
+      },
+      {
+        "name": "cancel",
+        "line": 1859
+      },
+      {
+        "name": "reschedule",
+        "line": 1862
+      },
+      {
+        "name": "_transition",
+        "line": 1932
+      },
+      {
+        "name": "__init__",
+        "line": 1943
+      },
+      {
+        "name": "create",
+        "line": 1947
+      },
+      {
+        "name": "get",
+        "line": 2011
+      },
+      {
+        "name": "get_authority",
+        "line": 2027
+      },
+      {
+        "name": "list_active",
+        "line": 2041
+      },
+      {
+        "name": "advance",
+        "line": 2060
+      },
+      {
+        "name": "cancel",
+        "line": 2068
+      },
+      {
+        "name": "__init__",
+        "line": 2089
+      },
+      {
+        "name": "save",
+        "line": 2093
+      },
+      {
+        "name": "update",
+        "line": 2122
+      },
+      {
+        "name": "get",
+        "line": 2160
+      },
+      {
+        "name": "list_all",
+        "line": 2175
+      },
+      {
+        "name": "set_status",
+        "line": 2190
+      },
+      {
+        "name": "claim_event",
+        "line": 2200
+      }
+    ]
+  },
+  "src/domoai/runtime/connection_ports.py": {
+    "exists": true,
+    "sha256": "f73555f0d3179b59cb98afaa2b78aa5821cdc2d54cb93bafc1e02c2ceb02e158",
+    "symbols": [
+      {
+        "name": "ConnectionProviderManifest",
+        "line": 24
+      },
+      {
+        "name": "ConnectionSetup",
+        "line": 47
+      },
+      {
+        "name": "ConnectionProviderPort",
+        "line": 62
+      },
+      {
+        "name": "validate_steps",
+        "line": 38
+      },
+      {
+        "name": "validate_provenance",
+        "line": 54
+      },
+      {
+        "name": "discover",
+        "line": 67
+      },
+      {
+        "name": "probe",
+        "line": 69
+      },
+      {
+        "name": "validate",
+        "line": 71
+      },
+      {
+        "name": "build_adapter",
+        "line": 73
+      },
+      {
+        "name": "diagnose",
+        "line": 75
+      }
+    ]
+  },
+  "src/domoai/runtime/control_takeover.py": {
+    "exists": true,
+    "sha256": "494f8bfcf8bf151dfc90145a72023087e37d165e6a32fe5636cc9d901771d08c",
+    "symbols": [
+      {
+        "name": "ControlTakeoverRequest",
+        "line": 27
+      },
+      {
+        "name": "ControlTakeoverAdapter",
+        "line": 41
+      },
+      {
+        "name": "ControlPolicyPort",
+        "line": 45
+      },
+      {
+        "name": "ControlTakeoverPort",
+        "line": 52
+      },
+      {
+        "name": "ControlSupervisorPort",
+        "line": 64
+      },
+      {
+        "name": "BatteryControlCoordinator",
+        "line": 70
+      },
+      {
+        "name": "_EVReadbackControlAdapter",
+        "line": 610
+      },
+      {
+        "name": "EVControlCoordinator",
+        "line": 732
+      },
+      {
+        "name": "ControlTakeoverGroup",
+        "line": 772
+      },
+      {
+        "name": "_digest",
+        "line": 859
+      },
+      {
+        "name": "_same_source_route",
+        "line": 867
+      },
+      {
+        "name": "acquire_control",
+        "line": 42
+      },
+      {
+        "name": "acquire_for_plan",
+        "line": 53
+      },
+      {
+        "name": "assert_still_owned",
+        "line": 57
+      },
+      {
+        "name": "emergency_stop",
+        "line": 59
+      },
+      {
+        "name": "release_for_plan",
+        "line": 61
+      },
+      {
+        "name": "supervise_once",
+        "line": 65
+      },
+      {
+        "name": "shutdown",
+        "line": 67
+      },
+      {
+        "name": "__init__",
+        "line": 78
+      },
+      {
+        "name": "authority_blocked",
+        "line": 117
+      },
+      {
+        "name": "authority_block_reason",
+        "line": 123
+      },
+      {
+        "name": "startup_reconciled",
+        "line": 132
+      },
+      {
+        "name": "acquire_for_plan",
+        "line": 137
+      },
+      {
+        "name": "assert_still_owned",
+        "line": 250
+      },
+      {
+        "name": "emergency_stop",
+        "line": 289
+      },
+      {
+        "name": "supervise_once",
+        "line": 352
+      },
+      {
+        "name": "reconcile_startup",
+        "line": 411
+      },
+      {
+        "name": "_read_feedback",
+        "line": 492
+      },
+      {
+        "name": "_feedback_is_safe",
+        "line": 516
+      },
+      {
+        "name": "release_for_plan",
+        "line": 528
+      },
+      {
+        "name": "shutdown",
+        "line": 543
+      },
+      {
+        "name": "_revoke",
+        "line": 561
+      },
+      {
+        "name": "_clear_reconciled_unknown_leases",
+        "line": 573
+      },
+      {
+        "name": "_rejected",
+        "line": 585
+      },
+      {
+        "name": "__init__",
+        "line": 620
+      },
+      {
+        "name": "acquire_control",
+        "line": 635
+      },
+      {
+        "name": "execute",
+        "line": 690
+      },
+      {
+        "name": "read_state",
+        "line": 696
+      },
+      {
+        "name": "_is_fresh_numeric",
+        "line": 702
+      },
+      {
+        "name": "_rejected",
+        "line": 711
+      },
+      {
+        "name": "__init__",
+        "line": 735
+      },
+      {
+        "name": "__init__",
+        "line": 775
+      },
+      {
+        "name": "acquire_for_plan",
+        "line": 779
+      },
+      {
+        "name": "assert_still_owned",
+        "line": 802
+      },
+      {
+        "name": "emergency_stop",
+        "line": 811
+      },
+      {
+        "name": "release_for_plan",
+        "line": 828
+      },
+      {
+        "name": "supervise_once",
+        "line": 848
+      },
+      {
+        "name": "shutdown",
+        "line": 854
+      }
+    ]
+  },
+  "src/domoai/runtime/registry.py": {
+    "exists": true,
+    "sha256": "d4a235f3512879de86ba39551a31fd1356fb323365b4d996d1b3604d5b80f400",
+    "symbols": [
+      {
+        "name": "DeviceRegistry",
+        "line": 25
+      },
+      {
+        "name": "__init__",
+        "line": 26
+      },
+      {
+        "name": "load_persisted",
+        "line": 36
+      },
+      {
+        "name": "apply_snapshot",
+        "line": 68
+      },
+      {
+        "name": "devices",
+        "line": 115
+      },
+      {
+        "name": "areas",
+        "line": 119
+      },
+      {
+        "name": "diagnostics",
+        "line": 123
+      },
+      {
+        "name": "drain_diagnostics",
+        "line": 126
+      },
+      {
+        "name": "canonical_id_for_source",
+        "line": 133
+      },
+      {
+        "name": "parent_source_device_for",
+        "line": 136
+      },
+      {
+        "name": "mark_source_unavailable",
+        "line": 139
+      },
+      {
+        "name": "mark_source_available",
+        "line": 142
+      },
+      {
+        "name": "_mark_source_availability",
+        "line": 145
+      },
+      {
+        "name": "_reconcile",
+        "line": 177
+      },
+      {
+        "name": "_remove_source_refs",
+        "line": 221
+      },
+      {
+        "name": "get",
+        "line": 254
+      },
+      {
+        "name": "routes_for",
+        "line": 257
+      },
+      {
+        "name": "resolve_command_route",
+        "line": 260
+      },
+      {
+        "name": "_upsert_entity",
+        "line": 294
+      },
+      {
+        "name": "_remove_source_capabilities",
+        "line": 416
+      },
+      {
+        "name": "_refresh_device_availability",
+        "line": 456
+      },
+      {
+        "name": "_canonical_id_for",
+        "line": 476
+      },
+      {
+        "name": "_merge_capabilities",
+        "line": 502
+      },
+      {
+        "name": "_combine_capabilities",
+        "line": 536
+      },
+      {
+        "name": "_merge_source_refs",
+        "line": 573
+      }
+    ]
+  },
+  "src/domoai/skills/catalog.py": {
+    "exists": true,
+    "sha256": "0ceb15e38099f1e9306e5589b4a4362b8485984abb085702f52b37f0c9d7b63a",
+    "symbols": [
+      {
+        "name": "load_core_catalog",
+        "line": 23
+      }
+    ]
+  },
+  "src/domoai/skills/workflow.py": {
+    "exists": true,
+    "sha256": "d0ef8bde8144d74ad2334d172fc4d65b8701c8cefd822a9c3677adcaddde8e3d",
+    "symbols": [
+      {
+        "name": "bundle_approval_digest",
+        "line": 26
+      },
+      {
+        "name": "WorkflowStatus",
+        "line": 58
+      },
+      {
+        "name": "WorkflowStage",
+        "line": 73
+      },
+      {
+        "name": "WorkflowDiagnostic",
+        "line": 88
+      },
+      {
+        "name": "ApprovalDecision",
+        "line": 97
+      },
+      {
+        "name": "EnergySkillRequest",
+        "line": 108
+      },
+      {
+        "name": "SkillRunResult",
+        "line": 117
+      },
+      {
+        "name": "SkillToolRouter",
+        "line": 142
+      },
+      {
+        "name": "ApprovalPort",
+        "line": 152
+      },
+      {
+        "name": "_WorkflowFailure",
+        "line": 160
+      },
+      {
+        "name": "EnergySkillWorkflow",
+        "line": 178
+      },
+      {
+        "name": "call",
+        "line": 145
+      },
+      {
+        "name": "current_revision",
+        "line": 149
+      },
+      {
+        "name": "request_approval",
+        "line": 155
+      },
+      {
+        "name": "__init__",
+        "line": 161
+      },
+      {
+        "name": "__init__",
+        "line": 181
+      },
+      {
+        "name": "run",
+        "line": 216
+      },
+      {
+        "name": "resume",
+        "line": 525
+      },
+      {
+        "name": "_execute",
+        "line": 607
+      },
+      {
+        "name": "_execute_v3_bundle",
+        "line": 797
+      },
+      {
+        "name": "_call",
+        "line": 942
+      },
+      {
+        "name": "_call_tool",
+        "line": 952
+      },
+      {
+        "name": "_required_devices",
+        "line": 996
+      },
+      {
+        "name": "_check_devices",
+        "line": 1006
+      },
+      {
+        "name": "_check_state",
+        "line": 1033
+      },
+      {
+        "name": "_check_energy_context",
+        "line": 1118
+      },
+      {
+        "name": "_check_proposal",
+        "line": 1148
+      },
+      {
+        "name": "_required_plan",
+        "line": 1191
+      },
+      {
+        "name": "_required_plans",
+        "line": 1206
+      },
+      {
+        "name": "_check_validation",
+        "line": 1229
+      },
+      {
+        "name": "_check_explanation",
+        "line": 1250
+      },
+      {
+        "name": "_validate_approval",
+        "line": 1262
+      },
+      {
+        "name": "_required_string",
+        "line": 1292
+      },
+      {
+        "name": "_transition",
+        "line": 1303
+      },
+      {
+        "name": "_with_stage",
+        "line": 1308
+      },
+      {
+        "name": "_validation_details",
+        "line": 1314
+      },
+      {
+        "name": "_result",
+        "line": 1323
+      },
+      {
+        "name": "_store",
+        "line": 1375
+      },
+      {
+        "name": "_consume",
+        "line": 1379
+      },
+      {
+        "name": "_resume_failure",
+        "line": 1385
+      }
+    ]
+  }
+}

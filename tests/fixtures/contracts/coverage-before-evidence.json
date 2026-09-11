@@ -1,0 +1,74 @@
+{
+  "schema_version": "v1",
+  "runtime_revision": "baseline-inventory",
+  "routes": [
+    {
+      "device_id": "home.light",
+      "capability": "brightness",
+      "protocols": [
+        "a",
+        "b"
+      ],
+      "operations": {
+        "read": true,
+        "write": true,
+        "commands": [
+          "set_brightness"
+        ]
+      },
+      "guarantees": {
+        "resolution": null,
+        "tolerance": null,
+        "expected_latency_ms": null,
+        "readback_required": true,
+        "reversible": true,
+        "confirmation_required": true,
+        "availability_modes": [
+          "local"
+        ],
+        "commissioning_required": "not_required"
+      },
+      "limits": {
+        "unit": "%",
+        "minimum": 0,
+        "maximum": 100,
+        "enum_values": []
+      },
+      "status": "active",
+      "writable": true
+    },
+    {
+      "device_id": "home.light",
+      "capability": "temperature",
+      "protocols": [
+        "a",
+        "b"
+      ],
+      "operations": {
+        "read": true,
+        "write": false,
+        "commands": []
+      },
+      "guarantees": {
+        "resolution": null,
+        "tolerance": null,
+        "expected_latency_ms": null,
+        "readback_required": false,
+        "reversible": true,
+        "confirmation_required": false,
+        "availability_modes": [
+          "local"
+        ],
+        "commissioning_required": "not_required"
+      },
+      "limits": {
+        "unit": "\u00b0C",
+        "minimum": null,
+        "maximum": null,
+        "enum_values": []
+      },
+      "status": "active",
+      "writable": false
+    }
+  ]
+}

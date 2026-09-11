@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from domoai.domain.connections import ConnectionProfile
+from domoai.domain.coordination import LeaseScope
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import FixedClock
@@ -48,7 +49,10 @@ async def test_save_and_get_round_trip_the_complete_profile(tmp_path: Path) -> N
     database = await _database(tmp_path)
     try:
         profile = _profile()
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
 
         await repository.save(profile)
 
@@ -70,7 +74,10 @@ async def test_save_and_get_round_trip_the_complete_profile(tmp_path: Path) -> N
 async def test_missing_profile_lookups_return_none(tmp_path: Path) -> None:
     database = await _database(tmp_path)
     try:
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
 
         assert await repository.get(UUID("0193b7d6-7b2b-7e8a-9f3b-2d4f2f6a1001")) is None
         assert await repository.get_by_unique_id("mqtt", "missing") is None
@@ -88,7 +95,10 @@ async def test_get_by_unique_id_is_scoped_by_connector(tmp_path: Path) -> None:
             connector_id="knx",
             unique_id="broker-main",
         )
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(first)
         await repository.save(other_connector)
 
@@ -114,7 +124,10 @@ async def test_list_all_has_deterministic_created_at_then_id_order(tmp_path: Pat
             created_at=BASE_TIME,
             updated_at=BASE_TIME,
         )
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(later)
         await repository.save(earlier)
 
@@ -129,7 +142,11 @@ async def test_set_enabled_updates_only_state_and_updated_at(tmp_path: Path) -> 
     try:
         clock = FixedClock(BASE_TIME)
         profile = _profile(updated_at=BASE_TIME)
-        repository = ConnectionRepository(database, clock=clock)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+            clock=clock,
+        )
         await repository.save(profile)
         changed_at = BASE_TIME + timedelta(minutes=5)
         clock.set(changed_at)
@@ -151,7 +168,10 @@ async def test_delete_is_idempotent_and_reports_affected_rows(tmp_path: Path) ->
     database = await _database(tmp_path)
     try:
         profile = _profile()
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(profile)
 
         assert await repository.delete(profile.id) is True
@@ -167,7 +187,10 @@ async def test_duplicate_profile_id_is_rejected_without_overwriting(tmp_path: Pa
     try:
         original = _profile()
         duplicate_id = _profile(connector_id="knx", unique_id="other")
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(original)
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -194,7 +217,10 @@ async def test_duplicate_connector_unique_id_is_rejected_and_other_connector_is_
             connector_id="knx",
             unique_id=original.unique_id,
         )
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(original)
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -219,7 +245,10 @@ async def test_failed_duplicate_write_rolls_back_before_next_mutation(tmp_path: 
             "0193b7d6-7b2b-7e8a-9f3b-2d4f2f6a1003",
             unique_id="after-rollback",
         )
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(original)
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -237,7 +266,10 @@ async def test_forced_sqlite_failure_rolls_back_enabled_state(tmp_path: Path) ->
     database = await _database(tmp_path)
     try:
         profile = _profile()
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(profile)
         database.connection.execute(
             """CREATE TRIGGER force_connection_update_failure
@@ -261,7 +293,10 @@ async def test_reads_revalidate_persisted_json(tmp_path: Path) -> None:
     database = await _database(tmp_path)
     try:
         profile = _profile()
-        repository = ConnectionRepository(database)
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        )
         await repository.save(profile)
         database.connection.execute(
             "UPDATE connections SET endpoint_json = ? WHERE id = ?",
@@ -271,5 +306,36 @@ async def test_reads_revalidate_persisted_json(tmp_path: Path) -> None:
 
         with pytest.raises(ValidationError):
             await repository.get(profile.id)
+    finally:
+        await database.close()
+
+
+def test_repository_has_no_unscoped_constructor(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "unused.db")
+    with pytest.raises(TypeError):
+        ConnectionRepository(database)
+
+
+@pytest.mark.asyncio
+async def test_two_households_cannot_read_or_mutate_each_others_profiles(tmp_path: Path) -> None:
+    from domoai.domain.coordination import LeaseScope
+
+    database = await _database(tmp_path)
+    scope = LeaseScope(tenant_id="tenant", household_id="home-a", deployment_id="edge")
+    owner = ConnectionRepository(database, scope=scope)
+    other = ConnectionRepository(
+        database, scope=scope.model_copy(update={"household_id": "home-b"})
+    )
+    profile = _profile()
+    try:
+        await owner.save(profile)
+        assert await other.list_all() == []
+        assert await other.get(profile.id) is None
+        assert await other.get_by_unique_id(profile.connector_id, profile.unique_id) is None
+        assert not await other.set_enabled(profile.id, True)
+        assert not await other.set_credential_ref(profile.id, "secret:foreign")
+        assert not await other.update(profile.model_copy(update={"unique_id": "stolen"}))
+        assert not await other.delete(profile.id)
+        assert await owner.get(profile.id) == profile
     finally:
         await database.close()

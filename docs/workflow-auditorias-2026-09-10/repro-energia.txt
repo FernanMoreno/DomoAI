@@ -1,0 +1,5 @@
+CASE 1: composed base_load_forecast=None; cost=0.0; with 1kW base load cost=0.4
+CASE 2: valid passive baseline cost=0.4; status=no_action_required; variations={}
+CASE 3: solar consumed locally=1kWh; later initial battery energy exported=1kWh; reported solar self-consumption=0kWh
+CASE 4: 0.2EUR + 0.2USD accepted without conversion/diagnostic; energy_cost=0.4
+All four reported behaviors reproduced. No repository files changed.

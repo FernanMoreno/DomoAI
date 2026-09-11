@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from domoai.domain.errors import DomainError, ErrorCode
@@ -16,6 +17,7 @@ _READ_OPERATIONS = frozenset(
         "list",
         "inspect",
         "preview",
+        "get_household_preferences",
     }
 )
 _PLAN_OPERATIONS = frozenset(
@@ -39,8 +41,48 @@ _OPERATOR_OPERATIONS = frozenset(
         "create_local_automation_rule",
         "update_local_automation_rule",
         "set_local_automation_status",
+        "set_household_preference",
+        "delete_household_preference",
     }
 )
+
+_PREFERENCE_ADMIN_OPERATIONS = frozenset({
+    "get_household_preference_history",
+    "restore_household_preference",
+    "erase_household_preference",
+})
+_PREFERENCE_OPERATIONS = _PREFERENCE_ADMIN_OPERATIONS | {
+    "get_household_preferences", "set_household_preference", "delete_household_preference",
+}
+
+
+def roles_from_scopes(scopes: Sequence[str]) -> list[PrincipalRole]:
+    """Derive the least role needed by a legacy scope-only token."""
+
+    if "*" in scopes:
+        return [PrincipalRole.OWNER]
+    if "mutate" in scopes or "home:write" in scopes or "manage" in scopes:
+        return [PrincipalRole.OPERATOR]
+    if "plan" in scopes or "home:plan" in scopes:
+        return [PrincipalRole.PLANNER]
+    return [PrincipalRole.VIEWER]
+
+
+def authority_from_token_claims(
+    *, client_id: str, scopes: Sequence[str], claims: Mapping[str, object]
+) -> AuthorityContext:
+    """Decode verified authority claims without coupling transports together."""
+
+    raw_authority = claims.get("authority")
+    if isinstance(raw_authority, dict):
+        try:
+            return AuthorityContext.model_validate(raw_authority)
+        except (TypeError, ValueError):
+            pass
+    return AuthorityContext(
+        principal_id=client_id,
+        roles=roles_from_scopes(scopes),
+    )
 
 
 @dataclass(frozen=True)
@@ -83,6 +125,15 @@ class AuthorityPolicy:
             self._deny(operation, "tenant is not authorized")
         if target_household not in authority.household_ids:
             self._deny(operation, "household is not authorized")
+        if operation in _PREFERENCE_OPERATIONS and (
+            authority.household_id != target_household
+            or authority.area_ids or authority.device_ids or authority.capabilities
+        ):
+            self._deny(operation, "preferences require whole-household authority")
+        if operation == "manage_connections" and (
+            authority.area_ids or authority.device_ids or authority.capabilities
+        ):
+            self._deny(operation, "connection administration requires whole-household authority")
         if authority.area_ids and area_id is not None and area_id not in authority.area_ids:
             self._deny(operation, "area is not authorized")
         if authority.device_ids and any(
@@ -125,6 +176,8 @@ class AuthorityPolicy:
                     PrincipalRole.SERVICE,
                 }
             )
+        elif operation in _PREFERENCE_ADMIN_OPERATIONS:
+            allowed = bool(roles & {PrincipalRole.OWNER, PrincipalRole.SERVICE})
         else:
             allowed = PrincipalRole.OWNER in roles or PrincipalRole.SERVICE in roles
         if (
@@ -137,30 +190,95 @@ class AuthorityPolicy:
             self._deny(operation, "role or operation is not authorized")
 
     def bind_plan(
-        self, plan: Plan, authority: AuthorityContext, *, operation: str = "prepare_plan"
+        self,
+        plan: Plan,
+        authority: AuthorityContext,
+        *,
+        operation: str = "prepare_plan",
+        device_areas: Mapping[str, str | None] | None = None,
     ) -> Plan:
         """Bind a caller plan to the verified principal without trusting it."""
 
         declared = plan.authority
         legacy_default = declared == AuthorityContext()
+        if not legacy_default and declared.tenant_id != authority.tenant_id:
+            self._deny(operation, "plan tenant is not authorized")
         target_household = self.household_id if legacy_default else declared.household_id
-        self.authorize(
-            authority,
-            operation=operation,
-            target_household_id=target_household,
-            device_ids=tuple(command.device_id for command in plan.commands),
-            capabilities=tuple(command.command for command in plan.commands),
-        )
-        bound = authority.model_copy(
+        effective = authority.model_copy(
             update={
                 "household_id": target_household,
-                "household_ids": sorted(set(authority.household_ids)),
-                "area_ids": declared.area_ids,
-                "device_ids": declared.device_ids,
-                "capabilities": declared.capabilities,
+                # Household selection is validated below, but membership is
+                # always the verified token membership. A plan may select the
+                # local target; it cannot rewrite the token's household ACL.
+                "household_ids": list(authority.household_ids),
+                "area_ids": self._narrow_scope(
+                    authority.area_ids,
+                    declared.area_ids,
+                    field_name="area_ids",
+                    operation=operation,
+                ),
+                "device_ids": self._narrow_scope(
+                    authority.device_ids,
+                    declared.device_ids,
+                    field_name="device_ids",
+                    operation=operation,
+                ),
+                "capabilities": self._narrow_scope(
+                    authority.capabilities,
+                    declared.capabilities,
+                    field_name="capabilities",
+                    operation=operation,
+                ),
+                "operations": self._narrow_scope(
+                    authority.operations,
+                    declared.operations,
+                    field_name="operations",
+                    operation=operation,
+                ),
             }
         )
-        return plan.model_copy(update={"authority": bound})
+        command_device_ids = tuple(command.device_id for command in plan.commands)
+        command_capabilities = tuple(command.command for command in plan.commands)
+        self.authorize(
+            effective,
+            operation=operation,
+            target_household_id=target_household,
+            device_ids=command_device_ids,
+            capabilities=command_capabilities,
+        )
+        if effective.area_ids:
+            if device_areas is None:
+                self._deny(operation, "device area is not known")
+            assert device_areas is not None
+            for device_id in command_device_ids:
+                area_id = device_areas.get(device_id)
+                if area_id is None or area_id not in effective.area_ids:
+                    self._deny(operation, "area is not authorized")
+        return plan.model_copy(update={"authority": effective})
+
+    @classmethod
+    def _narrow_scope(
+        cls,
+        verified: list[str],
+        declared: list[str],
+        *,
+        field_name: str,
+        operation: str,
+    ) -> list[str]:
+        """Return a caller narrowing without allowing it to broaden claims."""
+
+        if not declared:
+            return list(verified)
+        if not verified:
+            return list(declared)
+        if field_name == "operations":
+            if "*" in verified:
+                return list(declared)
+            if "*" in declared:
+                cls._deny(operation, "operation scope is broader than verified claims")
+        if not set(declared).issubset(verified):
+            cls._deny(operation, f"{field_name} scope is broader than verified claims")
+        return list(declared)
 
     @staticmethod
     def _deny(operation: str, reason: str) -> None:

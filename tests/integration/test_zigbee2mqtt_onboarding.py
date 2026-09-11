@@ -13,6 +13,7 @@ from domoai.application.connection_providers import ConnectionProviderRegistry
 from domoai.application.runtime_factory import build_runtime
 from domoai.config.settings import Settings
 from domoai.domain.connections import ConnectionDraft
+from domoai.domain.coordination import LeaseScope
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.connection_ports import ConnectionSetup
@@ -57,7 +58,10 @@ async def test_manager_persists_secret_and_activates_two_isolated_zigbee2mqtt_pr
     providers = ConnectionProviderRegistry()
     providers.register(provider)
     manager = ConnectionManager(
-        repository=ConnectionRepository(database),
+        repository=ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        ),
         providers=providers,
         runtime=runtime,
         secret_store=secret_store,

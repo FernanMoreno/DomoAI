@@ -25,6 +25,12 @@ def build_product_summary(result: OptimizationResult) -> ProductSummary:
     if not isinstance(forecast_confidence, str):
         forecast_confidence = None
 
+    assumptions = result.constraint_summary.get("forecast_assumptions")
+    base_load = assumptions.get("base_load") if isinstance(assumptions, dict) else None
+    base_unknown = isinstance(base_load, dict) and base_load.get("status") == "unknown"
+    if base_unknown and hard_satisfied is True:
+        hard_satisfied = None
+
     alternatives = [
         ProductAlternative(
             plan_id=plan_id,
@@ -36,7 +42,14 @@ def build_product_summary(result: OptimizationResult) -> ProductSummary:
     ]
     compact_constraints = {
         key: result.constraint_summary[key]
-        for key in ("hard_satisfied", "soft_violations", "forecast_confidence")
+        for key in (
+            "hard_satisfied",
+            "soft_violations",
+            "forecast_confidence",
+            "forecast_assumptions",
+            "solar_accounting",
+            "accounting",
+        )
         if key in result.constraint_summary
     }
     next_step: Literal[
@@ -60,6 +73,19 @@ def build_product_summary(result: OptimizationResult) -> ProductSummary:
         headline = f"No proposal was produced because the result is {result.status.value}."
         next_step = "revise_scenario_or_inputs"
         proposal_id = None
+
+    if isinstance(base_load, dict) and (
+        result.status in _SUCCESS_STATUSES or result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    ):
+        headline = (
+            "No physical action is required. "
+            if result.status is OptimizationStatus.NO_ACTION_REQUIRED
+            else "Proposal computed. "
+        ) + (
+            "Base demand is unknown; household limits are not guaranteed."
+            if base_unknown
+            else "Constraints apply to modeled demand; household limits are not guaranteed."
+        )
 
     return ProductSummary(
         scenario_id=result.scenario_id,

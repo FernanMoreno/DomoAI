@@ -52,7 +52,8 @@ async def test_control_plane_gateway_boots_without_physical_provider(tmp_path: P
             )
         )
         assert response.status_code == 200
-        assert "First install" in response.text
+        assert '<html lang="es-ES">' in response.text
+        assert "Acceso de administración" in response.text
         assert connections.status_code == 200
         assert connections.json() == {"connections": []}
         assert ready.status_code == 503

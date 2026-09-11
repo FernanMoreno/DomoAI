@@ -31,6 +31,7 @@ from domoai.domain.models import (
     ExecutionStatus,
     ExecutionWindow,
     Plan,
+    PlanExecutionLease,
     PlanStatus,
     RecurrenceRule,
     SourceCursor,
@@ -38,6 +39,11 @@ from domoai.domain.models import (
     StateSnapshot,
 )
 from domoai.domain.transitions import assert_plan_transition
+from domoai.persistence.contract_compatibility import (
+    compatibility_diagnostics,
+    read_active_plan,
+    read_active_rule,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.approval_store import ApprovalGrant
 from domoai.runtime.clock import Clock, SystemClock
@@ -45,6 +51,18 @@ from domoai.runtime.events import CRITICAL_AUDIT_EVENT_TYPES, redact_payload
 from domoai.runtime.state_store import StateStoreMetadata
 
 _TABLES = {"devices", "policies", "plans"}
+
+
+def _audit_event_from_outbox_row(row: Sequence[Any]) -> AuditEvent:
+    return AuditEvent(
+        id=row[0],
+        event_type=row[1],
+        actor=row[2],
+        subject_id=row[3],
+        payload=json.loads(row[4]),
+        created_at=datetime.fromisoformat(row[5]),
+        authority=AuthorityContext.model_validate(json.loads(row[6] or "{}")),
+    )
 
 
 class RuntimeOwnershipConflict(RuntimeError):
@@ -546,35 +564,104 @@ class AuditEventRepository:
         )
         rows = cursor.fetchall()
         cursor.close()
-        return [
-            AuditEvent(
-                id=row[0],
-                event_type=row[1],
-                actor=row[2],
-                subject_id=row[3],
-                payload=json.loads(row[4]),
-                created_at=datetime.fromisoformat(row[5]),
-                authority=AuthorityContext.model_validate(json.loads(row[6] or "{}")),
-            )
-            for row in rows
-        ]
+        return [_audit_event_from_outbox_row(row) for row in rows]
 
-    async def mark_outbox_delivered(self, event_id: str) -> bool:
+    async def claim_pending_outbox(
+        self,
+        *,
+        limit: int = 100,
+        owner_id: str,
+        lease_id: str,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> list[AuditEvent]:
+        """Claim pending entries with a transactionally exclusive lease.
+
+        SQLite obtains a writer lock with ``BEGIN IMMEDIATE``. PostgreSQL
+        adapts that to ``BEGIN`` and the conditional updates serialize on each
+        row. The update predicate is intentionally repeated after selection:
+        a concurrent claimant can see the same candidate, but only one update
+        can win the owner/lease CAS.
+        """
+
+        if limit < 1:
+            raise ValueError("outbox limit must be at least 1")
+        if not owner_id.strip() or not lease_id.strip():
+            raise ValueError("outbox claim owner and lease ID must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("outbox lease duration must be positive")
+        claimed_at = now or datetime.now(UTC)
+        if claimed_at.tzinfo is None:
+            raise ValueError("outbox claim time must be timezone-aware")
+        expires_at = (claimed_at + timedelta(seconds=lease_seconds)).isoformat()
+        claimed_at_text = claimed_at.isoformat()
+        connection = self.database.connection
+        claimed: list[AuditEvent] = []
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = connection.execute(
+                """SELECT event_id, event_type, actor, subject_id, payload, created_at,
+                          authority_payload
+                   FROM audit_outbox
+                   WHERE status = 'pending'
+                     AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                   ORDER BY sequence LIMIT ?""",
+                (claimed_at_text, limit),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            for row in rows:
+                update = connection.execute(
+                    """UPDATE audit_outbox
+                       SET lease_owner = ?, lease_id = ?, lease_expires_at = ?
+                       WHERE event_id = ?
+                         AND status = 'pending'
+                         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)""",
+                    (owner_id, lease_id, expires_at, row[0], claimed_at_text),
+                )
+                if update.rowcount == 1:
+                    claimed.append(_audit_event_from_outbox_row(row))
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        return claimed
+
+    async def mark_outbox_delivered(
+        self,
+        event_id: str,
+        *,
+        owner_id: str,
+        lease_id: str,
+        delivered_at: datetime | None = None,
+    ) -> bool:
+        completed_at = delivered_at or datetime.now(UTC)
         cursor = self.database.connection.execute(
             """UPDATE audit_outbox
-               SET status = 'delivered', delivered_at = ?
-               WHERE event_id = ? AND status = 'pending'""",
-            (datetime.now(UTC).isoformat(), event_id),
+               SET status = 'delivered', delivered_at = ?,
+                   lease_owner = NULL, lease_id = NULL, lease_expires_at = NULL
+               WHERE event_id = ? AND status = 'pending'
+                 AND lease_owner = ? AND lease_id = ?""",
+            (completed_at.isoformat(), event_id, owner_id, lease_id),
         )
         self.database.connection.commit()
         return cursor.rowcount == 1
 
-    async def record_outbox_retry(self, event_id: str, error: str) -> bool:
+    async def record_outbox_retry(
+        self,
+        event_id: str,
+        error: str,
+        *,
+        owner_id: str,
+        lease_id: str,
+    ) -> bool:
         cursor = self.database.connection.execute(
             """UPDATE audit_outbox
-               SET attempts = attempts + 1, last_error = ?
-               WHERE event_id = ? AND status = 'pending'""",
-            (error[:200], event_id),
+               SET attempts = attempts + 1, last_error = ?,
+                   lease_owner = NULL, lease_id = NULL, lease_expires_at = NULL
+               WHERE event_id = ? AND status = 'pending'
+                 AND lease_owner = ? AND lease_id = ?""",
+            (str(redact_payload(error))[:200], event_id, owner_id, lease_id),
         )
         self.database.connection.commit()
         return cursor.rowcount == 1
@@ -652,9 +739,78 @@ class AuditEventRepository:
 
 
 class PlanRepository:
-    def __init__(self, database: SQLiteDatabase, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        database: SQLiteDatabase,
+        *,
+        clock: Clock | None = None,
+        deployment_id: str | None = None,
+    ) -> None:
         self._repository = SQLiteJsonRepository(database, "plans")
         self.clock = clock or SystemClock()
+        self.deployment_id = deployment_id
+
+    def _bind_deployment(self, plan: Plan) -> Plan:
+        plan = Plan.model_validate(plan.model_dump(mode="python"))
+        if plan.execution_lease is not None and (
+            plan.deployment_id is not None
+            and plan.execution_lease.deployment_id != plan.deployment_id
+        ):
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan deployment and execution lease deployment do not match",
+                details={"plan_id": plan.id},
+            )
+        if self.deployment_id is None:
+            return plan
+        if plan.deployment_id is not None and plan.deployment_id != self.deployment_id:
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan belongs to another deployment",
+                details={"plan_id": plan.id},
+            )
+        if plan.execution_lease is not None and (
+            plan.execution_lease.deployment_id != self.deployment_id
+        ):
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan execution lease belongs to another deployment",
+                details={"plan_id": plan.id},
+            )
+        if plan.deployment_id == self.deployment_id:
+            return plan
+        if (
+            plan.status is not PlanStatus.DRAFT
+            or plan.definition_digest is not None
+            or plan.validation is not None
+            or plan.approval is not None
+        ):
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan requires revalidation as a new definition",
+                details={"reason": "revalidation_required", "plan_id": plan.id},
+            )
+        payload = plan.model_dump(mode="python", exclude={"schema_version"})
+        return Plan.model_validate({**payload, "deployment_id": self.deployment_id})
+
+    async def compatibility_diagnostics(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        deployment_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return compatibility_diagnostics(
+            self._repository.database.connection,
+            record_kind="plan",
+            tenant_id=tenant_id,
+            household_id=household_id,
+            deployment_id=deployment_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def save_validation(self, plan: Plan) -> None:
         """Persist validation evidence without bypassing lifecycle guards."""
@@ -688,6 +844,7 @@ class PlanRepository:
 
     async def save(self, plan: Plan) -> None:
         connection = self._repository.database.connection
+        plan = self._bind_deployment(plan)
         try:
             # Lifecycle evidence and identity checks must observe the same
             # snapshot as the write. This serializes competing writers before
@@ -701,10 +858,11 @@ class PlanRepository:
                 current_status = PlanStatus(existing[0])
                 if current_status is not plan.status:
                     assert_plan_transition(current_status, plan.status)
-                stored_plan = Plan.model_validate(json.loads(existing[1]))
-                if (
-                    stored_plan.definition_digest is not None
-                    and stored_plan.definition_digest != plan.definition_digest
+                stored_plan = read_active_plan(existing[1])
+                if stored_plan.definition_digest is not None and (
+                    stored_plan.definition_digest != plan.definition_digest
+                    or stored_plan.schema_version != plan.schema_version
+                    or stored_plan.deployment_id != plan.deployment_id
                 ):
                     raise DomainError(
                         ErrorCode.PLAN_IDENTITY_CONFLICT,
@@ -732,40 +890,76 @@ class PlanRepository:
             raise
 
     async def get(self, plan_id: str) -> Plan | None:
-        payload = await self._repository.get(plan_id)
-        return Plan.model_validate(payload) if payload is not None else None
+        row = self._repository.database.connection.execute(
+            "SELECT payload FROM plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        return read_active_plan(row[0], record_id=plan_id) if row is not None else None
 
-    async def mark_unknown_if_executing(self, plan_id: str) -> bool:
+    async def mark_unknown_if_executing(
+        self,
+        plan_id: str,
+        *,
+        expected_execution_lease: PlanExecutionLease | None = None,
+        allow_legacy: bool = False,
+    ) -> bool:
         """Atomically settle orphan evidence without making it claimable again."""
 
-        row = self._repository.database.connection.execute(
-            "SELECT payload FROM plans WHERE id = ? AND status = ?",
-            (plan_id, PlanStatus.EXECUTING.value),
-        ).fetchone()
-        if row is None:
-            return False
-        payload = json.loads(row[0])
-        payload["status"] = PlanStatus.UNKNOWN.value
-        cursor = self._repository.database.connection.execute(
-            """UPDATE plans SET status = ?, payload = ?, updated_at = ?
-               WHERE id = ? AND status = ?""",
-            (
-                PlanStatus.UNKNOWN.value,
-                json.dumps(payload, sort_keys=True),
-                self.clock.now().isoformat(),
-                plan_id,
-                PlanStatus.EXECUTING.value,
-            ),
-        )
-        if cursor.rowcount == 0:
-            self._repository.database.connection.rollback()
-            return False
-        self._repository.database.connection.commit()
-        return True
+        connection = self._repository.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM plans WHERE id = ? AND status = ?",
+                (plan_id, PlanStatus.EXECUTING.value),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            payload = json.loads(row[0])
+            current = Plan.model_validate(payload)
+            if self.deployment_id is not None and current.deployment_id not in {
+                self.deployment_id,
+                None,
+            }:
+                connection.rollback()
+                return False
+            if (
+                self.deployment_id is not None
+                and current.deployment_id is None
+                and not allow_legacy
+            ):
+                connection.rollback()
+                return False
+            if expected_execution_lease is not None and (
+                current.execution_lease != expected_execution_lease
+            ):
+                connection.rollback()
+                return False
+            payload["status"] = PlanStatus.UNKNOWN.value
+            cursor = connection.execute(
+                """UPDATE plans SET status = ?, payload = ?, updated_at = ?
+                   WHERE id = ? AND status = ?""",
+                (
+                    PlanStatus.UNKNOWN.value,
+                    json.dumps(payload, sort_keys=True),
+                    self.clock.now().isoformat(),
+                    plan_id,
+                    PlanStatus.EXECUTING.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                connection.rollback()
+                return False
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
 
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool:
+        plan = self._bind_deployment(plan)
         if plan.status is not PlanStatus.EXECUTING:
             return False
         claimable_statuses = frozenset(
@@ -785,10 +979,11 @@ class PlanRepository:
                 (plan.id,),
             ).fetchone()
             if existing is not None:
-                stored_plan = Plan.model_validate(json.loads(existing[1]))
-                if (
-                    stored_plan.definition_digest is not None
-                    and stored_plan.definition_digest != plan.definition_digest
+                stored_plan = read_active_plan(existing[1])
+                if stored_plan.definition_digest is not None and (
+                    stored_plan.definition_digest != plan.definition_digest
+                    or stored_plan.schema_version != plan.schema_version
+                    or stored_plan.deployment_id != plan.deployment_id
                 ):
                     raise DomainError(
                         ErrorCode.PLAN_IDENTITY_CONFLICT,
@@ -824,15 +1019,38 @@ class PlanRepository:
             connection.rollback()
             raise
 
-    async def list_by_status(self, statuses: frozenset[PlanStatus]) -> list[Plan]:
+    async def list_by_status(
+        self,
+        statuses: frozenset[PlanStatus],
+        *,
+        deployment_id: str | None = None,
+        include_legacy: bool = False,
+    ) -> list[Plan]:
         placeholders = ",".join("?" for _ in statuses)
+        clauses = [f"status IN ({placeholders})"]
+        params: list[object] = [status.value for status in statuses]
+        if deployment_id is not None:
+            deployment_clause = "json_extract(payload, '$.deployment_id') = ?"
+            params.append(deployment_id)
+            if include_legacy:
+                deployment_clause = (
+                    "(json_extract(payload, '$.deployment_id') = ? "
+                    "OR json_extract(payload, '$.deployment_id') IS NULL)"
+                )
+            clauses.append(deployment_clause)
         cursor = self._repository.database.connection.execute(
-            f"SELECT payload FROM plans WHERE status IN ({placeholders})",
-            tuple(status.value for status in statuses),
+            f"SELECT payload FROM plans WHERE {' AND '.join(clauses)}",
+            params,
         )
         rows = cursor.fetchall()
         cursor.close()
-        return [Plan.model_validate(json.loads(row[0])) for row in rows]
+        compatible = []
+        for row in rows:
+            try:
+                compatible.append(read_active_plan(row[0]))
+            except DomainError:
+                continue
+        return compatible
 
 
 class BundleCommitRepository:
@@ -1613,6 +1831,25 @@ class ScheduledPlanRepository:
         self.database = database
         self.clock = clock or SystemClock()
 
+    async def compatibility_diagnostics(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        deployment_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return compatibility_diagnostics(
+            self.database.connection,
+            record_kind="scheduled_plan",
+            tenant_id=tenant_id,
+            household_id=household_id,
+            deployment_id=deployment_id,
+            limit=limit,
+            offset=offset,
+        )
+
     async def schedule(self, plan: Plan) -> None:
         if plan.execute_at is None:
             raise ValueError("plan.execute_at is required to schedule a plan")
@@ -1654,7 +1891,7 @@ class ScheduledPlanRepository:
         cursor.close()
         if row is None:
             return None
-        return Plan.model_validate(json.loads(row[0])), row[1]
+        return read_active_plan(row[0]), row[1]
 
     async def list_pending(self) -> list[Plan]:
         cursor = self.database.connection.execute(
@@ -1663,7 +1900,13 @@ class ScheduledPlanRepository:
         )
         rows = cursor.fetchall()
         cursor.close()
-        return [Plan.model_validate(json.loads(row[0])) for row in rows]
+        compatible = []
+        for row in rows:
+            try:
+                compatible.append(read_active_plan(row[0]))
+            except DomainError:
+                continue
+        return compatible
 
     async def mark_executed(self, plan_id: str) -> bool:
         return await self.reconcile_terminal(plan_id, "executed")
@@ -1914,6 +2157,25 @@ class AutomationRuleRepository:
         self.database = database
         self.clock = clock or SystemClock()
 
+    async def compatibility_diagnostics(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        deployment_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return compatibility_diagnostics(
+            self.database.connection,
+            record_kind="automation_rule",
+            tenant_id=tenant_id,
+            household_id=household_id,
+            deployment_id=deployment_id,
+            limit=limit,
+            offset=offset,
+        )
+
     async def save(self, rule: AutomationRule, consent: AutomationConsent) -> None:
         if consent.rule_digest != rule.definition_digest or consent.scope != rule.scope:
             raise ValueError("automation consent does not match rule definition or scope")
@@ -1990,7 +2252,9 @@ class AutomationRuleRepository:
         if row is None:
             return None
         return AutomationRuleRecord(
-            rule=AutomationRule.model_validate({**json.loads(row[0]), "status": row[2]}),
+            rule=read_active_rule(row[0]).model_copy(
+                update={"status": AutomationRuleStatus(row[2])}
+            ),
             consent=AutomationConsent.model_validate(json.loads(row[1])),
             last_event_id=row[3],
             last_fired_at=datetime.fromisoformat(row[4]) if row[4] else None,
@@ -2001,15 +2265,22 @@ class AutomationRuleRepository:
             """SELECT payload, consent_payload, status, last_event_id, last_fired_at
                FROM automation_rules ORDER BY rule_id"""
         ).fetchall()
-        return [
-            AutomationRuleRecord(
-                rule=AutomationRule.model_validate({**json.loads(row[0]), "status": row[2]}),
-                consent=AutomationConsent.model_validate(json.loads(row[1])),
-                last_event_id=row[3],
-                last_fired_at=datetime.fromisoformat(row[4]) if row[4] else None,
-            )
-            for row in rows
-        ]
+        compatible = []
+        for row in rows:
+            try:
+                compatible.append(
+                    AutomationRuleRecord(
+                        rule=read_active_rule(row[0]).model_copy(
+                            update={"status": AutomationRuleStatus(row[2])}
+                        ),
+                        consent=AutomationConsent.model_validate(json.loads(row[1])),
+                        last_event_id=row[3],
+                        last_fired_at=datetime.fromisoformat(row[4]) if row[4] else None,
+                    )
+                )
+            except DomainError:
+                continue
+        return compatible
 
     async def set_status(self, rule_id: str, status: AutomationRuleStatus | str) -> bool:
         normalized = AutomationRuleStatus(status).value

@@ -44,6 +44,13 @@ class ErrorCode(StrEnum):
     INSUFFICIENT_SCOPE = "insufficient_scope"
     AGGREGATE_CAPABILITY_INVALID = "aggregate_capability_invalid"
     FENCING_VIOLATION = "fencing_violation"
+    PREFERENCE_CONFLICT = "preference_conflict"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    RESOLUTION_REQUIRED = "resolution_required"
+    HISTORY_UNAVAILABLE = "history_unavailable"
+    UNSUPPORTED_BINDING = "unsupported_binding"
+    INVALID_PREFERENCE = "invalid_preference"
+    STALE_CURSOR = "stale_cursor"
 
 
 class DomainError(ValueError):

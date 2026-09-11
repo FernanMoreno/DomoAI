@@ -46,8 +46,9 @@ class OptimizationService:
             }
             and self._has_unbound_battery_dispatch(result)
         ):
-            return result.model_copy(
-                update={
+            return OptimizationResult.model_validate(
+                result.model_dump(mode="python", exclude={"schema_version"})
+                | {
                     "status": OptimizationStatus.INVALID,
                     "plan": None,
                     "plans": [],
@@ -65,7 +66,10 @@ class OptimizationService:
         if not bundle:
             return result
         validated: list[Plan] = [self.plan_service.validate(plan) for plan in bundle]
-        return result.model_copy(update={"plan": validated[0], "plans": validated})
+        return OptimizationResult.model_validate(
+            result.model_dump(mode="python", exclude={"schema_version"})
+            | {"plan": validated[0], "plans": validated}
+        )
 
     @staticmethod
     def _has_unbound_battery_dispatch(result: OptimizationResult) -> bool:

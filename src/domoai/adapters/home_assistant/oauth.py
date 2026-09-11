@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import Field, model_validator
@@ -13,6 +12,7 @@ from pydantic import Field, model_validator
 from domoai.domain.models import StrictModel
 from domoai.domain.p2_connections import OAuthMetadataSource, OAuthProviderMetadata
 from domoai.runtime.clock import Clock, SystemClock
+from domoai.security.oauth_urls import validate_oauth_url
 
 
 class HomeAssistantOAuthError(RuntimeError):
@@ -34,11 +34,7 @@ class HomeAssistantOAuthConfig(StrictModel):
             value = getattr(self, field_name)
             if value is None:
                 continue
-            parsed = urlparse(value)
-            if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-                raise ValueError(f"OAuth {field_name} is invalid")
-            if parsed.username is not None or parsed.password is not None:
-                raise ValueError(f"OAuth {field_name} must not contain credentials")
+            validate_oauth_url(value, field_name)
         if len(set(self.scopes)) != len(self.scopes) or any(
             not scope.strip() for scope in self.scopes
         ):
@@ -120,7 +116,9 @@ class HomeAssistantOAuthClient:
             raise HomeAssistantOAuthError("OAuth token is invalid")
         try:
             async with httpx.AsyncClient(
-                timeout=config.timeout_seconds, transport=self.transport
+                timeout=config.timeout_seconds,
+                transport=self.transport,
+                follow_redirects=False,
             ) as client:
                 response = await client.post(
                     config.revoke_url,
@@ -142,14 +140,10 @@ class HomeAssistantOAuthClient:
     ) -> OAuthProviderMetadata:
         """Fetch one standard OAuth/OIDC metadata document without following redirects."""
 
-        parsed_url = urlparse(metadata_url.strip())
-        if (
-            parsed_url.scheme not in {"http", "https"}
-            or parsed_url.hostname is None
-            or parsed_url.username is not None
-            or parsed_url.password is not None
-        ):
-            raise HomeAssistantOAuthError("OAuth metadata URL is invalid")
+        try:
+            validate_oauth_url(metadata_url, "metadata_url")
+        except ValueError as error:
+            raise HomeAssistantOAuthError("OAuth metadata URL is invalid") from error
         try:
             async with httpx.AsyncClient(
                 timeout=10.0, transport=self.transport, follow_redirects=False
@@ -179,6 +173,10 @@ class HomeAssistantOAuthClient:
         if revoke_url is not None and not isinstance(revoke_url, str):
             raise HomeAssistantOAuthError("OAuth metadata response is invalid")
         try:
+            validate_oauth_url(authorization_url, "authorization_url")
+            validate_oauth_url(token_url, "token_url")
+            if revoke_url is not None:
+                validate_oauth_url(revoke_url, "revoke_url")
             normalized_scopes = _metadata_scopes(scopes)
             return OAuthProviderMetadata(
                 issuer=issuer,
@@ -196,7 +194,9 @@ class HomeAssistantOAuthClient:
     ) -> OAuthToken:
         try:
             async with httpx.AsyncClient(
-                timeout=config.timeout_seconds, transport=self.transport
+                timeout=config.timeout_seconds,
+                transport=self.transport,
+                follow_redirects=False,
             ) as client:
                 response = await client.post(config.token_url, data=payload)
                 response.raise_for_status()

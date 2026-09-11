@@ -135,19 +135,27 @@ internal to the Compose network, while Home Assistant and MQTT are bound to
 localhost for operator access only. Their host ports default to 8123 and 1883
 and can be changed with `DOMOAI_HOME_ASSISTANT_HOST_PORT` and
 `DOMOAI_MQTT_HOST_PORT` when the virtual lab already owns those ports; the
-bind remains loopback-only. The example Caddyfile forwards only MCP and health
-routes and uses an internal certificate for a private network.
-Replace it with a certificate issued by the deployment's trusted CA when
-clients do not trust Caddy's internal CA. Restrict firewall access to the
-proxy and never expose KNXnet/IP, Home Assistant or MQTT directly to the
-Internet.
+bind remains loopback-only. The production Caddyfile forwards only MCP and
+health routes and requires the host-side certificate and key configured by
+`DOMOAI_TLS_CERT_FILE_HOST` and `DOMOAI_TLS_KEY_FILE_HOST`.
+
+Place the certificate chain and private key at those host paths (or set both
+variables to deployment-managed paths). Compose mounts them read-only as
+`/etc/caddy/certs/fullchain.pem` and `/etc/caddy/certs/privkey.pem`; missing or
+invalid material makes Caddy fail closed. Do not commit certificate or key
+contents. Proxy host binds default to `127.0.0.1`; exposing the edge requires
+explicit `DOMOAI_PROXY_HTTP_BIND` and `DOMOAI_PROXY_HTTPS_BIND` values plus a
+firewall/DNS policy. Never expose KNXnet/IP, Home Assistant or MQTT directly to
+the Internet.
 
 The hostname is controlled by DOMOAI_CADDY_HOSTNAME and must agree with
-DOMOAI_MCP_PUBLIC_URL. The default internal certificate is suitable only for a
-private lab network; external agents need a trusted certificate/CA and a
-firewall policy. Readiness remains an application signal: the proxy healthcheck
-uses /healthz so a temporary adapter/readiness failure does not create a proxy
-restart loop. /readyz is still proxied unchanged and may return 503.
+DOMOAI_MCP_PUBLIC_URL. External agents need a certificate whose SAN covers this
+hostname and whose issuing CA they trust. For an isolated lab only, copy
+`Caddyfile.internal` to an explicitly selected Caddy configuration; that file
+uses `tls internal` and is not a production configuration. Readiness remains
+an application signal: the proxy healthcheck uses /healthz so a temporary
+adapter/readiness failure does not create a proxy restart loop. /readyz is
+still proxied unchanged and may return 503.
 
 ## Client configuration
 
@@ -299,3 +307,40 @@ the initial KNX discovery runs against the live tunnel. A connected tunnel is
 not sufficient for readiness: configured group addresses must also provide
 valid readback, and a lab/software-qualified battery must remain below
 production `/readyz` qualification by design.
+
+### Runtime reader floor and rollback (package 253)
+
+SQLite migration `023_runtime_contract_floor.sql` and PostgreSQL
+`postgres-schema-003` seed runtime reader floor 2. Updated initialize, existing
+store opens and transfer reads reject unsupported or malformed floors before
+bootstrap writes. SQLite does this before changing journal mode; PostgreSQL
+checks under its existing bootstrap lock. Rejection closes the connection and
+preserves the original floor. SQLite-to-PostgreSQL transfer preserves the source
+checkpoint singleton transactionally, refuses a stricter destination downgrade,
+and retains the nonempty application-data guard. A pre-floor source without a
+singleton retains the freshly initialized destination floor.
+
+Pre-floor executables ignore this marker. Release requires closing admission,
+stopping producers and schedulers, draining ACK/readback tracking or reconciling
+uncertain work with the existing compatible owner, and taking a consistent
+checkpoint with immutable backup. Then stop old writers, revoke their database
+access, restrict SQLite access to the upgraded service identity, and prevent
+old images or services from restarting. Verify these controls in the actual
+release environment before enabling v2 producers. An operator boolean is not
+an exclusion mechanism. Offline preflight reports
+`blocked_pending_operational_exclusion`; disposable software tests do not
+certify production access controls.
+
+Inventory pending plans, scheduled copies, standing-rule consent, bundles and
+physical intent evidence. Preserve original payloads, digests, approvals and
+ledger identities. Incompatible pending definitions require a new validated
+identity and explicit consent. Unknown effects remain held without replay.
+Rollback keeps the newest store and ledger and runs a floor-aware compatible
+reader/executor with the current time-isolation, cancellation and physical
+settlement protections. Running a pre-floor binary or restoring a pre-effect
+backup over newer outcomes is unsupported. No rolling upgrade with pre-floor
+binaries is supported.
+
+The supported writer may raise a valid reader floor from 1 to 2 in a transaction, retaining the original checkpoint and creation timestamp. Read-only administrative opening never raises it. A failed elevation closes the rejected connection and leaves the prior floor intact.
+
+Revoking new access alone is insufficient: SQLite processes can retain already-open descriptors after chmod, and PostgreSQL sessions survive NOLOGIN. Drain admission and reconcile in-flight effects, stop and wait for every old SQLite process, and terminate retained old PostgreSQL sessions/backends as well as denying new logins. Verify denied restart under the old identity and supported-reader access before activation. The automated disposable tests exercise historical opening entrypoints and these laboratory mechanisms; they do not attest a complete old binary, deployment exclusion, production credentials or a production rollout.

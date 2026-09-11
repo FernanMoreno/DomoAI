@@ -4,12 +4,26 @@ services:
   mqtt:
     image: eclipse-mosquitto:2
     ports:
-      - "1883:1883"
+      - "127.0.0.1:${DOMOAI_MQTT_HOST_PORT:-1883}:1883"
+    environment:
+      DOMOAI_MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      DOMOAI_MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        mkdir -p /mosquitto/auth
+        printf '%s\n%s\n' "$$DOMOAI_MQTT_PASSWORD" "$$DOMOAI_MQTT_PASSWORD" |
+          mosquitto_passwd -c /mosquitto/auth/passwd "$$DOMOAI_MQTT_USERNAME" >/dev/null
+        chown 1883:1883 /mosquitto/auth /mosquitto/auth/passwd
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:
       - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mqtt-data:/mosquitto/data
+      - mqtt-auth:/mosquitto/auth
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/version' -C 1 -W 2 >/dev/null"]
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -u \"$$DOMOAI_MQTT_USERNAME\" -P \"$$DOMOAI_MQTT_PASSWORD\" -t '$$SYS/broker/version' -C 1 -W 2 >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -42,6 +56,8 @@ services:
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: "1883"
+      MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
       Z2M_BASE_TOPIC: zigbee2mqtt
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('mqtt', 1883), 2).close()\""]
@@ -87,6 +103,8 @@ services:
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: "1883"
+      MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
       BATTERY_MQTT_TOPIC: domoai/battery
       BATTERY_HTTP_PORT: "8090"
       BATTERY_MODBUS_PORT: "1502"
@@ -110,6 +128,8 @@ services:
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: "1883"
+      MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
       EV_CHARGER_MQTT_TOPIC: domoai/ev-charger
       EV_CHARGER_HTTP_PORT: "8091"
       EV_CHARGER_MODBUS_PORT: "1502"
@@ -133,6 +153,8 @@ services:
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: "1883"
+      MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
       WATER_METER_MQTT_TOPIC: domoai/water-meter
       WATER_METER_HTTP_PORT: "8092"
       WATER_METER_MODBUS_PORT: "1502"
@@ -156,6 +178,8 @@ services:
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: "1883"
+      MQTT_USERNAME: ${DOMOAI_MQTT_USERNAME:?DOMOAI_MQTT_USERNAME is required}
+      MQTT_PASSWORD: ${DOMOAI_MQTT_PASSWORD:?DOMOAI_MQTT_PASSWORD is required}
       THERMAL_MQTT_TOPIC: domoai/thermal
       THERMAL_HTTP_PORT: "8093"
       THERMAL_MODBUS_PORT: "1502"
@@ -207,6 +231,8 @@ volumes:
   mqtt-data:
     name: domoai-lab-mqtt-data
     external: true
+  mqtt-auth:
+    name: domoai-lab-mqtt-auth
   homeassistant-data:
     name: domoai-lab-homeassistant-data
     external: true

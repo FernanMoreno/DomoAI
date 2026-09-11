@@ -2,7 +2,14 @@ name: domoai
 
 services:
   mqtt:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -26,7 +33,14 @@ services:
       retries: 6
 
   homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
+    image: ghcr.io/home-assistant/home-assistant:stable@sha256:612d76760b544cb40b7ba01387fdac964c59a6a550a50a4d30b4773c822d2918
+    cpus: "2.0"
+    mem_limit: 1g
+    pids_limit: 512
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
     restart: unless-stopped
     stop_grace_period: 30s
     ports:
@@ -51,6 +65,21 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     command: ["domoai-mcp-gateway"]
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "1.0"
+    mem_limit: 1g
+    pids_limit: 256
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
     restart: unless-stopped
     init: true
     stop_grace_period: 45s
@@ -81,7 +110,14 @@ services:
       start_period: 15s
 
   proxy:
-    image: caddy:2.11.4-alpine
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    cpus: "0.5"
+    mem_limit: 128m
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 2048
+        hard: 4096
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -91,10 +127,12 @@ services:
       gateway:
         condition: service_healthy
     ports:
-      - "${DOMOAI_PROXY_HTTP_BIND:-0.0.0.0}:80:80"
-      - "${DOMOAI_PROXY_HTTPS_BIND:-0.0.0.0}:443:443"
+      - "${DOMOAI_PROXY_HTTP_BIND:-127.0.0.1}:80:80"
+      - "${DOMOAI_PROXY_HTTPS_BIND:-127.0.0.1}:443:443"
     volumes:
       - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DOMOAI_TLS_CERT_FILE_HOST:-./tls/fullchain.pem}:/etc/caddy/certs/fullchain.pem:ro
+      - ${DOMOAI_TLS_KEY_FILE_HOST:-./tls/privkey.pem}:/etc/caddy/certs/privkey.pem:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:

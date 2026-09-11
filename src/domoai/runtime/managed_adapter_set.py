@@ -33,6 +33,7 @@ class ManagedAdapterSet(CompositeAdapter):
     ) -> None:
         super().__init__(adapters, allow_empty=True, **kwargs)
         self._mutation_lock = asyncio.Lock()
+        self._unpublished_cleanup: dict[int, AdapterPort] = {}
         self._child_pump_tasks: dict[str, asyncio.Task[None]] = {}
         self._event_queue: asyncio.Queue[tuple[str, SourceEvent]] | None = None
         self._bulk_pending: dict[tuple[str, ...], tuple[str, StateChangedEvent]] = {}
@@ -42,11 +43,13 @@ class ManagedAdapterSet(CompositeAdapter):
         """Connect and publish one child atomically."""
 
         async with self._mutation_lock:
+            await self._retry_unpublished_cleanup(adapter.adapter_id)
             if adapter.adapter_id in self._by_id:
                 raise ValueError("managed adapter IDs must be unique")
             try:
                 await adapter.connect()
             except asyncio.CancelledError:
+                await self._disconnect_unpublished(adapter)
                 raise
             except Exception as error:  # noqa: BLE001 - boundary sanitizes failures
                 self._record_failure(
@@ -54,6 +57,7 @@ class ManagedAdapterSet(CompositeAdapter):
                     "adapter_attach_failed",
                     ConnectionError("adapter unavailable"),
                 )
+                await self._disconnect_unpublished(adapter)
                 raise ConnectionError("adapter unavailable") from error
             self.adapters = (*self.adapters, adapter)
             self._by_id[adapter.adapter_id] = adapter
@@ -64,6 +68,7 @@ class ManagedAdapterSet(CompositeAdapter):
         """Replace one child while retaining its stable runtime identity."""
 
         async with self._mutation_lock:
+            await self._retry_unpublished_cleanup(adapter_id)
             current = self._by_id.get(adapter_id)
             if current is None:
                 raise KeyError(f"unknown managed adapter {adapter_id!r}")
@@ -72,6 +77,7 @@ class ManagedAdapterSet(CompositeAdapter):
             try:
                 await adapter.connect()
             except asyncio.CancelledError:
+                await self._disconnect_unpublished(adapter)
                 raise
             except Exception as error:  # noqa: BLE001 - boundary sanitizes failures
                 self._record_failure(
@@ -79,18 +85,77 @@ class ManagedAdapterSet(CompositeAdapter):
                     "adapter_replace_failed",
                     ConnectionError("adapter unavailable"),
                 )
+                await self._disconnect_unpublished(adapter)
                 raise ConnectionError("adapter unavailable") from error
-            await self._stop_child_pump(adapter_id)
+            cancelled = False
             try:
-                await current.disconnect()
-            finally:
-                self.adapters = tuple(
-                    adapter if item.adapter_id == adapter_id else item
-                    for item in self.adapters
+                await self._stop_child_pump(adapter_id)
+                try:
+                    await current.disconnect()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                finally:
+                    if not cancelled:
+                        self.adapters = tuple(
+                            adapter if item.adapter_id == adapter_id else item
+                            for item in self.adapters
+                        )
+                        self._by_id[adapter_id] = adapter
+                        self._connected.add(adapter_id)
+                        self._start_child_pump(adapter)
+            except asyncio.CancelledError:
+                # The old transport may already have disconnected. Keep ownership,
+                # mark availability unknown, and discard only our unpublished child.
+                self._record_failure(
+                    adapter_id,
+                    "adapter_replace_cancelled",
+                    ConnectionError("adapter replacement cancelled"),
                 )
-                self._by_id[adapter_id] = adapter
-                self._connected.add(adapter_id)
-                self._start_child_pump(adapter)
+                await self._disconnect_unpublished(adapter)
+                raise
+
+    async def _disconnect_unpublished(self, adapter: AdapterPort) -> None:
+        """Drain cleanup of the acquired child even if the caller cancels again."""
+        self._unpublished_cleanup[id(adapter)] = adapter
+        cleanup = asyncio.create_task(adapter.disconnect())
+        caller = asyncio.current_task()
+        cancel_requests = caller.cancelling() if caller is not None else 0
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # A cancelled cleanup child must not replace the connect failure.
+                if not cleanup.cancelled() or (
+                    caller is not None and caller.cancelling() > cancel_requests
+                ):
+                    cancelled = True
+                continue
+            except Exception:
+                break
+        if not cleanup.cancelled() and cleanup.exception() is None:
+            self._unpublished_cleanup.pop(id(adapter), None)
+        else:
+            self._diagnostics.append(
+                {
+                    "event_type": "adapter_cleanup_failed",
+                    "adapter_id": adapter.adapter_id,
+                    "message": "adapter cleanup requires recovery",
+                }
+            )
+
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _retry_unpublished_cleanup(self, adapter_id: str | None = None) -> None:
+        for child in tuple(self._unpublished_cleanup.values()):
+            if adapter_id is None or child.adapter_id == adapter_id:
+                await self._disconnect_unpublished(child)
+        if adapter_id is not None and any(
+            child.adapter_id == adapter_id for child in self._unpublished_cleanup.values()
+        ):
+            raise ConnectionError("adapter cleanup requires recovery")
 
     async def detach(self, adapter_id: str) -> bool:
         """Cancel event ownership, disconnect and remove a child idempotently."""
@@ -123,7 +188,10 @@ class ManagedAdapterSet(CompositeAdapter):
         async with self._mutation_lock:
             for adapter_id in tuple(self._child_pump_tasks):
                 await self._stop_child_pump(adapter_id)
-            await super().disconnect()
+            try:
+                await super().disconnect()
+            finally:
+                await self._retry_unpublished_cleanup()
 
     async def execute(
         self, command: Command, execution_context: ExecutionContext | None = None

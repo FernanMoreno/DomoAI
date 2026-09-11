@@ -1,0 +1,37 @@
+schema_version: v1
+connector_id: example_matter_light
+display_name: Example Matter light
+device_type: light
+transport_family: matter
+discovery_strategies:
+  - manual
+auth_schemes:
+  - commissioning_code
+capabilities:
+  - capability_id: power
+    kind: boolean
+    read_path: matter://power
+  - capability_id: brightness
+    kind: integer
+    unit: '%'
+    minimum: 0
+    maximum: 100
+    read_path: matter://brightness
+protocol_profile:
+  transport: matter
+  node_ids: [42]
+  commissioning_required: true
+  endpoints:
+    - endpoint_id: 1
+      device_type_ids: [256, 257]
+      capabilities:
+        - name: power
+          cluster_id: 6
+          attribute_id: 0
+          command_names: ['On', 'Off', 'Toggle']
+          readback: true
+        - name: brightness
+          cluster_id: 8
+          attribute_id: 0
+          command_names: ['MoveToLevelWithOnOff']
+          readback: true

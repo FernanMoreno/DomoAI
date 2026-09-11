@@ -9,7 +9,14 @@ from datetime import UTC, datetime, time
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 SCHEMA_VERSION = "v1"
 type ScalarValue = bool | int | float | str
@@ -634,6 +641,23 @@ def execution_outcome_digest(outcomes: list[ExecutionOutcome]) -> str:
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
+class PlanExecutionLease(StrictModel):
+    """Non-secret fencing evidence bound to one executing plan."""
+
+    deployment_id: str = Field(min_length=1, max_length=200)
+    owner_id: str = Field(min_length=1, max_length=200)
+    lease_id: str = Field(min_length=1, max_length=200)
+    fencing_epoch: int = Field(gt=0)
+    expires_at: datetime
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_aware_expiry(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("plan execution lease expiry must be timezone-aware")
+        return value.astimezone(UTC)
+
+
 class ControlLease(StrictModel):
     """Evidence-backed ownership lease for a physically controlled device."""
 
@@ -856,6 +880,16 @@ class Plan(StrictModel):
     schedule_revision: int = Field(default=0, ge=0)
     commands: list[Command] = Field(min_length=1, max_length=50)
     status: PlanStatus = PlanStatus.DRAFT
+    deployment_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda value: value is None,
+    )
+    execution_lease: PlanExecutionLease | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     definition_digest: str | None = None
     validation: ValidationResult | None = None
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
@@ -863,8 +897,28 @@ class Plan(StrictModel):
     execution: ExecutionSummary | None = None
     agent_request_id: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def select_contract_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "schema_version" not in value:
+            version = (
+                "v2"
+                if (
+                    value.get("deployment_id") is not None
+                    or value.get("execution_lease") is not None
+                )
+                else "v1"
+            )
+            return {**value, "schema_version": version}
+        return value
+
     @model_validator(mode="after")
     def validate_timestamps(self) -> Plan:
+        expected_version = (
+            "v2" if (self.deployment_id is not None or self.execution_lease is not None) else "v1"
+        )
+        if self.schema_version != expected_version:
+            raise ValueError("plan schema_version does not match its contract shape")
         for field_name, value in (
             ("created_at", self.created_at),
             ("expires_at", self.expires_at),
@@ -879,6 +933,9 @@ class Plan(StrictModel):
                 raise ValueError("execution_window intended_at must match execute_at")
             if self.schedule_revision != self.execution_window.revision:
                 raise ValueError("schedule_revision must match execution_window revision")
+        if self.execution_lease is not None and self.deployment_id is not None:
+            if self.execution_lease.deployment_id != self.deployment_id:
+                raise ValueError("execution_lease deployment must match plan deployment")
         return self
 
 

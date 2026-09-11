@@ -111,6 +111,7 @@ class OnboardingCoordinator:
         *,
         ttl_seconds: int = 900,
         max_sessions: int = 100,
+        close_session: Callable[[UUID], None] | None = None,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("onboarding session TTL must be positive")
@@ -119,6 +120,7 @@ class OnboardingCoordinator:
         self.providers = providers
         self.ttl = timedelta(seconds=ttl_seconds)
         self.max_sessions = max_sessions
+        self.close_session = close_session
         self._sessions: dict[UUID, dict[str, object]] = {}
 
     async def start(self, connector_id: str) -> tuple[UUID, tuple[ConnectionCandidate, ...]]:
@@ -144,7 +146,7 @@ class OnboardingCoordinator:
                 self._sessions,
                 key=lambda session_id: cast(datetime, self._sessions[session_id]["expires_at"]),
             )
-            self._sessions.pop(oldest_id, None)
+            self.cancel(oldest_id)
         session_id = uuid4()
         self._sessions[session_id] = {
             "connector_id": connector_id,
@@ -158,13 +160,17 @@ class OnboardingCoordinator:
     async def select(self, session_id: UUID, candidate_id: str) -> ConnectionCandidate:
         session = self._session(session_id)
         candidates = cast(tuple[ConnectionCandidate, ...], session["candidates"])
-        candidate = next(
-            (item for item in candidates if item.candidate_id == candidate_id), None
-        )
+        candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
         if candidate is None:
             raise ValueError("onboarding candidate was not found")
         session["candidate"] = candidate
         return candidate
+
+    def cancel(self, session_id: UUID) -> bool:
+        existed = self._sessions.pop(session_id, None) is not None
+        if self.close_session is not None:
+            self.close_session(session_id)
+        return existed
 
     async def setup(self, session_id: UUID, draft: ConnectionDraft) -> ConnectionSetup:
         session = self._session(session_id)
@@ -238,7 +244,7 @@ class OnboardingCoordinator:
     def _session(self, session_id: UUID) -> dict[str, object]:
         session = self._sessions.get(session_id)
         if session is None or cast(datetime, session["expires_at"]) <= datetime.now(UTC):
-            self._sessions.pop(session_id, None)
+            self.cancel(session_id)
             raise ValueError("onboarding session is expired")
         return session
 
@@ -249,7 +255,7 @@ class OnboardingCoordinator:
             if cast(datetime, session["expires_at"]) <= now
         ]
         for session_id in expired:
-            self._sessions.pop(session_id, None)
+            self.cancel(session_id)
 
 
 class FixtureConnectionProvider:

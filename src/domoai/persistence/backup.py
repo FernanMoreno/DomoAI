@@ -1,4 +1,4 @@
-"""Validated administrative backup and restore for runtime SQLite data."""
+"""Validated SQLite backups and isolated administrative PostgreSQL archives."""
 
 from __future__ import annotations
 
@@ -9,18 +9,36 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 from uuid import uuid4
 
+import psycopg
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict
 
+from domoai.domain.household_preferences import (
+    HouseholdPreference,
+    PreferenceHistoryEntry,
+    PreferenceResult,
+    PreferenceVersion,
+)
+from domoai.persistence.contract_compatibility import check_runtime_floor
+from domoai.persistence.household_preferences import rotate_restored_preference_generations
+from domoai.persistence.postgres import (
+    _POSTGRES_SCHEMA_VERSION,
+    _SCHEMA_LOCK_KEY,
+    _PostgresConnectionProxy,
+    check_restore_quarantine,
+)
 from domoai.persistence.serialized import SerializedStorageExecutor
 from domoai.persistence.sqlite import (
     MIGRATIONS_DIR,
@@ -47,6 +65,306 @@ class BackupError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def _run_postgres_tool(
+    command: tuple[str, ...],
+    dsn: str | None = None,
+    data: bytes | None = None,
+) -> bytes:
+    """Keep conninfo out of argv and never surface tool stderr or exceptions."""
+    try:
+        environment = os.environ.copy()
+        if dsn is not None:
+            variables = {
+                option.keyword.decode(): option.envvar.decode()
+                for option in psycopg.pq.Conninfo.get_defaults()
+                if option.envvar
+            }
+            for key, value in conninfo_to_dict(dsn).items():
+                # Parsing a DSN without keyword overrides yields decoded strings.
+                environment[variables[key]] = cast(str, value)
+        result = subprocess.run(
+            command,
+            input=data,
+            capture_output=True,
+            env=environment,
+            check=True,
+            timeout=300,
+        )
+        return result.stdout
+    except Exception:
+        raise BackupError("postgres_backup_tool_failed") from None
+
+
+class PostgresBackupService:
+    """Offline administrative logical archives; separate from SQLite manifests.
+
+    The caller provides an isolated, newly created database and controls its
+    administrative credentials. This is not an operational restore protocol or
+    permission to connect restored state to physical adapters. Archives contain
+    full database data and require protected local storage.
+    """
+
+    def __init__(self, *, runner: Callable[..., bytes] = _run_postgres_tool) -> None:
+        self._runner = runner
+
+    @staticmethod
+    def _content(connection: Any) -> dict[str, Any]:
+        """Hash every user table in one exported PostgreSQL snapshot."""
+        tables = connection.execute(
+            "SELECT n.nspname, c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE c.relkind IN ('r','p') AND n.nspname !~ '^pg_' "
+            "AND n.nspname NOT IN ('information_schema','domoai_restore_guard') "
+            "ORDER BY 1, 2"
+        ).fetchall()
+        content = {}
+        for namespace, table in tables:
+            rows = connection.execute(
+                sql.SQL("SELECT row_to_json(t)::text FROM {} AS t").format(
+                    sql.Identifier(namespace, table)
+                )
+            ).fetchall()
+            digest = hashlib.sha256()
+            for row in sorted(row[0] for row in rows):
+                encoded = row.encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+            content[f"{namespace}.{table}"] = {"rows": len(rows), "sha256": digest.hexdigest()}
+        return content
+
+    def create(self, *, source_dsn: str, output_dir: Path) -> None:
+        staging: Path | None = None
+        try:
+            if output_dir.exists():
+                raise BackupError("postgres_backup_destination_exists")
+            output_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(prefix=".postgres-backup-", dir=output_dir.parent))
+            with psycopg.connect(source_dsn) as connection:
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                check_restore_quarantine(connection)
+                snapshot = cast(
+                    tuple[str], connection.execute("SELECT pg_export_snapshot()").fetchone()
+                )[0]
+                content = self._content(connection)
+                payload = self._runner(
+                    (
+                        "pg_dump",
+                        "--format=custom",
+                        "--no-owner",
+                        "--no-privileges",
+                        "--exclude-schema=domoai_restore_guard",
+                        f"--snapshot={snapshot}",
+                    ),
+                    source_dsn,
+                )
+            if not payload.startswith(b"PGDMP"):
+                raise BackupError("postgres_backup_invalid_archive")
+            self._runner(("pg_restore", "--list"), None, payload)
+            metadata = {
+                "format": "domoai-postgresql-custom",
+                "version": 1,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "tables": content,
+            }
+            for name, data in (
+                ("database.dump", payload),
+                (
+                    "postgres-manifest.json",
+                    json.dumps(metadata, sort_keys=True).encode(),
+                ),
+            ):
+                with (staging / name).open("xb") as member:
+                    os.chmod(staging / name, 0o600)
+                    member.write(data)
+                    member.flush()
+                    os.fsync(member.fileno())
+            _fsync_directory(staging)
+            staging.rename(output_dir)
+            staging = None
+            _fsync_directory(output_dir.parent)
+        except BackupError:
+            raise
+        except Exception:
+            raise BackupError("postgres_backup_failed") from None
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging)
+
+    def _verify(self, backup_dir: Path) -> tuple[bytes, dict[str, Any]]:
+        metadata = json.loads((backup_dir / "postgres-manifest.json").read_text())
+        payload = (backup_dir / "database.dump").read_bytes()
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != {"format", "version", "size", "sha256", "tables"}
+            or metadata["format"] != "domoai-postgresql-custom"
+            or type(metadata["version"]) is not int
+            or metadata["version"] != 1
+            or type(metadata["size"]) is not int
+            or metadata["size"] != len(payload)
+            or metadata["sha256"] != hashlib.sha256(payload).hexdigest()
+            or not payload.startswith(b"PGDMP")
+            or not isinstance(metadata["tables"], dict)
+        ):
+            raise BackupError("postgres_backup_invalid_archive")
+        self._runner(("pg_restore", "--list"), None, payload)
+        return payload, metadata
+
+    @staticmethod
+    def _validate_preferences(connection: Any) -> None:
+        heads = {}
+        for tenant, household, generation, revision in connection.execute(
+            "SELECT tenant_id, household_id, generation, revision FROM household_preference_heads"
+        ):
+            heads[tenant, household] = PreferenceVersion(generation=generation, revision=revision)
+        slots = {}
+        for tenant, household, identity, key, kind, target, payload in connection.execute(
+            "SELECT tenant_id, household_id, preference_id, key, target_kind, target_id, payload "
+            "FROM household_preferences"
+        ):
+            slot = HouseholdPreference.model_validate_json(payload)
+            if (
+                str(slot.preference_id) != identity
+                or slot.key != key
+                or slot.target.kind != kind
+                or slot.target.id != target
+                or not 1 <= slot.version.revision <= heads[tenant, household].revision
+            ):
+                raise BackupError("postgres_backup_invalid_preferences")
+            slots[tenant, household, identity] = slot
+        history = {}
+        for tenant, household, revision, identity, payload in connection.execute(
+            "SELECT tenant_id, household_id, revision, preference_id, payload "
+            "FROM household_preference_history"
+        ):
+            entry = PreferenceHistoryEntry.model_validate_json(payload)
+            if (
+                entry.version.revision != revision
+                or str(entry.preference_id) != identity
+                or not 1 <= revision <= heads[tenant, household].revision
+                or (tenant, household, identity) not in slots
+                or (
+                    entry.snapshot is not None
+                    and (
+                        entry.snapshot.preference_id != entry.preference_id
+                        or entry.snapshot.version != entry.version
+                    )
+                )
+            ):
+                raise BackupError("postgres_backup_invalid_preferences")
+            history[tenant, household, revision] = entry
+        for scope, head in heads.items():
+            if sum(key[:2] == scope for key in history) != head.revision:
+                raise BackupError("postgres_backup_invalid_preferences")
+        for (tenant, household, _), slot in slots.items():
+            entry = history[tenant, household, slot.version.revision]
+            if entry.preference_id != slot.preference_id or (
+                entry.snapshot != slot and not (slot.erased and entry.snapshot is None)
+            ):
+                raise BackupError("postgres_backup_invalid_preferences")
+        receipts = set()
+        for tenant, household, generation, identity, payload in connection.execute(
+            "SELECT tenant_id, household_id, generation, preference_id, response "
+            "FROM household_preference_requests"
+        ):
+            result = PreferenceResult.model_validate_json(payload)
+            history_key = (tenant, household, result.version.revision)
+            entry = history[history_key]
+            if (
+                str(result.version.generation) != generation
+                or result.version != entry.version
+                or result.operation != entry.operation
+                or str(entry.preference_id) != identity
+                or result.preference != entry.snapshot
+            ):
+                raise BackupError("postgres_backup_invalid_preferences")
+            receipts.add(history_key)
+        if receipts != set(history):
+            raise BackupError("postgres_backup_invalid_preferences")
+
+    def restore(self, *, backup_dir: Path, target_dsn: str) -> None:
+        try:
+            with psycopg.connect(target_dsn) as connection:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK_KEY,)
+                )
+                # No retry into partially imported state, including an empty
+                # failed import whose only durable object is this guard.
+                occupied = connection.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname !~ '^pg_' "
+                    "AND nspname NOT IN ('public','information_schema') "
+                    # Schema dependencies include collations, operators and
+                    # text-search objects as well as tables/functions/types.
+                    "UNION ALL SELECT 1 FROM pg_depend "
+                    "WHERE refclassid='pg_namespace'::regclass "
+                    "AND refobjid='public'::regnamespace LIMIT 1"
+                ).fetchone()
+                if occupied is not None:
+                    raise BackupError("postgres_restore_target_not_empty")
+                connection.execute(
+                    "CREATE SCHEMA domoai_restore_guard; "
+                    "CREATE TABLE domoai_restore_guard.status "
+                    "(state TEXT NOT NULL CHECK (state IN ('restoring','ready'))); "
+                    "INSERT INTO domoai_restore_guard.status VALUES ('restoring')"
+                )
+            payload, metadata = self._verify(backup_dir)
+            self._runner(
+                (
+                    "pg_restore",
+                    "--exit-on-error",
+                    "--single-transaction",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--dbname=",
+                    "--exclude-schema=domoai_restore_guard",
+                ),
+                target_dsn,
+                payload,
+            )
+            with psycopg.connect(target_dsn) as connection:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK_KEY,)
+                )
+                check_runtime_floor(connection, postgres=True)
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM schema_migrations WHERE filename=%s",
+                        (_POSTGRES_SCHEMA_VERSION,),
+                    ).fetchone()
+                    is None
+                ):
+                    raise BackupError("postgres_restore_schema_incompatible")
+                before = self._content(connection)
+                if before != metadata["tables"]:
+                    raise BackupError("postgres_restore_content_mismatch")
+                self._validate_preferences(connection)
+                heads = connection.execute(
+                    "SELECT tenant_id, household_id, generation, revision "
+                    "FROM household_preference_heads ORDER BY 1, 2"
+                ).fetchall()
+                rotate_restored_preference_generations(_PostgresConnectionProxy(connection))
+                rotated = connection.execute(
+                    "SELECT tenant_id, household_id, generation, revision "
+                    "FROM household_preference_heads ORDER BY 1, 2"
+                ).fetchall()
+                if len(heads) != len(rotated) or any(
+                    old[:2] != new[:2] or old[2] == new[2] or old[3] != new[3]
+                    for old, new in zip(heads, rotated, strict=True)
+                ):
+                    raise BackupError("postgres_restore_generation_failed")
+                self._validate_preferences(connection)
+                after = self._content(connection)
+                before.pop("public.household_preference_heads", None)
+                after.pop("public.household_preference_heads", None)
+                if before != after:
+                    raise BackupError("postgres_restore_content_mismatch")
+                connection.execute("UPDATE domoai_restore_guard.status SET state='ready'")
+        except BackupError:
+            raise
+        except Exception:
+            raise BackupError("postgres_restore_failed") from None
 
 
 @dataclass(frozen=True)
@@ -775,6 +1093,10 @@ class BackupService:
             database = SQLiteDatabase(staging / member.filename)
             try:
                 await database.initialize()
+                # Staging is offline and fully migrated. Fence old client CAS
+                # tokens before this file can replace a served database.
+                rotate_restored_preference_generations(database.connection)
+                database.connection.commit()
             except (OSError, sqlite3.Error, RuntimeError) as error:
                 raise BackupError("restore_staging_failed") from error
             finally:

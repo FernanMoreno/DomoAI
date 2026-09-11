@@ -83,7 +83,7 @@ volumes:
     caddy.write_text(
         """
 {$DOMOAI_CADDY_HOSTNAME} {
-    tls internal
+    tls /etc/caddy/cert.pem /etc/caddy/key.pem
     @mcp path /mcp /mcp/*
     handle @mcp {
         reverse_proxy gateway:8124

@@ -64,6 +64,7 @@ class PlanService:
         *,
         clock: Clock | None = None,
         authorized_actuator_commands: dict[str, frozenset[str]] | None = None,
+        deployment_id: str | None = None,
     ) -> None:
         self.registry = registry
         self.state_store = state_store
@@ -71,6 +72,7 @@ class PlanService:
         self.audit = audit
         self.clock = clock or SystemClock()
         self.authorized_actuator_commands = authorized_actuator_commands or {}
+        self.deployment_id = deployment_id
 
     @property
     def current_revision(self) -> str:
@@ -91,7 +93,38 @@ class PlanService:
             created_at=self.clock.now(),
             expires_at=expires_at or self.clock.now() + self.DEFAULT_PLAN_TTL,
             authority=authority or AuthorityContext(),
+            deployment_id=self.deployment_id,
         )
+
+    def bind_definition(self, plan: Plan) -> Plan:
+        """Bind an unsigned draft before hashing, never promote existing consent."""
+
+        plan = Plan.model_validate(plan.model_dump(mode="python"))
+        if plan.execution_lease is not None:
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT, "Client execution leases are not accepted"
+            )
+        if self.deployment_id is None:
+            return plan
+        if plan.deployment_id not in {None, self.deployment_id}:
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT, "Plan belongs to another deployment"
+            )
+        if plan.deployment_id == self.deployment_id:
+            return plan
+        if (
+            plan.status is not PlanStatus.DRAFT
+            or plan.definition_digest is not None
+            or plan.validation is not None
+            or plan.approval is not None
+        ):
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan requires revalidation as a new definition",
+                details={"reason": "revalidation_required", "plan_id": plan.id},
+            )
+        payload = plan.model_dump(mode="python", exclude={"schema_version"})
+        return Plan.model_validate({**payload, "deployment_id": self.deployment_id})
 
     def normalize_command(self, command: Command) -> Command:
         result = self.validate_command_semantics(command)
@@ -196,6 +229,7 @@ class PlanService:
         return self.validate_command_semantics(command).errors
 
     def validate(self, plan: Plan) -> Plan:
+        plan = self.bind_definition(plan)
         validated_at = self.clock.now()
         server_deadline = self._default_validation_expiry(plan, validated_at)
         # Caller-supplied plan/window expiry may shorten evidence lifetime,
@@ -492,6 +526,13 @@ class PlanService:
     def assert_executable(
         self, plan: Plan, *, state_version_overrides: dict[str, int] | None = None
     ) -> None:
+        Plan.model_validate(plan.model_dump(mode="python"))
+        if self.deployment_id is not None and plan.deployment_id != self.deployment_id:
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Plan requires revalidation for this deployment",
+                details={"reason": "revalidation_required", "plan_id": plan.id},
+            )
         if plan.status is PlanStatus.CANCELLED:
             raise DomainError(ErrorCode.INVALID_TRANSITION, "Plan is cancelled and cannot execute")
         if plan.expires_at is not None and plan.expires_at <= self.clock.now():

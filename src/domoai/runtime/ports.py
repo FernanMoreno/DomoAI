@@ -7,7 +7,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
-from domoai.domain.coordination import PhysicalIntent, PhysicalIntentStatus
+from domoai.domain.coordination import (
+    PhysicalIntent,
+    PhysicalIntentClaim,
+    PhysicalIntentStatus,
+)
 from domoai.domain.models import (
     AdapterExecutionAck,
     AdapterHealth,
@@ -15,6 +19,7 @@ from domoai.domain.models import (
     Command,
     ExecutionOutcome,
     Plan,
+    PlanExecutionLease,
     PlanStatus,
     SourceEvent,
     SourceRef,
@@ -83,11 +88,23 @@ class PlanRecordPort(Protocol):
     async def save_approval(self, plan: Plan) -> None: ...
     async def settle_execution(self, plan: Plan) -> None: ...
     async def get(self, plan_id: str) -> Plan | None: ...
-    async def mark_unknown_if_executing(self, plan_id: str) -> bool: ...
+    async def mark_unknown_if_executing(
+        self,
+        plan_id: str,
+        *,
+        expected_execution_lease: PlanExecutionLease | None = None,
+        allow_legacy: bool = False,
+    ) -> bool: ...
     async def claim_for_execution(
         self, plan: Plan, *, allowed_statuses: frozenset[PlanStatus]
     ) -> bool: ...
-    async def list_by_status(self, statuses: frozenset[PlanStatus]) -> list[Plan]: ...
+    async def list_by_status(
+        self,
+        statuses: frozenset[PlanStatus],
+        *,
+        deployment_id: str | None = None,
+        include_legacy: bool = False,
+    ) -> list[Plan]: ...
 
 
 class ExecutionOutcomePort(Protocol):
@@ -95,12 +112,11 @@ class ExecutionOutcomePort(Protocol):
 
 
 class PhysicalIntentPort(Protocol):
-    async def claim(self, intent: PhysicalIntent) -> PhysicalIntent: ...
+    async def claim_for_dispatch(self, intent: PhysicalIntent) -> PhysicalIntentClaim: ...
 
     async def settle(
         self,
         *,
-        household_id: str,
-        idempotency_key: str,
+        intent: PhysicalIntent,
         status: PhysicalIntentStatus,
     ) -> PhysicalIntent: ...

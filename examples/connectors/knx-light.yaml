@@ -1,0 +1,41 @@
+schema_version: v1
+connector_id: example_knx_light
+display_name: Example KNX light
+device_type: light
+transport_family: knx
+discovery_strategies:
+  - manual
+auth_schemes:
+  - none
+capabilities:
+  - capability_id: power
+    kind: boolean
+    read_path: knx://power
+  - capability_id: brightness
+    kind: integer
+    unit: '%'
+    minimum: 0
+    maximum: 100
+    read_path: knx://brightness
+protocol_profile:
+  transport: knx
+  secure_mode: none
+  group_dpts:
+    1/1/1: '1.001'
+    1/1/2: '5.001'
+    1/1/3: '5.001'
+  entities:
+    - entity_id: living-room-light
+      name: Living room light
+      semantic_type: light
+      capabilities:
+        - name: power
+          dpt: '1.001'
+          state_group_address: 1/1/1
+          command_group_address: 1/1/2
+          readback_group_address: 1/1/1
+        - name: brightness
+          dpt: '5.001'
+          state_group_address: 1/1/3
+          command_group_address: 1/1/3
+          readback_group_address: 1/1/3

@@ -8,7 +8,11 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.coordination import DeterministicLeaseCoordinator
 from domoai.application.runtime_factory import build_runtime
 from domoai.config.settings import Settings
-from domoai.domain.coordination import PhysicalIntent, PhysicalIntentStatus
+from domoai.domain.coordination import (
+    PhysicalIntent,
+    PhysicalIntentClaimDecision,
+    PhysicalIntentStatus,
+)
 from domoai.persistence.coordination import PhysicalIntentRepository
 from domoai.persistence.postgres import PostgresDatabase
 
@@ -50,14 +54,26 @@ async def test_postgres_control_plane_preserves_idempotent_physical_intents() ->
                 plan_id="plan-1",
                 command_id="command-1",
                 fencing_epoch=7,
+                owner_id="owner-1",
+                execution_attempt_id="attempt-1",
                 created_at=now,
                 updated_at=now,
             )
-            first = await repository.claim(intent)
-            replay = await repository.claim(intent.model_copy(update={"plan_id": "plan-replay"}))
+            first = await repository.claim_for_dispatch(intent)
+            await repository.settle(intent=first.intent, status=PhysicalIntentStatus.CONFIRMED)
+            replay = await repository.claim_for_dispatch(
+                intent.model_copy(
+                    update={"owner_id": "owner-2", "execution_attempt_id": "attempt-2"}
+                )
+            )
+            conflict = await repository.claim_for_dispatch(
+                intent.model_copy(update={"plan_id": "plan-replay"})
+            )
 
-            assert first.status is PhysicalIntentStatus.PREPARED
-            assert replay.plan_id == "plan-1"
+            assert first.decision is PhysicalIntentClaimDecision.ACQUIRED
+            assert replay.decision is PhysicalIntentClaimDecision.REPLAY
+            assert conflict.decision is PhysicalIntentClaimDecision.CONFLICT
+            assert replay.intent.plan_id == "plan-1"
             assert await repository.count() == 1
         finally:
             await database.close()
@@ -65,7 +81,7 @@ async def test_postgres_control_plane_preserves_idempotent_physical_intents() ->
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker is unavailable")
 @pytest.mark.asyncio
-async def test_multi_host_runtime_can_use_postgres_with_injected_test_coordinator() -> None:
+async def test_multi_host_runtime_can_use_postgres_with_injected_test_coordinator(tmp_path) -> None:
     from testcontainers.community.postgres import PostgresContainer
 
     class FencedFixtureAdapter(SimulatedHomeAdapter):
@@ -83,6 +99,7 @@ async def test_multi_host_runtime_can_use_postgres_with_injected_test_coordinato
                 multi_host_enabled=True,
                 postgres_dsn=container.get_connection_url(driver=None),
                 instance_id="host-a",
+                commissioning_manifest_path=tmp_path / "commissioning-manifest.json",
             ),
             adapter=FencedFixtureAdapter(),
             lease_coordinator=DeterministicLeaseCoordinator(),

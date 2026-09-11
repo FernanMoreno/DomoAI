@@ -1240,12 +1240,24 @@ async def test_comfort_load_active_in_at_least_minimum_slots() -> None:
         OptimizationStatus.OPTIMAL_HIERARCHY,
     }
     active_slots = {
-        command.intent
-        for plan in result.plans
-        for command in plan.commands
+        slot["slot"] for slot in result.constraint_summary["slots"]
+        if slot["comfort_power_kw"] > 0
+    }
+    comfort = scenario.comfort_loads[0]
+    assert len(active_slots) >= comfort.min_active_slots
+    assert all(comfort.earliest_slot <= slot < comfort.deadline_slot for slot in active_slots)
+    # No objective chooses a particular feasible tie. Replay the actual
+    # commands instead: they must deliver every modeled slot and end safely.
+    commands = {
+        int(command.intent.split(":")[1]): command
+        for plan in result.plans for command in plan.commands
         if command.device_id == device_id
     }
-    assert active_slots == {"scheduled_slot:0", "scheduled_slot:6"}
+    target = comfort.end_value
+    for slot in range(scenario.horizon.slots + 1):
+        if slot in commands:
+            target = commands[slot].value
+        assert target == (comfort.value if slot in active_slots else comfort.end_value)
 
 
 def test_comfort_load_window_too_small_is_rejected_at_construction() -> None:
@@ -2615,3 +2627,356 @@ def test_infeasible_comfort_reports_violation_instead_of_failing() -> None:
     assert comfort_violations
     assert comfort_violations[0]["amount"] > 0
     assert comfort_violations[0]["slot"] == 0
+
+
+def solar_accounting_scenario(
+    *,
+    solar: tuple[float, ...] = (1,),
+    base: tuple[float, ...] = (1,),
+    initial: float = 1,
+    capacity: float = 2,
+    max_charge: float = 0,
+    max_discharge: float = 1,
+    charge_efficiency: float = 1,
+    discharge_efficiency: float = 1,
+    objectives: list[Objective] | None = None,
+    resolution_minutes: int = 60,
+) -> OptimizationScenario:
+    """Small passive scenarios; expected accounting comes from hand-worked cases."""
+    horizon = energy_horizon(slots=len(solar), resolution_minutes=resolution_minutes)
+    return OptimizationScenario(
+        id="solar-accounting",
+        horizon=horizon,
+        energy_context=EnergyContext(
+            horizon=horizon,
+            tariffs=[
+                TariffPoint(slot=t, price_per_kwh=2, currency="EUR") for t in range(len(solar))
+            ],
+            export_tariffs=[
+                TariffPoint(slot=t, price_per_kwh=1, currency="EUR") for t in range(len(solar))
+            ],
+            solar_forecast=[SolarForecastPoint(slot=t, power=p) for t, p in enumerate(solar)],
+            base_load_forecast=[BaseLoadPoint(slot=t, power=p) for t, p in enumerate(base)],
+            battery=BatteryProfile(
+                capacity_kwh=capacity,
+                initial_soc_kwh=initial,
+                min_soc_kwh=0,
+                max_soc_kwh=capacity,
+                max_charge_kw=max_charge,
+                max_discharge_kw=max_discharge,
+                charge_efficiency=charge_efficiency,
+                discharge_efficiency=discharge_efficiency,
+            ),
+            source_revision="solar-accounting-fixture",
+            observed_at=horizon.start,
+        ),
+        objectives=objectives or [Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+
+def test_initial_battery_export_does_not_erase_direct_solar_consumption() -> None:
+    result = CpSatOptimizer(DeviceRegistry()).optimize(solar_accounting_scenario())
+    assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    slot = result.constraint_summary["slots"][0]
+    assert slot["battery_discharge_kw"] == pytest.approx(1)
+    assert slot["grid_export_kw"] == pytest.approx(1)
+    assert result.objective_values["solar_self_consumption_kwh"] == pytest.approx(1)
+
+
+def test_solar_priority_allows_profitable_export_of_initial_battery() -> None:
+    scenario = solar_accounting_scenario(objectives=[
+        Objective(name="maximize_solar_self_consumption", direction="maximize", priority=0),
+        Objective(name="minimize_energy_cost", direction="minimize", priority=1),
+    ])
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.constraint_summary["slots"][0]["grid_export_kw"] == pytest.approx(1)
+    assert result.objective_values["solar_self_consumption_kwh"] == pytest.approx(1)
+    assert result.objective_values["energy_cost"] == pytest.approx(-1)
+
+
+@pytest.mark.parametrize("solar,base,expected", [((1,), (0,), 0), ((2, 0), (0, 1), 1)])
+def test_terminal_solar_storage_is_not_realized_consumption(solar, base, expected) -> None:
+    from domoai.optimizer.scenario import TerminalSOCPolicy
+
+    scenario = solar_accounting_scenario(
+        solar=solar, base=base, initial=0, max_charge=2, max_discharge=2,
+    ).model_copy(update={
+        "constraints": [Constraint(type="max_grid_import", value=0, unit="kW"),
+                        Constraint(type="max_grid_export", value=0, unit="kW")],
+        "terminal_soc_policy": TerminalSOCPolicy(minimum_kwh=1),
+    })
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.objective_values["terminal_soc_kwh"] == pytest.approx(1)
+    assert result.objective_values["solar_self_consumption_kwh"] == pytest.approx(expected)
+
+
+def test_solar_accounting_rejects_unsafe_integer_domain_without_false_success() -> None:
+    scenario = solar_accounting_scenario(capacity=1_000_000_000)
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.status is OptimizationStatus.INVALID
+    assert result.diagnostics[0].code == "energy_numeric_domain"
+    assert "solar_accounting" not in result.constraint_summary
+
+
+@pytest.mark.parametrize(
+    "initial,capacity,solar,base,max_charge,max_discharge,eta_c,eta_d,want",
+    [
+        (1, 3, (1, 0), (0, 1), 2, 2, 1, 1, (0, 1, 0, 0)),
+        (0, .9, (1, 0), (0, .72), 1, .72, .9, .8, (.72, 0, .28, 0)),
+        (0, 1.8, (1, 0), (0, 1), 2, 1.44, .9, .8, (.28, .44, .28, 0)),
+        (0, 1.998, (1, 0), (0, 1.2), 2, 1.7, .999, .9,
+         (1671 / 5555, .5, 998677 / 11110000, .1093)),
+    ],
+)
+def test_mixed_origin_storage_losses_and_local_credit(
+    initial, capacity, solar, base, max_charge, max_discharge, eta_c, eta_d, want,
+) -> None:
+    scenario = solar_accounting_scenario(
+        initial=initial, capacity=capacity, solar=solar, base=base, max_charge=max_charge,
+        max_discharge=max_discharge, charge_efficiency=eta_c, discharge_efficiency=eta_d,
+    )
+    context = scenario.energy_context
+    assert context is not None
+    context.tariffs[0].price_per_kwh = -1
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    slots = result.constraint_summary["slots"]
+    assert slots[0]["battery_charge_kw"] == pytest.approx(max_charge)
+    assert slots[1]["battery_discharge_kw"] == pytest.approx(max_discharge)
+    evidence = result.constraint_summary["solar_accounting"]
+    actual = (
+        evidence["self_consumption_kwh"], evidence["exported_kwh"],
+        evidence["charge_loss_kwh"] + evidence["discharge_loss_kwh"],
+        evidence["terminal_stored_kwh"],
+    )
+    assert actual == pytest.approx(want, abs=1e-12)
+    assert sum(actual) == pytest.approx(1, abs=1e-12)
+    assert result.objective_values["solar_self_consumption_kwh"] == actual[0]
+    if eta_d == .9:
+        assert evidence["objective_credit_kwh"] == pytest.approx(.30081, abs=1e-12)
+        assert evidence["local_quantization_remainder_kwh"] == pytest.approx(
+            9 / 111100000, abs=1e-16,
+        )
+        assert evidence["convention"]["discharge_cost"] == 1111
+    if initial:
+        origins = {r["origin"]: r for r in evidence["battery_origins"]}
+        assert origins["initial_unknown"]["local_delivered_kwh"] == pytest.approx(1)
+        assert origins["horizon_grid"]["terminal_stored_kwh"] == pytest.approx(1)
+
+
+def test_stored_solar_later_exported_is_not_counted_twice() -> None:
+    scenario = solar_accounting_scenario(
+        initial=0, capacity=1, solar=(1, 0), base=(0, 0), max_charge=1,
+    )
+    context = scenario.energy_context
+    assert context is not None and context.export_tariffs is not None
+    context.export_tariffs[0].price_per_kwh = 0
+    context.export_tariffs[1].price_per_kwh = 3
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    evidence = result.constraint_summary["solar_accounting"]
+    assert result.constraint_summary["slots"][0]["battery_charge_kw"] == pytest.approx(1)
+    assert result.constraint_summary["slots"][1]["grid_export_kw"] == pytest.approx(1)
+    assert evidence["self_consumption_kwh"] == 0
+    assert evidence["exported_kwh"] == pytest.approx(1)
+    assert evidence["terminal_stored_kwh"] == 0
+
+
+def test_horizon_restart_preserves_results_but_does_not_invent_carried_solar_origin() -> None:
+    first = solar_accounting_scenario(initial=0, capacity=1, base=(0,), max_charge=1)
+    first.constraints = [
+        Constraint(type="max_grid_import", value=0, unit="kW"),
+        Constraint(type="max_grid_export", value=0, unit="kW"),
+    ]
+    initial_result = CpSatOptimizer(DeviceRegistry()).optimize(first)
+    stored = initial_result.constraint_summary["solar_accounting"]
+    assert stored["self_consumption_kwh"] == 0
+    assert stored["terminal_stored_kwh"] == 1
+    reconstructed = OptimizationScenario.model_validate_json(first.model_dump_json())
+    replay = CpSatOptimizer(DeviceRegistry()).optimize(reconstructed)
+    assert replay.constraint_summary["solar_accounting"] == stored
+
+    second = solar_accounting_scenario(solar=(0,), base=(1,), initial=1, capacity=1)
+    next_horizon = second.horizon.model_copy(update={
+        "start": first.horizon.end, "end": first.horizon.end + timedelta(hours=1),
+    })
+    second.horizon = next_horizon
+    assert second.energy_context is not None
+    second.energy_context.horizon = next_horizon
+    second.energy_context.observed_at = next_horizon.start
+    outcome = CpSatOptimizer(DeviceRegistry()).optimize(second)
+    evidence = outcome.constraint_summary["solar_accounting"]
+    assert evidence["generated_kwh"] == evidence["self_consumption_kwh"] == 0
+    assert evidence["battery_origins"][2]["initial_kwh"] == 1
+    assert evidence["battery_origins"][2]["local_delivered_kwh"] == 1
+    assert evidence["battery_origins"][0]["initial_kwh"] == 0
+    assert initial_result.constraint_summary["solar_accounting"] == stored
+
+
+def test_grid_charging_and_no_solar_never_create_solar_credit() -> None:
+    scenario = solar_accounting_scenario(
+        solar=(0, 0), base=(0, 1), initial=0, capacity=1, max_charge=1,
+    )
+    assert scenario.energy_context is not None
+    scenario.energy_context.tariffs[0].price_per_kwh = -1
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    evidence = result.constraint_summary["solar_accounting"]
+    assert evidence["generated_kwh"] == evidence["self_consumption_kwh"] == 0
+    assert evidence["objective_credit_kwh"] == evidence["local_quantization_remainder_kwh"] == 0
+    assert evidence["battery_origins"][1]["charged_kwh"] == 1
+    assert evidence["battery_origins"][1]["local_delivered_kwh"] == 1
+
+
+@pytest.mark.parametrize("minutes", [1, 15, 60])
+def test_no_battery_uses_local_demand_and_keeps_all_origin_inventories_zero(minutes) -> None:
+    scenario = solar_accounting_scenario(solar=(2,), base=(1,), resolution_minutes=minutes)
+    assert scenario.energy_context is not None
+    scenario.energy_context.battery = None
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    evidence = result.constraint_summary["solar_accounting"]
+    assert evidence["self_consumption_kwh"] == pytest.approx(minutes / 60)
+    assert evidence["exported_kwh"] == pytest.approx(minutes / 60)
+    assert evidence["local_quantization_remainder_kwh"] == 0
+    assert all(
+        value == 0
+        for origin in evidence["battery_origins"]
+        for name, value in origin.items() if name != "origin"
+    )
+
+
+def test_timeout_and_infeasibility_do_not_publish_zero_solar_evidence() -> None:
+    scenario = solar_accounting_scenario()
+    timeout = CpSatOptimizer(DeviceRegistry()).optimize(
+        scenario.model_copy(update={"solver_time_limit_seconds": 0})
+    )
+    assert timeout.status is OptimizationStatus.TIMEOUT
+    assert "solar_accounting" not in timeout.constraint_summary
+    assert "solar_self_consumption_kwh" not in timeout.objective_values
+    impossible = solar_accounting_scenario(solar=(0,), base=(2,), initial=0, max_discharge=0)
+    impossible.constraints = [Constraint(type="max_grid_import", value=0, unit="kW")]
+    result = CpSatOptimizer(DeviceRegistry()).optimize(impossible)
+    assert result.status is OptimizationStatus.INFEASIBLE
+    assert "solar_accounting" not in result.constraint_summary
+    assert "solar_self_consumption_kwh" not in result.objective_values
+
+
+def test_solar_direct_demand_includes_cooling_as_positive_consumption() -> None:
+    scenario = solar_accounting_scenario(solar=(6, 6), base=(0, 0), initial=0)
+    context = scenario.energy_context
+    assert context is not None
+    context.battery = None
+    context.thermal = ThermalProfile(
+        capacitance_kwh_per_c=1, ua_kw_per_c=1, initial_temperature_c=26,
+        comfort_min_c=20, comfort_max_c=26, max_heat_kw=0, max_cool_kw=5,
+        heating_cop=1, cooling_cop=1,
+    )
+    context.exterior_temperature_forecast = [
+        ExteriorTemperaturePoint(slot=t, temperature_c=30) for t in range(2)
+    ]
+    scenario.constraints = [Constraint(type="comfort_temp_max", value=26, unit="degC", hard=True)]
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    slots = result.constraint_summary["slots"]
+    assert slots[0]["hvac_power_kw"] < -3.99
+    assert all(slot["load_power_kw"] == 0 for slot in slots)
+    assert result.objective_values["solar_self_consumption_kwh"] == pytest.approx(
+        sum(-slot["hvac_power_kw"] for slot in slots), abs=1e-12,
+    )
+
+
+@pytest.mark.parametrize("value", [0.0, 0.2])
+def test_a12_usd_rejects_eur_terminal_policy_before_solver(value):
+    payload = energy_context_for().model_dump(mode="python")
+    for field in ("tariffs", "export_tariffs"):
+        for point in payload.get(field) or []:
+            point["currency"] = "USD"
+    context = EnergyContext.model_validate(payload)
+    scenario = OptimizationScenario(
+        id="a12-terminal",
+        horizon=context.horizon,
+        energy_context=context,
+        terminal_soc_policy={"value_eur_per_kwh": value},
+    )
+    errors = validate_scenario(scenario, DeviceRegistry())
+    assert "terminal_soc_currency_mismatch" in {error.code for error in errors}
+    assert CpSatOptimizer(DeviceRegistry()).optimize(scenario).status is OptimizationStatus.INVALID
+
+
+@pytest.mark.parametrize("currency", ["EUR", "USD"])
+def test_a12_passive_cost_currency_and_terminal_noop(currency):
+    horizon = Horizon(
+        timezone="UTC",
+        start=datetime(2026, 9, 1, tzinfo=UTC),
+        end=datetime(2026, 9, 1, 2, tzinfo=UTC),
+        resolution_minutes=60,
+    )
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[TariffPoint(slot=i, price_per_kwh=0.2, currency=currency) for i in range(2)],
+        solar_forecast=[SolarForecastPoint(slot=i, power=0) for i in range(2)],
+        base_load_forecast=[BaseLoadPoint(slot=i, power=1.0) for i in range(2)],
+        source_revision="révision-" + "x" * 300,
+        observed_at=horizon.start,
+    )
+    result = CpSatOptimizer(DeviceRegistry()).optimize(
+        OptimizationScenario(id="a12-passive", horizon=horizon, energy_context=context)
+    )
+    assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    assert result.objective_values["energy_cost"] == pytest.approx(0.4)
+    accounting = result.constraint_summary["accounting"]
+    assert accounting["currency"] == currency
+    assert accounting["objective_units"]["energy_cost"] == currency
+    assert accounting["objective_units"]["terminal_soc_value_eur"] == "EUR"
+    assert accounting["terminal_value_applied"] is False
+    assert result.objective_values["terminal_soc_value_eur"] == 0
+    import hashlib
+
+    assert (
+        accounting["source_revision_digest"]
+        == hashlib.sha256(context.source_revision.encode("utf-8")).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("currency", ["EUR", "USD"])
+@pytest.mark.parametrize("coefficient", [None, 0.0, 0.05])
+async def test_a12_battery_degradation_inherits_context_with_numerical_oracle(
+    currency, coefficient
+):
+    _, registry, service = await build_context()
+    device_id = next(device.id for device in registry.devices if device.type.value == "switch")
+    context, horizon = _degradation_context(
+        degradation_cost_per_kwh=coefficient, tariff_expensive=1.0
+    )
+    for point in context.tariffs:
+        point.currency = currency
+    result = service.optimize(_degradation_scenario("a12-battery", context, horizon, device_id))
+    # 0.5 kW for 15 minutes: 0.125 kWh, charged then discharged at efficiency 1.
+    assert result.objective_values["battery_throughput_kwh"] == pytest.approx(0.25)
+    assert result.objective_values["battery_degradation_cost"] == pytest.approx(
+        0.25 * (coefficient or 0)
+    )
+    assert result.objective_values["energy_cost"] == pytest.approx(
+        0.0125 + 0.25 * (coefficient or 0)
+    )
+    accounting = result.constraint_summary["accounting"]
+    assert accounting["objective_units"]["battery_degradation_cost"] == currency
+    assert accounting["degradation_currency_source"] == (
+        "not_configured" if coefficient is None else "context_inherited"
+    )
+
+
+def test_a12_usd_terminal_reserve_kwh_is_valid_and_monetary_policy_is_rejected_before_spawn():
+    context = energy_context_for()
+    for point in context.tariffs:
+        point.currency = "USD"
+    for point in context.export_tariffs or []:
+        point.currency = "USD"
+    scenario = OptimizationScenario(
+        id="a12-reserve",
+        horizon=context.horizon,
+        energy_context=context,
+        terminal_soc_policy={"minimum_kwh": 1},
+    )
+    assert validate_scenario(scenario, DeviceRegistry()) == []
+    result = CpSatOptimizer(DeviceRegistry()).optimize(scenario)
+    assert result.objective_values["terminal_soc_kwh"] >= 1
+    assert result.constraint_summary["accounting"]["terminal_value_applied"] is False

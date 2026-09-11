@@ -19,7 +19,7 @@ from domoai.domain.automation import (
     AutomationRuleStatus,
     automation_rule_digest,
 )
-from domoai.domain.errors import DomainError
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     PlanStatus,
     StateChangedEvent,
@@ -59,6 +59,7 @@ class LocalAutomationEngine:
     async def register(
         self, rule: AutomationRule, consent: AutomationConsent
     ) -> AutomationRule:
+        self._assert_template_contract(rule)
         self._assert_consent(rule, consent)
         if consent.expires_at <= self._now():
             raise ValueError("automation consent has expired")
@@ -80,6 +81,7 @@ class LocalAutomationEngine:
     ) -> AutomationRule:
         """Install a new rule version only with a fresh standing consent."""
 
+        self._assert_template_contract(rule)
         record = await self.repository.get(rule.id)
         if record is None:
             raise ValueError("automation rule does not exist")
@@ -158,7 +160,7 @@ class LocalAutomationEngine:
         )
 
     async def evaluate_time(self, now: datetime | None = None) -> list[AutomationEvaluation]:
-        current = now or self._now()
+        current = self._utc_instant(now or self._now(), "automation clock")
         records = await self.repository.list_all()
         evaluations: list[AutomationEvaluation] = []
         for record in records:
@@ -174,65 +176,89 @@ class LocalAutomationEngine:
             if local.hour != trigger.time_of_day.hour or local.minute != trigger.time_of_day.minute:
                 continue
             event = AutomationEvent(
-                event_id=f"time:{record.rule.id}:{current.astimezone(UTC).strftime('%Y-%m-%dT%H:%M')}",
+                event_id=self._time_event_id(record.rule.id, current),
                 event_type="time",
                 occurred_at=current,
+                target_rule_id=record.rule.id,
             )
             evaluations.extend(await self.handle_event(event))
         return evaluations
 
     async def handle_event(self, event: AutomationEvent) -> list[AutomationEvaluation]:
+        event = AutomationEvent.model_validate(event.model_dump(mode="python"))
         evaluations: list[AutomationEvaluation] = []
+        occurred_at = self._utc_instant(event.occurred_at, "automation event")
         for record in await self.repository.list_all():
+            if event.event_type == "time" and event.target_rule_id != record.rule.id:
+                continue
             if record.rule.status is not AutomationRuleStatus.ENABLED:
                 continue
+            handled_at = self._utc_instant(self._now(), "automation clock")
             stale_after = (
                 self.state_store.stale_after
                 if self.state_store is not None
                 else timedelta(minutes=5)
             )
-            if event.occurred_at > self._now() or self._now() - event.occurred_at > stale_after:
+            if occurred_at > handled_at or handled_at - occurred_at > stale_after:
                 evaluation = self._evaluation(record.rule, event, "skipped", "event_stale")
                 evaluations.append(evaluation)
                 self._audit_evaluation(evaluation)
                 continue
-            if record.rule.expires_at is not None and self._now() >= record.rule.expires_at:
+            if (
+                record.rule.expires_at is not None
+                and handled_at >= record.rule.expires_at.astimezone(UTC)
+            ):
                 await self.repository.set_status(record.rule.id, AutomationRuleStatus.EXPIRED)
                 evaluations.append(self._evaluation(record.rule, event, "expired", "rule_expired"))
                 self._audit_evaluation(evaluations[-1])
                 continue
             if not self._matches_trigger(record.rule, event):
                 continue
-            if not await self._conditions_match(record.rule.conditions, event):
-                evaluation = self._evaluation(record.rule, event, "skipped", "condition_not_met")
+            try:
+                self._assert_template_contract(record.rule)
+            except DomainError:
+                evaluation = self._evaluation(
+                    record.rule, event, "blocked", "revalidation_required"
+                )
+                evaluations.append(evaluation)
+                self._audit_evaluation(evaluation)
+                continue
+            normalized_event = self._normalize_time_event(record.rule, event)
+            if not await self._conditions_match(record.rule.conditions, normalized_event):
+                evaluation = self._evaluation(
+                    record.rule, normalized_event, "skipped", "condition_not_met"
+                )
                 evaluations.append(evaluation)
                 self._audit_evaluation(evaluation)
                 continue
             if not self._consent_is_current(record.rule, record.consent):
-                evaluation = self._evaluation(record.rule, event, "blocked", "consent_invalid")
+                evaluation = self._evaluation(
+                    record.rule, normalized_event, "blocked", "consent_invalid"
+                )
                 evaluations.append(evaluation)
                 self._audit_evaluation(evaluation)
                 continue
+            claim_at = self._utc_instant(self._now(), "automation clock")
             claimed = await self.repository.claim_event(
-                record.rule.id, event.event_id, self._now()
+                record.rule.id, normalized_event.event_id, claim_at
             )
             if not claimed:
                 reason = (
                     "duplicate_event"
-                    if record.last_event_id == event.event_id
+                    if record.last_event_id == normalized_event.event_id
                     else "cooldown_active"
                 )
                 status = "duplicate" if reason == "duplicate_event" else "cooldown"
                 evaluation = self._evaluation(
                     record.rule,
-                    event,
+                    normalized_event,
                     cast(AutomationEvaluationStatus, status),
                     reason,
                 )
                 evaluations.append(evaluation)
                 self._audit_evaluation(evaluation)
                 continue
-            evaluation = await self._execute_claimed(record.rule, record.consent, event)
+            evaluation = await self._execute_claimed(record.rule, record.consent, normalized_event)
             evaluations.append(evaluation)
             self._audit_evaluation(evaluation)
         return evaluations
@@ -325,13 +351,55 @@ class LocalAutomationEngine:
     def _matches_trigger(rule: AutomationRule, event: AutomationEvent) -> bool:
         trigger = rule.trigger
         if trigger.type == "time":
-            return event.event_type == "time"
+            if (
+                event.event_type != "time"
+                or event.target_rule_id != rule.id
+                or trigger.time_of_day is None
+                or trigger.timezone is None
+            ):
+                return False
+            local = event.occurred_at.astimezone(UTC).astimezone(ZoneInfo(trigger.timezone))
+            return (
+                local.hour == trigger.time_of_day.hour
+                and local.minute == trigger.time_of_day.minute
+            )
         return (
             event.event_type == "state_changed"
             and trigger.device_id == event.device_id
             and trigger.capability == event.capability
             and (trigger.expected is None or trigger.expected == event.value)
         )
+
+    @staticmethod
+    def _time_event_id(rule_id: str, occurred_at: datetime) -> str:
+        utc = LocalAutomationEngine._utc_instant(occurred_at, "automation event")
+        return f"time:{rule_id}:{utc.strftime('%Y-%m-%dT%H:%M')}"
+
+    @staticmethod
+    def _utc_instant(value: datetime, label: str) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{label} must be timezone-aware")
+        return value.astimezone(UTC)
+
+    def _normalize_time_event(
+        self, rule: AutomationRule, event: AutomationEvent
+    ) -> AutomationEvent:
+        if event.event_type != "time":
+            return event
+        return event.model_copy(
+            update={"event_id": self._time_event_id(rule.id, event.occurred_at)}
+        )
+
+    def _assert_template_contract(self, rule: AutomationRule) -> None:
+        deployment_id = getattr(self.plan_service, "deployment_id", None)
+        if deployment_id is not None and (
+            rule.plan_template.deployment_id != deployment_id or rule.schema_version != "v2"
+        ):
+            raise DomainError(
+                ErrorCode.PLAN_IDENTITY_CONFLICT,
+                "Automation rule requires explicit revalidation and consent",
+                details={"reason": "revalidation_required"},
+            )
 
     @staticmethod
     def _assert_consent(rule: AutomationRule, consent: AutomationConsent) -> None:

@@ -75,6 +75,29 @@ El objetivo correcto es:
 
 > **zero unnecessary configuration**
 
+Para un producto nuevo, la ruta corta es una receta declarativa si el
+comportamiento cabe en un engine existente. La versión actual ofrece MQTT,
+REST/OpenAPI, Modbus, KNX y Matter. Modbus declara unidad/registro/codec,
+KNX declara grupo/DPT/readback y Matter declara nodo/endpoint/cluster/
+atributo/comandos estándar. La receta se compila contra el adapter nativo y
+el agente recibe después únicamente `Device`, `Capability`, estado y comandos
+semánticos a través de MCP.
+
+Los cinco métodos (`discover`, `probe`, `validate`, `build_adapter` y
+`diagnose`) siguen siendo el escape para protocolos propietarios, pairing,
+serial/BLE/Thread o semántica que no pueda expresarse de forma segura. No es
+necesario escribirlos para cada producto cuando basta una receta tipada; el
+scaffold genera el proveedor y el despliegue inyecta el transporte real.
+
+Para productos cuyo transporte y semántica ya están descritos, el operador
+puede usar una receta declarativa pública. La receta selecciona MQTT o
+REST/OpenAPI, declara el `device_type` y las capabilities normalizadas, y
+obliga a declarar el readback de cada escritura. El endpoint y las
+credenciales siguen entrando por el flujo de `ConnectionManager`; el agente
+recibe después el mismo `AdapterPort`, `DeviceRegistry`, `StateStore` y MCP que
+los conectores escritos a mano. La guía operativa está en
+[`docs/connector-recipes.md`](connector-recipes.md).
+
 El usuario solo debería introducir aquello que realmente no puede descubrirse, inferirse de forma segura o importarse automáticamente.
 
 ---

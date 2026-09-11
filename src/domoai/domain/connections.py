@@ -10,6 +10,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from .connector_recipes import ConnectorRecipe
 from .models import ScalarValue, StrictModel
 
 _SENSITIVE_KEY_FRAGMENTS = (
@@ -325,6 +326,7 @@ class ProviderCatalogEntry(StrictModel):
     supports_discovery: bool = True
     supports_manual_setup: bool = True
     steps: tuple[SetupStep, ...] = ()
+    recipe: ConnectorRecipe | None = None
 
     @classmethod
     def from_manifest(cls, manifest: Any) -> ProviderCatalogEntry:
@@ -336,6 +338,7 @@ class ProviderCatalogEntry(StrictModel):
             supports_discovery=manifest.supports_discovery,
             supports_manual_setup=manifest.supports_manual_setup,
             steps=manifest.steps,
+            recipe=getattr(manifest, "recipe", None),
         )
 
 

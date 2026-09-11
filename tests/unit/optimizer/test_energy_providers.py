@@ -1587,3 +1587,30 @@ async def test_composer_populates_exterior_temperature_forecast_from_provider() 
     assert len(context.exterior_temperature_forecast) == context.horizon.slots
     assert context.exterior_temperature_forecast[0].temperature_c == 5.0
     assert "exterior_temperature:exterior_temperature_fixture@" in context.source_revision
+
+
+def test_a12_composed_cross_currency_error_is_sanitized():
+    tariffs, solar, _ = provider_inputs()
+    export = tariffs.model_copy(
+        update={
+            "points": [point.model_copy(update={"currency": "USD"}) for point in tariffs.points]
+        }
+    )
+    composed = ComposedEnergyContextProvider(
+        StaticTariffProvider(tariffs),
+        StaticSolarForecastProvider(solar),
+        export_tariffs=StaticTariffProvider(export),
+        now=lambda: NOW,
+    )
+    with pytest.raises(EnergyProviderError) as error:
+        composed.get_context(tariffs.horizon)
+    assert error.value.diagnostic.code == "provider_invalid"
+    assert "input_value" not in str(error.value)
+
+
+def test_a12_tariff_series_rejects_mixed_currency_before_composition():
+    tariffs, _, _ = provider_inputs()
+    payload = tariffs.model_dump(mode="python")
+    payload["points"][1]["currency"] = "USD"
+    with pytest.raises(ValidationError, match="currency"):
+        TariffSeries.model_validate(payload)

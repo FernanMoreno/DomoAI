@@ -13,6 +13,7 @@ from domoai.application.connection_providers import (
     FixtureConnectionProvider,
 )
 from domoai.domain.connections import ConnectionCandidate, ConnectionDraft
+from domoai.domain.coordination import LeaseScope
 from domoai.domain.models import (
     AdapterExecutionAck,
     AdapterHealth,
@@ -104,7 +105,10 @@ async def _build_manager(
 ) -> tuple[ConnectionManager, SQLiteDatabase, AuditRecorder, FileSecretStore]:
     database = SQLiteDatabase(tmp_path / "manager.sqlite3")
     await database.initialize()
-    repository = ConnectionRepository(database)
+    repository = ConnectionRepository(
+        database,
+        scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+    )
     runtime = ManagedAdapterSet()
     registry = ConnectionProviderRegistry(operational_metrics=operational_metrics)
     registry.register(

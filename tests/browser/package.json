@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "name": "domoai-household-onboarding-browser-harness",
+  "version": "0.0.0",
+  "description": "Local real-browser tooling for P01 tests",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

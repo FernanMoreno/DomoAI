@@ -172,17 +172,23 @@ class _RuntimeStub:
 
 
 class _LifecycleStub:
-    started = False
-    closed = False
-    running_task_count = 0
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+        self.required_task_states: dict[str, str] = {}
 
     async def start(self) -> None:
         self.started = True
-        self.running_task_count = 2
+        self.required_task_states = {
+            "domoai-event-consumer": "running",
+            "domoai-scheduler": "running",
+        }
 
     async def close(self) -> None:
         self.closed = True
-        self.running_task_count = 0
+        self.required_task_states = {
+            name: "cancelled" for name in self.required_task_states
+        }
 
 
 @pytest.mark.asyncio

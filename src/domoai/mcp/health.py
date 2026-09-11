@@ -110,10 +110,19 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         adapter = {"adapter_id": "unknown", "connected": False, "status": "unavailable"}
         adapter_ready = False
 
+    required_task_states = getattr(lifecycle, "required_task_states", {})
+    if not isinstance(required_task_states, Mapping):
+        required_task_states = {}
+    required_task_states = {
+        str(name): str(state) for name, state in required_task_states.items()
+    }
+    runtime_closing = bool(getattr(runtime, "closing", False))
     lifecycle_ready = bool(
         getattr(lifecycle, "started", False)
+        and not getattr(lifecycle, "closing", False)
         and not getattr(lifecycle, "closed", False)
-        and getattr(lifecycle, "running_task_count", 0) >= 2
+        and required_task_states
+        and all(state == "running" for state in required_task_states.values())
     )
     ownership = getattr(runtime, "ownership", None)
     ownership_ready = ownership is None or not bool(getattr(ownership, "released", True))
@@ -129,6 +138,7 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
     freshness_ready = not has_state_store or freshness.get("status") == "current"
     is_ready = (
         lifecycle_ready
+        and not runtime_closing
         and adapter_ready
         and ownership_ready
         and physical["status"] == "ready"
@@ -136,8 +146,16 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         and coordination_ready
     )
     reason_codes: list[str] = []
-    if not lifecycle_ready:
+    if runtime_closing:
+        reason_codes.append("runtime_closing")
+    if not lifecycle_ready and not bool(getattr(lifecycle, "started", False)):
         reason_codes.append("runtime_not_started")
+    if not lifecycle_ready:
+        reason_codes.extend(
+            f"runtime_task_{state}:{name}"
+            for name, state in required_task_states.items()
+            if state != "running"
+        )
     if not adapter_ready:
         reason_codes.append("adapter_not_ready")
     components = adapter.get("components")
@@ -166,9 +184,10 @@ async def readyz(runtime: Any, _: Request) -> JSONResponse:
         "service": "domoai",
         "status": "ready" if is_ready else "not_ready",
         "runtime": {
-            "status": "ready" if lifecycle_ready else "not_ready",
+            "status": "ready" if lifecycle_ready and not runtime_closing else "not_ready",
             "started": bool(getattr(lifecycle, "started", False)),
             "running_tasks": int(getattr(lifecycle, "running_task_count", 0)),
+            "required_tasks": required_task_states,
         },
         "adapter": adapter,
         "ownership": {"active": ownership_ready},

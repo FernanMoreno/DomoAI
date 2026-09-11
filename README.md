@@ -201,6 +201,24 @@ execution and MCP keep one semantic path and one Home Assistant client.
 See [`docs/adapter-sdk.md`](docs/adapter-sdk.md) and
 [`docs/contracts.md`](docs/contracts.md) for the public boundary.
 
+For a known MQTT, REST/OpenAPI, Modbus, KNX or Matter product, use a declarative connector recipe:
+[`docs/documentation/README.md`](docs/documentation/README.md) is the complete
+documentation index, and [`docs/connector-recipes.md`](docs/connector-recipes.md)
+is the compact technical reference. The recipe
+generator creates the provider package and its manifest; deployment supplies
+endpoint and credentials through the normal connection control plane. The
+agent still sees only normalized devices, capabilities, state and semantic
+commands.
+
+Typed Modbus, KNX and Matter profiles compile into the existing native
+adapters with explicit register, group-address or endpoint/cluster/attribute
+allowlists. Use the five-method custom provider SDK only for protocols or
+product behavior that cannot be represented by a supported recipe; secret-free
+examples are in `examples/connectors/`. Local OAuth readiness is checked with
+`uv run domoai-admin oauth preflight --env-file deploy/gateway.env`; external
+application registration and physical device qualification remain operator
+gates.
+
 ## Live Home Assistant runtime
 
 Para desarrollo local sin hardware, el laboratorio virtual reproducible está

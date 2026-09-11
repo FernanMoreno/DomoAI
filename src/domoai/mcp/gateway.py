@@ -11,9 +11,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from mcp.server.auth.provider import AccessToken
 from mcp.server.fastmcp import FastMCP
 from starlette.types import Receive, Scope, Send
 
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.runtime_factory import RuntimeComposition
 from domoai.config.settings import Settings
 from domoai.mcp.unified_server import (
@@ -50,8 +52,12 @@ class GatewayApplication:
         app = self.server.streamable_http_app()
         connection_manager = getattr(self.runtime, "connection_manager", None)
         if connection_manager is not None:
+            from domoai.application.household_onboarding import HouseholdOnboardingService
+            from domoai.application.state_service import StateService
             from domoai.management.api import create_management_app
             from domoai.mcp.auth import StaticBearerTokenVerifier
+            from domoai.mcp.configured import _adapter_ids
+            from domoai.mcp.resources import coverage_evidence_snapshot
 
             auth_verifier = None
             if self.runtime.settings.mcp_client_token_file is not None:
@@ -59,10 +65,28 @@ class GatewayApplication:
                     self.runtime.settings.mcp_client_token_file
                 )
 
-                async def verify_management_token(token: str) -> bool:
-                    return await verifier.verify_token(token) is not None
+                async def verify_management_token(token: str) -> AccessToken | None:
+                    return await verifier.verify_token(token)
 
                 auth_verifier = verify_management_token
+            policy = AuthorityPolicy(
+                tenant_id=self.runtime.settings.mcp_tenant_id,
+                household_id=self.runtime.settings.mcp_household_id,
+            )
+            onboarding = None
+            if getattr(self.runtime, "registry", None) is not None and getattr(
+                self.runtime, "state_store", None
+            ) is not None:
+                onboarding = HouseholdOnboardingService(
+                    registry=self.runtime.registry,
+                    state_service=StateService(self.runtime.state_store),
+                    manager=connection_manager, authority_policy=policy,
+                    coverage_projector=coverage_evidence_snapshot,
+                    membership=lambda: _adapter_ids(self.runtime.adapter),
+                    readiness=lambda: _onboarding_checks(self.runtime),
+                    public_url=self.runtime.settings.mcp_public_url.rstrip("/")
+                    + self.runtime.settings.mcp_path,
+                )
             management_app = create_management_app(
                 connection_manager,
                 ets_importer=getattr(self.runtime, "ets_importer", None),
@@ -77,8 +101,11 @@ class GatewayApplication:
                 repair_engine=getattr(self.runtime, "repair_engine", None),
                 mqtt_discovery=getattr(self.runtime, "mqtt_discovery", None),
                 host=self.runtime.settings.mcp_host,
+                max_request_body_size=self.runtime.settings.mcp_max_request_body_size,
                 tls_enabled=urlparse(self.runtime.settings.mcp_public_url).scheme == "https",
                 auth_verifier=auth_verifier,
+                authority_policy=policy,
+                household_onboarding=onboarding,
             )
             app.mount("", management_app)
         if not self.runtime.settings.mcp_server_sent_events:
@@ -132,6 +159,28 @@ class GatewayApplication:
             base_url=self.runtime.settings.mcp_public_url,
         ) as client:
             yield client
+
+
+def _onboarding_checks(runtime: RuntimeComposition) -> list[Any]:
+    from domoai.domain.household_onboarding import OnboardingCheck
+
+    lifecycle = runtime.lifecycle
+    lifecycle_ok = lifecycle.started and not lifecycle.closing and all(
+        state == "running" for state in lifecycle.required_task_states.values()
+    )
+    return [
+        OnboardingCheck(code="service", status="passed"),
+        OnboardingCheck(code="lifecycle", status="passed" if lifecycle_ok else "failed"),
+        OnboardingCheck(
+            code="ownership", status="passed"
+            if runtime.ownership is not None and not runtime.ownership.released else "failed",
+        ),
+        OnboardingCheck(
+            code="connectors", status="passed"
+            if runtime.connection_provider_registry is not None
+            and runtime.connection_provider_registry.providers else "pending",
+        ),
+    ]
 
 
 async def _terminate_active_http_sessions(server: FastMCP) -> None:

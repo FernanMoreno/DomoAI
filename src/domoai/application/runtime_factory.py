@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -41,6 +43,7 @@ from domoai.adapters.mqtt.config import load_mapping as load_mqtt_mapping
 from domoai.adapters.mqtt.discovery import MqttDiscoveryImporter
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
 from domoai.adapters.zigbee2mqtt.connection import Zigbee2MqttConnectionProvider
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.bundle_commit import BundleCommitService, BundleRecoveryService
 from domoai.application.commissioning import (
     CommissioningPersistenceError,
@@ -59,6 +62,7 @@ from domoai.application.executor import PlanExecutor
 from domoai.application.facade import DomoticsFacade
 from domoai.application.home_assistant_oauth import HomeAssistantOAuthService
 from domoai.application.home_assistant_oauth_discovery import HomeAssistantOAuthMetadataService
+from domoai.application.household_preferences import HouseholdPreferenceService
 from domoai.application.household_queue import HouseholdWorkQueues
 from domoai.application.knx_secure import KnxSecureCredentialStore
 from domoai.application.local_automation import LocalAutomationEngine
@@ -88,6 +92,7 @@ from domoai.domain.coordination import FencingToken, LeaseCoordinator, LeaseScop
 from domoai.domain.energy import DispatchableBatteryBinding, EVActuator, EVChargingBinding
 from domoai.domain.models import AuthorityContext, Plan, PrincipalRole
 from domoai.domain.multihost_qualification import load_multihost_qualification_evidence
+from domoai.optimizer.base_load import DeclaredBaseLoadProvider
 from domoai.optimizer.omie import OmieTariffHttpClient, OmieTariffProvider
 from domoai.optimizer.open_meteo import (
     OpenMeteoHttpClient,
@@ -102,6 +107,11 @@ from domoai.optimizer.providers import (
     StateStoreBatteryProvider,
     StateStoreEVProvider,
 )
+from domoai.persistence.audit_outbox import (
+    AuditOutboxDelivery,
+    AuditOutboxDispatcher,
+    publish_audit_outbox_event,
+)
 from domoai.persistence.backup import (
     BackupManifest,
     BackupService,
@@ -111,6 +121,7 @@ from domoai.persistence.backup import (
 from domoai.persistence.connection_documents import ConnectionDocumentRepository
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.coordination import MetricHistoryRepository, PhysicalIntentRepository
+from domoai.persistence.household_preferences import HouseholdPreferenceRepository
 from domoai.persistence.postgres import PostgresDatabase
 from domoai.persistence.qualification import SQLiteCommissioningQualificationRepository
 from domoai.persistence.repositories import (
@@ -157,6 +168,8 @@ from domoai.runtime.risk_classifier import RiskClassifier
 from domoai.runtime.safety_kernel import SafetyKernel
 from domoai.runtime.state_store import StateStore
 from domoai.security.secrets import FileSecretStore
+
+logger = logging.getLogger(__name__)
 
 
 def create_adapter(
@@ -580,6 +593,14 @@ def _create_energy_context_provider(
         raise ValueError(
             "DOMOAI_SOLAR_PROVIDER must be 'open_meteo' when energy live mode is enabled"
         )
+    base_load_provider = (
+        DeclaredBaseLoadProvider.from_file(
+            settings.base_load_profile_path,
+            tenant_id=settings.mcp_tenant_id,
+            household_id=settings.mcp_household_id,
+        )
+        if settings.base_load_profile_path is not None else None
+    )
     profile = resolve_solar_profile(
         profile_path=settings.solar_profile_path,
         latitude=settings.solar_latitude,
@@ -599,6 +620,7 @@ def _create_energy_context_provider(
         solar=OpenMeteoSolarProvider(solar_client, solar_config),
         battery=battery_provider,
         ev_providers=ev_providers,
+        base_load=base_load_provider,
         max_age_seconds=settings.energy_max_age_seconds,
         now=(clock.now if clock is not None else None),
     )
@@ -619,6 +641,7 @@ _W = TypeVar("_W", bound=ClosableWorker)
 
 @dataclass
 class RuntimeComposition:
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     settings: Settings
     adapter: AdapterPort
     database: SQLiteDatabase
@@ -627,6 +650,7 @@ class RuntimeComposition:
     storage: SerializedStorageExecutor
     audit_storage: SerializedStorageExecutor
     audit_repository: AuditEventRepository
+    audit_outbox_dispatcher: AuditOutboxDispatcher
     plan_repository: PlanRepository
     outcome_repository: ExecutionOutcomeRepository
     device_repository: DeviceRepository
@@ -649,6 +673,7 @@ class RuntimeComposition:
     facade: DomoticsFacade
     event_consumer: RuntimeEventConsumer
     scheduler: Scheduler
+    household_preferences: HouseholdPreferenceService | None = None
     connection_manager: ConnectionManager | None = None
     connection_provider_registry: ConnectionProviderRegistry | None = None
     ets_importer: EtsImporter | None = None
@@ -703,6 +728,7 @@ class RuntimeComposition:
                 if self.lease_coordinator is not None and self.fencing_guard is not None
                 else None
             ),
+            outbox_runner=self.run_audit_outbox_dispatcher,
         )
 
     @property
@@ -710,6 +736,12 @@ class RuntimeComposition:
         """Compatibility view over the lifecycle-owned supervisor task."""
 
         return self.lifecycle.task("domoai-control-supervisor")
+
+    @property
+    def closing(self) -> bool:
+        """Expose shutdown admission immediately, including executor drain."""
+
+        return getattr(self, "_close_task", None) is not None
 
     async def start(self) -> None:
         await self.lifecycle.start()
@@ -811,7 +843,46 @@ class RuntimeComposition:
                 self.operational_metrics.record_fencing("renewal_failed")
                 return
 
+    async def run_audit_outbox_dispatcher(self) -> None:
+        """Keep durable critical-audit delivery supervised by this runtime."""
+
+        while True:
+            try:
+                await self.audit_outbox_dispatcher.dispatch_once(
+                    limit=self.settings.audit_outbox_batch_size
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Do not emit an audit event for an audit-storage failure: that
+                # would recurse into the same unavailable boundary.
+                logger.exception("audit outbox dispatcher poll failed")
+            await asyncio.sleep(self.settings.audit_outbox_poll_interval_seconds)
+
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_impl())
+        task = self._close_task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Teardown is runtime-owned too: finish reconciliation and every
+            # resource release before acknowledging caller cancellation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise
+
+    async def _close_impl(self) -> None:
+        # Keep adapter, persistence and fencing renewal alive until every
+        # sent command has reconciled; queued commands are withdrawn first.
+        await self.facade.executor.close()
         await self.lifecycle.close()
         try:
             if self.control_supervisor is not None:
@@ -892,6 +963,7 @@ async def build_runtime(
     require_configured_adapter: bool = False,
     control_plane_mode: bool = False,
     lease_coordinator: LeaseCoordinator | None = None,
+    audit_outbox_delivery: AuditOutboxDelivery | None = None,
 ) -> RuntimeComposition:
     """Build a runtime and release every partial resource on failure."""
 
@@ -910,6 +982,7 @@ async def build_runtime(
             require_configured_adapter=require_configured_adapter,
             control_plane_mode=control_plane_mode,
             lease_coordinator=lease_coordinator,
+            audit_outbox_delivery=audit_outbox_delivery,
             _cleanup=cleanup,
         )
     except BaseException:
@@ -933,6 +1006,7 @@ async def _build_runtime(
     require_configured_adapter: bool = False,
     control_plane_mode: bool = False,
     lease_coordinator: LeaseCoordinator | None = None,
+    audit_outbox_delivery: AuditOutboxDelivery | None = None,
     _cleanup: _PartialRuntimeBuild,
 ) -> RuntimeComposition:
     resolved_settings = settings or Settings.from_environment()
@@ -1264,6 +1338,13 @@ async def _build_runtime(
         adapter_id=selected_adapter.adapter_id,
     )
     _cleanup.ownership = ownership
+    audit_outbox_dispatcher = AuditOutboxDispatcher(
+        audit_repository,
+        audit_outbox_delivery or publish_audit_outbox_event,
+        owner_id=ownership.owner_id,
+        lease_seconds=resolved_settings.audit_outbox_lease_seconds,
+        clock=clock,
+    )
     coordination_token: FencingToken | None = None
     fencing_guard: FencingGuard | None = None
     active_lease_coordinator = lease_coordinator if resolved_settings.multi_host_enabled else None
@@ -1388,11 +1469,26 @@ async def _build_runtime(
         audit,
         clock=clock,
         authorized_actuator_commands=authorized_actuator_commands,
+        deployment_id=resolved_settings.mcp_deployment_id,
     )
     plan_repository = cast(
-        PlanRepository, SerializedRepositoryProxy(PlanRepository(database, clock=clock), storage)
+        PlanRepository,
+        SerializedRepositoryProxy(
+            PlanRepository(
+                database,
+                clock=clock,
+                deployment_id=resolved_settings.mcp_deployment_id,
+            ),
+            storage,
+        ),
     )
-    plan_recovery = PlanRecoveryService(plan_repository, audit)
+    plan_recovery = PlanRecoveryService(
+        plan_repository,
+        audit,
+        deployment_id=resolved_settings.mcp_deployment_id,
+        fencing_epoch=coordination_token.epoch if coordination_token is not None else None,
+        clock=clock,
+    )
     await plan_recovery.recover_orphaned_plans()
     outcome_repository = cast(
         ExecutionOutcomeRepository,
@@ -1406,7 +1502,10 @@ async def _build_runtime(
         MetricHistoryRepository,
         SerializedRepositoryProxy(MetricHistoryRepository(database, clock=clock), storage),
     )
-    await physical_intent_repository.recover_inflight()
+    await physical_intent_repository.recover_inflight(
+        deployment_id=resolved_settings.mcp_deployment_id,
+        fencing_epoch=coordination_token.epoch if coordination_token is not None else None,
+    )
     if resolved_settings.safety_limits_path is not None:
         safety_limits = load_safety_limits_file(resolved_settings.safety_limits_path)
     else:
@@ -1639,7 +1738,30 @@ async def _build_runtime(
     if control_plane_mode:
         if not isinstance(selected_adapter, ManagedAdapterSet):
             raise RuntimeError("control-plane runtime requires ManagedAdapterSet")
-        secret_store = FileSecretStore(resolved_settings.connection_master_key_path)
+        connection_scope = LeaseScope(
+            tenant_id=resolved_settings.mcp_tenant_id,
+            household_id=resolved_settings.mcp_household_id,
+            deployment_id=resolved_settings.mcp_deployment_id,
+        )
+        secret_environment = {
+            name: value.get_secret_value()
+            for name, value in (
+                ("DOMOAI_HOME_ASSISTANT_TOKEN", resolved_settings.home_assistant_token),
+                ("DOMOAI_MQTT_PASSWORD", resolved_settings.mqtt_password),
+            )
+            if value is not None
+        }
+        configured_knx_ref = resolved_settings.knx_secure_credential_ref
+        if configured_knx_ref and configured_knx_ref.startswith("env:"):
+            name = configured_knx_ref[4:]
+            value = os.getenv(name)
+            if value is not None:
+                secret_environment[name] = value
+        secret_store = FileSecretStore(
+            resolved_settings.connection_master_key_path,
+            scope=connection_scope,
+            environment=secret_environment,
+        )
         ets_importer = EtsImporter()
         knx_secure_credentials = KnxSecureCredentialStore(secret_store, audit=audit)
         secure_defaults = {
@@ -1691,7 +1813,9 @@ async def _build_runtime(
         )
         connection_repository = cast(
             ConnectionRepository,
-            SerializedRepositoryProxy(ConnectionRepository(database, clock=clock), storage),
+            SerializedRepositoryProxy(
+                ConnectionRepository(database, scope=connection_scope, clock=clock), storage
+            ),
         )
         connection_manager = ConnectionManager(
             repository=connection_repository,
@@ -1703,6 +1827,7 @@ async def _build_runtime(
             refresh_inventory=discovery.refresh,
             legacy_settings=resolved_settings,
         )
+        await connection_manager.recover()
         home_assistant_oauth_config = _home_assistant_oauth_config(resolved_settings)
         oauth_client = HomeAssistantOAuthClient(clock=clock)
         home_assistant_oauth = HomeAssistantOAuthService(
@@ -1771,7 +1896,18 @@ async def _build_runtime(
         battery_qualification=battery_qualification,
         dispatchable_battery_binding=dispatchable_battery_binding,
     )
+    preference_repository = HouseholdPreferenceRepository(database,
+        tenant_id=resolved_settings.mcp_tenant_id, household_id=resolved_settings.mcp_household_id)
+    await storage.run_async(preference_repository.bootstrap)
+    preference_service = HouseholdPreferenceService(
+        SerializedRepositoryProxy(preference_repository, storage, drain_on_timeout=True),
+        policy=AuthorityPolicy(tenant_id=resolved_settings.mcp_tenant_id,
+                               household_id=resolved_settings.mcp_household_id),
+        registry=registry, clock=clock, inventory_lock=discovery._refresh_lock,
+        battery_binding=dispatchable_battery_binding,
+    )
     runtime = RuntimeComposition(
+        household_preferences=preference_service,
         settings=resolved_settings,
         adapter=selected_adapter,
         database=database,
@@ -1780,6 +1916,7 @@ async def _build_runtime(
         storage=storage,
         audit_storage=audit_storage,
         audit_repository=audit_repository,
+        audit_outbox_dispatcher=audit_outbox_dispatcher,
         plan_repository=plan_repository,
         outcome_repository=outcome_repository,
         device_repository=device_repository,

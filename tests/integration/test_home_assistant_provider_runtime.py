@@ -16,6 +16,72 @@ from tests.fixtures.home_assistant_provider import FakeHomeAssistantProviderClie
 from tests.fixtures.simulated_home import simulated_home_entities
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["success", "unauthorized", "cancel"])
+async def test_real_http_partial_connect_cleanup_closes_owned_ha_client(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from domoai.adapters.home_assistant.client import HomeAssistantClient
+    from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
+    from domoai.runtime.managed_adapter_set import ManagedAdapterSet
+    from tests.fixtures.household_onboarding import (
+        HomeAssistantHttpSource,
+        home_assistant_http_source,
+    )
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_request = HomeAssistantHttpSource.state_request
+
+    async def observed_request(source, request):
+        entered.set()
+        if mode == "cancel":
+            await release.wait()
+        return await original_request(source, request)
+
+    monkeypatch.setattr(HomeAssistantHttpSource, "state_request", observed_request)
+    async with home_assistant_http_source() as source:
+        client = HomeAssistantClient(
+            source.url, "synthetic-invalid" if mode == "unauthorized" else source.token
+        )
+        child = HomeAssistantProviderAdapter(HomeAssistantProvider(client), adapter_id="ha:cleanup")
+        managed = ManagedAdapterSet()
+        task = asyncio.create_task(managed.attach(child))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            if mode == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert task.cancelled()
+            elif mode == "unauthorized":
+                with pytest.raises(ConnectionError, match="adapter unavailable"):
+                    await task
+            else:
+                await task
+                assert not client.http_client.is_closed
+                assert managed.adapters == (child,)
+
+            if mode != "success":
+                assert client.http_client.is_closed
+                assert managed.adapters == ()
+                assert not managed._unpublished_cleanup
+            await managed.disconnect()
+            await child.disconnect()
+            await managed.disconnect()
+            assert client.http_client.is_closed
+            assert not managed._connected
+            assert source.commands == 0
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await managed.disconnect()
+            await client.close()
+
+
 def structured(result: object) -> dict[str, Any]:
     protocol_content = getattr(result, "structuredContent", None)
     if isinstance(protocol_content, dict):

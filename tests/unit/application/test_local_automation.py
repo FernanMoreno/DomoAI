@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -72,6 +73,29 @@ class FakeRepository:
         self.record = self.record.__class__(
             rule=self.record.rule,
             consent=self.record.consent,
+            last_event_id=event_id,
+            last_fired_at=now,
+        )
+        return True
+
+
+class MultiRuleFakeRepository:
+    def __init__(self, records):
+        self.records = {record.rule.id: record for record in records}
+        self.claimed: set[tuple[str, str]] = set()
+
+    async def list_all(self):
+        return list(self.records.values())
+
+    async def claim_event(self, rule_id, event_id, now):
+        key = (rule_id, event_id)
+        if key in self.claimed:
+            return False
+        record = self.records[rule_id]
+        self.claimed.add(key)
+        self.records[rule_id] = record.__class__(
+            rule=record.rule,
+            consent=record.consent,
             last_event_id=event_id,
             last_fired_at=now,
         )
@@ -166,18 +190,23 @@ def _record(*, cooldown_seconds=60, authority=None, command_count=1):
     return AutomationRuleRecord(rule=rule, consent=consent)
 
 
-def _time_record():
+def _time_record(
+    *, rule_id="rule-clock", hour=12, timezone="UTC", authority=None, consent_at=None
+):
     source = _record()
+    authority = authority or source.rule.authority
     rule = AutomationRule(
-        id="rule-clock",
+        authority=authority,
+        id=rule_id,
         name="Clock rule",
-        trigger=AutomationTrigger(type="time", time_of_day=time(12, 0), timezone="UTC"),
+        trigger=AutomationTrigger(type="time", time_of_day=time(hour, 0), timezone=timezone),
         plan_template=source.rule.plan_template,
         scope="home",
         status="enabled",
     )
-    now = datetime(2026, 9, 4, 11, tzinfo=UTC)
+    now = consent_at or datetime(2026, 9, 4, 11, tzinfo=UTC)
     consent = AutomationConsent(
+        authority=authority,
         approval_id="approval-clock",
         principal_id="operator",
         scope="home",
@@ -207,6 +236,23 @@ def _updated_record(source):
         expires_at=datetime(2026, 9, 4, 13, tzinfo=UTC),
     )
     return rule, consent
+
+
+def _state_record(rule_id):
+    source = _record(cooldown_seconds=0)
+    rule = AutomationRule.model_validate(
+        {**source.rule.model_dump(mode="json"), "id": rule_id, "definition_digest": None}
+    )
+    consent = AutomationConsent(
+        authority=rule.authority,
+        approval_id=f"approval-{rule_id}",
+        principal_id="operator",
+        scope=rule.scope,
+        rule_digest=rule.definition_digest,
+        approved_at=datetime(2026, 9, 4, 12, tzinfo=UTC),
+        expires_at=datetime(2026, 9, 4, 13, tzinfo=UTC),
+    )
+    return source.__class__(rule=rule, consent=consent)
 
 
 @pytest.mark.asyncio
@@ -306,6 +352,43 @@ async def test_matching_event_executes_once_and_duplicate_is_idempotent() -> Non
     assert second[0].status in {"duplicate", "cooldown"}
     assert len(executor.plans) == 1
     assert any(event["event_type"] == "automation_fired" for event in audit.events)
+
+
+@pytest.mark.asyncio
+async def test_each_rule_rechecks_event_freshness_after_a_slow_prior_execution() -> None:
+    clock = [datetime(2026, 9, 4, 12, tzinfo=UTC)]
+
+    class AdvancingExecutor(FakeExecutor):
+        async def execute(self, plan):
+            result = await super().execute(plan)
+            clock[0] = clock[0] + timedelta(minutes=6)
+            return result
+
+    executor = AdvancingExecutor()
+    engine = LocalAutomationEngine(
+        MultiRuleFakeRepository([_state_record("rule-first"), _state_record("rule-second")]),
+        FakePlanService(),
+        executor,
+        FakeAudit(),
+        clock=lambda: clock[0],
+    )
+
+    evaluations = await engine.handle_event(
+        AutomationEvent(
+            event_id="slow-state-event",
+            event_type="state_changed",
+            occurred_at=clock[0],
+            device_id="sensor.one",
+            capability="motion",
+            value=True,
+        )
+    )
+
+    assert [(item.rule_id, item.status, item.reason) for item in evaluations] == [
+        ("rule-first", "executed", "plan_executed"),
+        ("rule-second", "skipped", "event_stale"),
+    ]
+    assert len(executor.plans) == 1
 
 
 @pytest.mark.asyncio
@@ -510,3 +593,295 @@ async def test_time_trigger_fires_once_at_declared_local_minute() -> None:
 
     assert evaluations[0].status == "executed"
     assert len(executor.plans) == 1
+
+
+@pytest.mark.asyncio
+async def test_time_evaluation_rejects_a_naive_clock_input() -> None:
+    engine = LocalAutomationEngine(
+        MultiRuleFakeRepository([_time_record()]),
+        FakePlanService(),
+        FakeExecutor(),
+        FakeAudit(),
+        clock=lambda: datetime(2026, 9, 4, 12, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await engine.evaluate_time(datetime(2026, 9, 4, 12))
+
+
+@pytest.mark.asyncio
+async def test_time_evaluation_targets_only_the_rule_at_its_declared_local_minute() -> None:
+    repository = MultiRuleFakeRepository(
+        [_time_record(rule_id="rule-noon", hour=12), _time_record(rule_id="rule-evening", hour=18)]
+    )
+    executor = FakeExecutor()
+    now = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: now
+    )
+
+    evaluations = await engine.evaluate_time(now)
+
+    assert [(item.rule_id, item.status) for item in evaluations] == [("rule-noon", "executed")]
+    assert [plan.id for plan in executor.plans] == [
+        "automation:rule-noon:time:rule-noon:2026-09-04T12:00"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_time_event_uses_canonical_targeted_occurrence_identity() -> None:
+    repository = MultiRuleFakeRepository([_time_record(rule_id="rule-noon", hour=12)])
+    executor = FakeExecutor()
+    now = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: now
+    )
+
+    first = await engine.handle_event(
+        AutomationEvent(
+            event_id="caller-retry-a",
+            event_type="time",
+            target_rule_id="rule-noon",
+            occurred_at=now,
+        )
+    )
+    second = await engine.handle_event(
+        AutomationEvent(
+            event_id="caller-retry-b",
+            event_type="time",
+            target_rule_id="rule-noon",
+            occurred_at=now,
+        )
+    )
+
+    assert first[0].event_id == "time:rule-noon:2026-09-04T12:00"
+    assert second[0].status == "duplicate"
+    assert len(executor.plans) == 1
+
+
+@pytest.mark.asyncio
+async def test_time_event_rejects_a_targeted_rule_when_its_local_time_does_not_match() -> None:
+    repository = MultiRuleFakeRepository([_time_record(rule_id="rule-evening", hour=18)])
+    executor = FakeExecutor()
+    now = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: now
+    )
+
+    evaluations = await engine.handle_event(
+        AutomationEvent(
+            event_id="caller-noon",
+            event_type="time",
+            target_rule_id="rule-evening",
+            occurred_at=now,
+        )
+    )
+
+    assert evaluations == []
+    assert executor.plans == []
+
+
+@pytest.mark.asyncio
+async def test_same_utc_minute_keeps_distinct_rules_and_households_isolated() -> None:
+    home_a = AuthorityContext(
+        tenant_id="tenant-a",
+        household_id="home-a",
+        household_ids=["home-a"],
+        principal_id="operator",
+        roles=["owner"],
+        device_ids=["light.one"],
+        capabilities=["power"],
+        operations=["turn_on"],
+    )
+    home_b = home_a.model_copy(
+        update={"tenant_id": "tenant-b", "household_id": "home-b", "household_ids": ["home-b"]}
+    )
+    repository = MultiRuleFakeRepository(
+        [
+            _time_record(rule_id="rule-home-a", hour=12, authority=home_a),
+            _time_record(
+                rule_id="rule-home-b", hour=14, timezone="Europe/Madrid", authority=home_b
+            ),
+        ]
+    )
+    executor = FakeExecutor()
+    now = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: now
+    )
+
+    evaluations = await engine.evaluate_time(now)
+
+    assert {item.rule_id for item in evaluations} == {"rule-home-a", "rule-home-b"}
+    assert {plan.authority.household_id for plan in executor.plans} == {"home-a", "home-b"}
+    assert (
+        executor.plans[0].commands[0].idempotency_key
+        != executor.plans[1].commands[0].idempotency_key
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_dst_local_minute_has_one_occurrence_per_utc_instant() -> None:
+    repository = MultiRuleFakeRepository(
+        [
+            _time_record(
+                rule_id="rule-fold",
+                hour=2,
+                timezone="Europe/Madrid",
+                consent_at=datetime(2026, 10, 25, 0, tzinfo=UTC),
+            )
+        ]
+    )
+    executor = FakeExecutor()
+    first_fold = datetime(2026, 10, 25, 0, 0, tzinfo=UTC)
+    second_fold = datetime(2026, 10, 25, 1, 0, tzinfo=UTC)
+    clock = [first_fold]
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: clock[0]
+    )
+
+    first = await engine.evaluate_time(first_fold)
+    clock[0] = second_fold
+    second = await engine.evaluate_time(second_fold)
+
+    assert [item.event_id for item in first + second] == [
+        "time:rule-fold:2026-10-25T00:00",
+        "time:rule-fold:2026-10-25T01:00",
+    ]
+    assert len(executor.plans) == 2
+
+
+@pytest.mark.asyncio
+async def test_dst_fold_uses_utc_instants_for_future_and_stale_time_events() -> None:
+    zone = ZoneInfo("Europe/Madrid")
+    first_fold = datetime(2026, 10, 25, 2, tzinfo=zone, fold=0)
+    second_fold = datetime(2026, 10, 25, 2, tzinfo=zone, fold=1)
+    record = _time_record(
+        rule_id="rule-fold-window",
+        hour=2,
+        timezone="Europe/Madrid",
+        consent_at=first_fold.astimezone(UTC),
+    )
+    future_engine = LocalAutomationEngine(
+        MultiRuleFakeRepository([record]),
+        FakePlanService(),
+        FakeExecutor(),
+        FakeAudit(),
+        clock=lambda: first_fold,
+    )
+    stale_engine = LocalAutomationEngine(
+        MultiRuleFakeRepository([record]),
+        FakePlanService(),
+        FakeExecutor(),
+        FakeAudit(),
+        clock=lambda: second_fold,
+    )
+
+    future = await future_engine.handle_event(
+        AutomationEvent(
+            event_id="future-fold",
+            event_type="time",
+            target_rule_id="rule-fold-window",
+            occurred_at=second_fold,
+        )
+    )
+    stale = await stale_engine.handle_event(
+        AutomationEvent(
+            event_id="stale-fold",
+            event_type="time",
+            target_rule_id="rule-fold-window",
+            occurred_at=first_fold,
+        )
+    )
+
+    assert [(item.status, item.reason) for item in future] == [("skipped", "event_stale")]
+    assert [(item.status, item.reason) for item in stale] == [("skipped", "event_stale")]
+
+
+@pytest.mark.asyncio
+async def test_nonexistent_dst_local_minute_is_not_recovered_late() -> None:
+    repository = MultiRuleFakeRepository(
+        [
+            _time_record(
+                rule_id="rule-gap",
+                hour=2,
+                timezone="Europe/Madrid",
+                consent_at=datetime(2026, 3, 29, 0, tzinfo=UTC),
+            )
+        ]
+    )
+    executor = FakeExecutor()
+    now = datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: now
+    )
+
+    evaluations = await engine.evaluate_time(now)
+
+    assert evaluations == []
+    assert executor.plans == []
+
+
+@pytest.mark.asyncio
+async def test_imaginary_dst_event_does_not_match_the_missing_local_minute() -> None:
+    zone = ZoneInfo("Europe/Madrid")
+    record = _time_record(
+        rule_id="rule-imaginary-gap",
+        hour=2,
+        timezone="Europe/Madrid",
+        consent_at=datetime(2026, 3, 29, 0, tzinfo=UTC),
+    )
+    executor = FakeExecutor()
+    engine = LocalAutomationEngine(
+        MultiRuleFakeRepository([record]),
+        FakePlanService(),
+        executor,
+        FakeAudit(),
+        clock=lambda: datetime(2026, 3, 29, 1, tzinfo=UTC),
+    )
+
+    evaluations = await engine.handle_event(
+        AutomationEvent(
+            event_id="imaginary-gap",
+            event_type="time",
+            target_rule_id="rule-imaginary-gap",
+            occurred_at=datetime(2026, 3, 29, 2, tzinfo=zone),
+        )
+    )
+
+    assert evaluations == []
+    assert executor.plans == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_or_stale_time_occurrences_do_not_execute() -> None:
+    current = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    disabled = _time_record(rule_id="rule-disabled", hour=12)
+    disabled = disabled.__class__(
+        rule=disabled.rule.model_copy(update={"status": "disabled"}), consent=disabled.consent
+    )
+    repository = MultiRuleFakeRepository([disabled])
+    executor = FakeExecutor()
+    engine = LocalAutomationEngine(
+        repository, FakePlanService(), executor, FakeAudit(), clock=lambda: current
+    )
+
+    disabled_result = await engine.evaluate_time(current)
+    stale_repository = MultiRuleFakeRepository([_time_record(rule_id="rule-stale", hour=12)])
+    stale_engine = LocalAutomationEngine(
+        stale_repository, FakePlanService(), executor, FakeAudit(), clock=lambda: current
+    )
+    stale_result = await stale_engine.handle_event(
+        AutomationEvent(
+            event_id="caller-stale",
+            event_type="time",
+            target_rule_id="rule-stale",
+            occurred_at=current - timedelta(minutes=6),
+        )
+    )
+
+    assert disabled_result == []
+    assert [(item.rule_id, item.reason) for item in stale_result] == [
+        ("rule-stale", "event_stale")
+    ]
+    assert executor.plans == []

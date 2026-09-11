@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "PreferenceProvenanceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "user_request",
+            "manual",
+            "import"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ref"
+        }
+      },
+      "required": [
+        "source_kind"
+      ],
+      "title": "PreferenceProvenanceInput",
+      "type": "object"
+    },
+    "PreferenceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "title": "Generation",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision"
+      ],
+      "title": "PreferenceVersion",
+      "type": "object"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "valid_from": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "valid_until": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timezone": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Timezone",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "expected_version": {
+      "$ref": "#/$defs/PreferenceVersion"
+    },
+    "idempotency_key": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "preference_id": {
+      "format": "uuid",
+      "title": "Preference Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "minimum": 1,
+      "title": "Source Revision",
+      "type": "integer"
+    },
+    "provenance": {
+      "$ref": "#/$defs/PreferenceProvenanceInput"
+    }
+  },
+  "required": [
+    "valid_from",
+    "valid_until",
+    "timezone",
+    "expected_version",
+    "idempotency_key",
+    "preference_id",
+    "source_revision",
+    "provenance"
+  ],
+  "title": "PreferenceRestore",
+  "type": "object"
+}

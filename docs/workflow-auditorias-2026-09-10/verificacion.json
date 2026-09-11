@@ -1,0 +1,184 @@
+{
+  "at": "2026-09-10T16:08:02.324988+00:00",
+  "packages": 24,
+  "requirements": 135,
+  "pending_tasks": 336,
+  "protected_files": 975,
+  "protected_changes": [],
+  "protected_additions": [],
+  "topological_order": [
+    "A-01",
+    "A-02",
+    "A-03",
+    "A-04",
+    "A-05",
+    "A-06",
+    "A-09",
+    "A-10",
+    "A-07",
+    "A-11",
+    "A-12",
+    "A-08",
+    "P-10-min",
+    "P-11-min",
+    "P-01",
+    "P-11-full",
+    "P-02",
+    "P-04",
+    "P-06",
+    "P-03",
+    "P-08",
+    "P-10-full",
+    "P-05",
+    "P-07",
+    "P-09",
+    "P-12"
+  ],
+  "features": [
+    {
+      "id": "A-01",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-02",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-03",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-04",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-05",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-06",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-07",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-08",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-09",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-10",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-11",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "A-12",
+      "requirements": 5,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-01",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-02",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-03",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-04",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-05",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-06",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-07",
+      "requirements": 7,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-08",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-09",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-10",
+      "requirements": 7,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-11",
+      "requirements": 6,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    },
+    {
+      "id": "P-12",
+      "requirements": 7,
+      "tasks": 14,
+      "coverage": "100% references, not implementation"
+    }
+  ],
+  "errors": []
+}

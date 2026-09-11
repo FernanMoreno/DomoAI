@@ -27,6 +27,55 @@ def _config() -> HomeAssistantOAuthConfig:
     )
 
 
+@pytest.mark.parametrize(
+    "field",
+    ("authorization_url", "token_url", "revoke_url"),
+)
+def test_oauth_config_rejects_remote_http_oauth_endpoints(field: str) -> None:
+    values = _config().model_dump()
+    values[field] = f"http://remote.example.test/{field}"
+
+    with pytest.raises(ValueError, match="OAuth"):
+        HomeAssistantOAuthConfig(**values)
+
+
+def test_oauth_config_accepts_explicit_loopback_http_endpoints() -> None:
+    values = _config().model_dump()
+    values.update(
+        {
+            "authorization_url": "http://127.0.0.1:9000/authorize",
+            "token_url": "http://localhost:9000/token",
+            "revoke_url": "http://[::1]:9000/revoke",
+        }
+    )
+
+    assert HomeAssistantOAuthConfig(**values).token_url.startswith("http://")
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_and_revoke_clients_explicitly_disable_redirects(monkeypatch) -> None:
+    observed: list[object] = []
+    real_client = httpx.AsyncClient
+
+    class RecordingAsyncClient(real_client):
+        def __init__(self, *args, **kwargs):
+            observed.append(kwargs.get("follow_redirects", "missing"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingAsyncClient)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://evil.example/"})
+
+    client = HomeAssistantOAuthClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(HomeAssistantOAuthError, match="token exchange"):
+        await client.exchange_code(_config(), code="code", code_verifier="verifier")
+    with pytest.raises(HomeAssistantOAuthError, match="revocation"):
+        await client.revoke(_config(), token="token")
+
+    assert observed == [False, False]
+
+
 @pytest.mark.asyncio
 async def test_oauth_client_exchanges_code_and_service_uses_pkce(tmp_path) -> None:
     requests: list[httpx.Request] = []

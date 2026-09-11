@@ -60,6 +60,34 @@ Requiere `energy_live=True` y que el objeto entregado exponga
 `AdapterPort` propio. Contrato completo en
 [`specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md`](../specs/161-generic-energy-provider/contracts/energy-context-provider-injection.md).
 
+La demanda base opcional se conecta mediante `base_load` en el compositor y
+`BaseLoadForecastSeries`/`BaseLoadForecastProvider`. Su scope
+`uncontrolled_demand` excluye todas las cargas planificadas, EV/HVAC controlado,
+batería y FV; no es un contador neto ni una medición extrapolada. La fuente
+incorporada lee `DOMOAI_BASE_LOAD_PROFILE_PATH`: un perfil JSON de reserva
+constante con `tenant_id` y `household_id` iguales a los del runtime, kW,
+`declared_at`, revisión e intervalo `valid_from`/`valid_until`. Conserva la fecha
+original, exige intervalo vigente y horizonte totalmente cubierto; una reserva
+no usa el TTL de observaciones ni garantiza consumo futuro. Forecasts observados
+conservan la política normal de frescura. El override completo del proveedor
+mantiene prioridad y evita leer este perfil.
+
+Sin base, el cálculo legacy conserva cero aritmético y el producto informa
+base desconocida y falta de garantía del límite doméstico. Con base, contexto y
+resumen conservan su procedencia y supuestos. `base_load_source` se omite cuando
+es `None`, para conservar payloads, schemas y digests v1 legacy. Si está presente,
+`EnergyContext` y el `OptimizationScenario` que lo contiene usan v2; v1 explícito
+con procedencia y v2 sin ella se rechazan. Los lectores duales v1/v2 deben
+actualizarse **antes** de habilitar productores v2. El envelope MCP genérico y
+los contenedores de resultados/producto siguen en v1; el contexto tiene versión
+independiente. Los lectores antiguos rechazan el contexto interior v2, aunque su
+parser de etiqueta exterior de escenario fuera permisivo. Desactivar el perfil no migra
+snapshots ya emitidos: antes de rollback, preservar y separar los snapshots/
+escenarios con procedencia nueva de los lectores antiguos, manteniendo un lector
+actualizado para consultarlos. No borrar metadatos para forzar compatibilidad.
+Ejemplo, pruebas y límites de OMIE en el
+[quickstart A09](../specs/236-composed-base-demand/quickstart.md).
+
 Para carga EV, `build_runtime`/`build_configured_server` aceptan además
 `ev_charging_bindings` (una tupla de `EVChargingBinding`, uno por cargador —
 a diferencia de `dispatchable_battery_binding`, que es singular), mismo

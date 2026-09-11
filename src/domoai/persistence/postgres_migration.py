@@ -7,10 +7,67 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from domoai.persistence.contract_compatibility import check_runtime_floor
 from domoai.persistence.postgres import PostgresDatabase
 from domoai.persistence.sqlite import SQLiteDatabase
 
 _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("household_preference_heads",
+     ("tenant_id", "household_id", "generation", "revision"),
+     ("tenant_id", "household_id")),
+    ("household_preferences",
+     ("tenant_id", "household_id", "preference_id", "key", "target_kind", "target_id", "payload"),
+     ("tenant_id", "household_id", "preference_id")),
+    ("household_preference_history",
+     ("tenant_id", "household_id", "revision", "preference_id", "payload"),
+     ("tenant_id", "household_id", "revision")),
+    ("household_preference_requests",
+     ("tenant_id", "household_id", "generation", "principal_id", "idempotency_key",
+      "fingerprint", "preference_id", "response"),
+     ("tenant_id", "household_id", "generation", "principal_id", "idempotency_key")),
+    (
+        "connections",
+        (
+            "id",
+            "connector_id",
+            "unique_id",
+            "endpoint_json",
+            "options_json",
+            "credential_ref",
+            "credential_transfer_id",
+            "mapping_ref",
+            "enabled",
+            "schema_version",
+            "created_at",
+            "updated_at",
+        ),
+        ("id",),
+    ),
+    (
+        "connection_ownership",
+        ("connection_id", "tenant_id", "household_id", "deployment_id", "bound_at"),
+        ("connection_id",),
+    ),
+    (
+        "connection_secret_transfers",
+        (
+            "transfer_id",
+            "tenant_id",
+            "household_id",
+            "deployment_id",
+            "secret_ref",
+            "profile_id",
+            "connector_id",
+            "unique_id",
+            "operation",
+            "expected_old_ref",
+            "envelope_digest",
+            "state",
+            "created_at",
+            "updated_at",
+        ),
+        ("transfer_id",),
+    ),
     ("devices", ("id", "payload", "updated_at"), ("id",)),
     (
         "state_snapshots",
@@ -88,6 +145,9 @@ _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "last_error",
             "delivered_at",
             "authority_payload",
+            "lease_owner",
+            "lease_id",
+            "lease_expires_at",
         ),
         ("sequence",),
     ),
@@ -132,6 +192,8 @@ _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "payload",
             "status",
             "fencing_epoch",
+            "owner_id",
+            "execution_attempt_id",
             "created_at",
             "updated_at",
         ),
@@ -182,10 +244,7 @@ def _digest(rows: list[tuple[Any, ...]]) -> str:
 def _select(
     database: Any, table: str, columns: tuple[str, ...], order: tuple[str, ...]
 ) -> list[tuple[Any, ...]]:
-    query = (
-        f"SELECT {', '.join(columns)} FROM {table} "
-        f"ORDER BY {', '.join(order)}"
-    )
+    query = f"SELECT {', '.join(columns)} FROM {table} ORDER BY {', '.join(order)}"
     cursor = database.connection.execute(query)
     try:
         return [tuple(row) for row in cursor.fetchall()]
@@ -204,6 +263,7 @@ async def migrate_sqlite_to_postgres(
     """
 
     source_rows: dict[str, list[tuple[Any, ...]]] = {}
+    source_floor = check_runtime_floor(source.connection)
     try:
         for table, columns, order in _TABLES:
             source_rows[table] = _select(source, table, columns, order)
@@ -213,6 +273,21 @@ async def migrate_sqlite_to_postgres(
     connection = destination.connection
     try:
         connection.execute("BEGIN")
+        destination_floor = check_runtime_floor(connection, postgres=True)
+        if source_floor is not None:
+            if destination_floor is not None and destination_floor[1] > source_floor[1]:
+                raise MigrationConflict("destination runtime contract floor cannot be downgraded")
+            # The seeded singleton is the sole exception to the empty-target
+            # rule. Copy source checkpoint evidence inside the same transaction.
+            connection.execute("DELETE FROM runtime_contract_floor WHERE singleton = 1")
+            connection.execute(
+                "INSERT INTO runtime_contract_floor VALUES (%s, %s, %s, %s)",
+                source_floor,
+            )
+            transferred = check_runtime_floor(connection, postgres=True)
+            if transferred != source_floor:
+                raise MigrationVerificationError("runtime contract floor verification failed")
+            source_rows["runtime_contract_floor"] = [source_floor]
         for table, columns, order in _TABLES:
             existing = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
             if existing is not None and int(existing[0]) != 0:

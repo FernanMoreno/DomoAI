@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from domoai.application.recovery import PlanRecoveryService
-from domoai.domain.models import Command, Plan, PlanStatus
+from domoai.domain.models import Command, Plan, PlanExecutionLease, PlanStatus
 from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.events import AuditLog
@@ -24,12 +26,22 @@ def _plan(plan_id: str, status: PlanStatus) -> Plan:
     )
 
 
-async def _build(tmp_path) -> tuple[PlanRepository, AuditLog, PlanRecoveryService]:
+async def _build(
+    tmp_path,
+    *,
+    deployment_id: str | None = None,
+    fencing_epoch: int | None = None,
+) -> tuple[PlanRepository, AuditLog, PlanRecoveryService]:
     database = SQLiteDatabase(tmp_path / "repo.sqlite3")
     await database.initialize()
     plan_repository = PlanRepository(database)
     audit = AuditLog()
-    service = PlanRecoveryService(plan_repository, audit)
+    service = PlanRecoveryService(
+        plan_repository,
+        audit,
+        deployment_id=deployment_id,
+        fencing_epoch=fencing_epoch,
+    )
     return plan_repository, audit, service
 
 
@@ -142,3 +154,74 @@ async def test_periodic_reconciliation_reuses_unknown_transition_and_is_idempote
     event = audit.events[-1]
     assert event.event_type == "plan_execution_recovered"
     assert event.payload["reason"] == "periodic_recovery"
+
+
+@pytest.mark.asyncio
+async def test_scoped_recovery_only_settles_expired_prior_epoch_in_deployment(tmp_path) -> None:
+    plan_repository, audit, service = await _build(
+        tmp_path, deployment_id="edge-a", fencing_epoch=2
+    )
+    now = datetime.now(UTC)
+    old_lease = PlanExecutionLease(
+        deployment_id="edge-a",
+        owner_id="old-owner",
+        lease_id="old-lease",
+        fencing_epoch=1,
+        expires_at=now - timedelta(seconds=1),
+    )
+    current_lease = old_lease.model_copy(
+        update={
+            "owner_id": "current-owner",
+            "lease_id": "current-lease",
+            "fencing_epoch": 2,
+            "expires_at": now + timedelta(minutes=1),
+        }
+    )
+    foreign_lease = old_lease.model_copy(update={"deployment_id": "edge-b"})
+    await plan_repository.save(
+        Plan.model_validate(
+            _plan("plan-old", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+            | {"deployment_id": "edge-a", "execution_lease": old_lease}
+        )
+    )
+    await plan_repository.save(
+        Plan.model_validate(
+            _plan("plan-current", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+            | {"deployment_id": "edge-a", "execution_lease": current_lease}
+        )
+    )
+    await plan_repository.save(
+        Plan.model_validate(
+            _plan("plan-foreign", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+            | {"deployment_id": "edge-b", "execution_lease": foreign_lease}
+        )
+    )
+
+    recovered = await service.reconcile(reason="startup_crash_recovery")
+
+    assert recovered == ["plan-old"]
+    old = await plan_repository.get("plan-old")
+    current = await plan_repository.get("plan-current")
+    foreign = await plan_repository.get("plan-foreign")
+    assert old is not None and old.status is PlanStatus.UNKNOWN
+    assert current is not None and current.status is PlanStatus.EXECUTING
+    assert foreign is not None and foreign.status is PlanStatus.EXECUTING
+    assert [event.subject_id for event in audit.events] == ["plan-old"]
+
+
+@pytest.mark.asyncio
+async def test_multihost_recovery_skips_plan_without_lease_evidence(tmp_path) -> None:
+    plan_repository, audit, service = await _build(
+        tmp_path, deployment_id="edge-a", fencing_epoch=2
+    )
+    plan = Plan.model_validate(
+        _plan("legacy-executing", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+        | {"deployment_id": "edge-a"}
+    )
+    await plan_repository.save(plan)
+
+    assert await service.recover_orphaned_plans() == []
+
+    persisted = await plan_repository.get(plan.id)
+    assert persisted is not None and persisted.status is PlanStatus.EXECUTING
+    assert audit.events[0].event_type == "plan_execution_recovery_skipped"

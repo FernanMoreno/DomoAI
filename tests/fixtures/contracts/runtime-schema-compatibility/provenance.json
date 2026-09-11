@@ -1,0 +1,51 @@
+{
+  "revision": "b9f5094fc1a28b0f209ca7f3d4f332f8d8a789f3",
+  "files": {
+    "models.py.txt": {
+      "source": "src/domoai/domain/models.py",
+      "sha256": "7e2b0987d76923370aee6c818e4160f5d24d87f66af76aa349d5b0bc814ff04d"
+    },
+    "automation.py.txt": {
+      "source": "src/domoai/domain/automation.py",
+      "sha256": "85764feb5fb1ca7922d6632bbbdf3e2e2495cac0817df931e2e5dca20867b8ca"
+    },
+    "coordination.py.txt": {
+      "source": "src/domoai/domain/coordination.py",
+      "sha256": "83043199e4d76b718e67b6590baa603c525c47b920838302471b76ed3021106a"
+    },
+    "optimizer_ports.py.txt": {
+      "source": "src/domoai/optimizer/ports.py",
+      "sha256": "629b0ab70f8954fc49192187cb9737755f2996560ea26c5c8996c4077b8f92d9"
+    },
+    "plan.schema.json": {
+      "source": "schemas/v1/plan.schema.json",
+      "sha256": "b7a455aa6f1c391dd43911e563a06b79ebeeb50e81602c4e57811b498d8df2cb"
+    },
+    "automation-rule.schema.json": {
+      "source": "schemas/v1/automation-rule.schema.json",
+      "sha256": "0356dfbbca66021076a9c6eca13c6722a70a047786baa30c6e0eb1e0e6105476"
+    },
+    "automation-event.schema.json": {
+      "source": "schemas/v1/automation-event.schema.json",
+      "sha256": "3cf782a002d27c61f685ba89e1456d9b28c4c59910af00199d41f9fb03b3d556"
+    },
+    "physical-intent.schema.json": {
+      "source": "schemas/v1/physical-intent.schema.json",
+      "sha256": "0c77f17951524040e6e65e3500a89c81bb1dd079605b75c7afa08404bd17113a"
+    },
+    "optimization-result.schema.json": {
+      "source": "schemas/v1/optimization-result.schema.json",
+      "sha256": "ab991f8b353cb4241a25e30cfaf4ac2f16f37f6ffde669c94c6427212ae590e2"
+    },
+    "pre_floor_sqlite.py.txt": {
+      "source": "src/domoai/persistence/sqlite.py",
+      "sha256": "863b4182ef69df737c5ed0ab69fa04b109c3a37a59d48163f9746f242cb5d1b6",
+      "provenance": "exact dirty-tree source handed off before package253 edits; not HEAD"
+    },
+    "pre_floor_postgres.py.txt": {
+      "source": "src/domoai/persistence/postgres.py",
+      "sha256": "1f9cd1d31db4e314b194c3de3b76d51b4374c712f9e94678760dac84e3c4b346",
+      "provenance": "exact dirty-tree source handed off before package253 edits; not HEAD"
+    }
+  }
+}

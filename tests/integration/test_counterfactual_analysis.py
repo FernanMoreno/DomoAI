@@ -6,7 +6,7 @@ from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
 from domoai.optimizer.counterfactual import CounterfactualAnalyzer
 from domoai.optimizer.cp_sat import CpSatOptimizer
-from domoai.optimizer.energy import EnergyContext, SolarForecastPoint, TariffPoint
+from domoai.optimizer.energy import BaseLoadPoint, EnergyContext, SolarForecastPoint, TariffPoint
 from domoai.optimizer.ports import OptimizationStatus
 from domoai.optimizer.scenario import Constraint, Objective, OptimizationScenario
 from domoai.runtime.events import AuditLog
@@ -287,3 +287,84 @@ async def test_counterfactual_never_mutates_supplied_scenarios() -> None:
 
     assert baseline.model_dump(mode="json") == baseline_before
     assert variation.model_dump(mode="json") == variation_before
+
+
+def passive_energy_scenario(
+    identifier: str, *, price: float = 0.2
+) -> OptimizationScenario:
+    """Two quarter-hour slots with declared fixture demand of 1 kW and no actuators."""
+    horizon = energy_horizon(slots=2, resolution_minutes=15)
+    return OptimizationScenario(
+        id=identifier,
+        horizon=horizon,
+        energy_context=EnergyContext(
+            horizon=horizon,
+            tariffs=[TariffPoint(slot=i, price_per_kwh=price, currency="EUR") for i in range(2)],
+            solar_forecast=[SolarForecastPoint(slot=i, power=0) for i in range(2)],
+            base_load_forecast=[BaseLoadPoint(slot=i, power=1) for i in range(2)],
+            source_revision="passive-comparison",
+            observed_at=horizon.start,
+        ),
+        objectives=[Objective(name="minimize_energy_cost", direction="minimize")],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_baseline", [False, True])
+async def test_counterfactual_compares_real_passive_energy_results(active_baseline: bool) -> None:
+    registry, device_id = await _registry_and_device_id()
+    baseline = passive_energy_scenario("passive-base")
+    active = baseline.model_copy(
+        update={
+            "id": "active",
+            "loads": [flexible_load(device_id, power_kw=1, earliest_slot=0, latest_slot=1)],
+        }
+    )
+    if active_baseline:
+        baseline = active
+    variations = {
+        "passive": passive_energy_scenario("passive-alternative", price=0.4),
+        "active": active,
+    }
+    original = [scenario.model_dump() for scenario in [baseline, *variations.values()]]
+
+    result = CounterfactualAnalyzer(CpSatOptimizer(registry)).compare(baseline, variations)
+
+    assert result.baseline.objective_values["energy_cost"] == pytest.approx(
+        0.15 if active_baseline else 0.1
+    )
+    assert (result.baseline.plan is None) is (not active_baseline)
+    if not active_baseline:
+        assert result.baseline.status is OptimizationStatus.NO_ACTION_REQUIRED
+    assert set(result.variations) == {"passive", "active"}
+    passive = result.variations["passive"]
+    assert passive.result.status is OptimizationStatus.NO_ACTION_REQUIRED
+    assert passive.result.plan is None
+    assert passive.result.objective_values["energy_cost"] == pytest.approx(0.2)
+    assert passive.diff["energy_cost"] == pytest.approx(0.05 if active_baseline else 0.1)
+    assert result.variations["active"].diff["energy_cost"] == pytest.approx(
+        0 if active_baseline else 0.05
+    )
+    assert original == [scenario.model_dump() for scenario in [baseline, *variations.values()]]
+
+
+@pytest.mark.parametrize("currency", ["EUR", "USD"])
+def test_a12_real_solver_comparison_has_numerical_currency_delta(currency):
+    scenarios = [
+        passive_energy_scenario("a12-base", price=0.2),
+        passive_energy_scenario("a12-var", price=-0.1),
+    ]
+    for scenario in scenarios:
+        for point in scenario.energy_context.tariffs:
+            point.currency = currency
+    comparison = CounterfactualAnalyzer(CpSatOptimizer(DeviceRegistry())).compare(
+        scenarios[0], {"negative": scenarios[1]}
+    )
+    outcome = comparison.variations["negative"]
+    assert comparison.baseline.objective_values["energy_cost"] == pytest.approx(0.1)
+    assert outcome.result.objective_values["energy_cost"] == pytest.approx(-0.05)
+    assert outcome.diff["energy_cost"] == pytest.approx(-0.15)
+    assert (
+        outcome.result.constraint_summary["accounting"]["comparison"]["diff_units"]["energy_cost"]
+        == currency
+    )

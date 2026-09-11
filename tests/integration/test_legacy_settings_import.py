@@ -9,6 +9,7 @@ from domoai.application.connection_manager import ConnectionManager
 from domoai.application.connection_providers import ConnectionProviderRegistry
 from domoai.application.legacy_settings_importer import LegacySettingsImporter
 from domoai.config.settings import Settings
+from domoai.domain.coordination import LeaseScope
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.managed_adapter_set import ManagedAdapterSet
@@ -47,13 +48,10 @@ def test_importer_detects_all_supported_legacy_families_without_plaintext(
     }
     assert len(report.profiles) == 6
     assert report.profiles[0].enabled is False
-    assert all(
-        profile.credential_ref != "legacy-ha-token" for profile in report.profiles
-    )
+    assert all(profile.credential_ref != "legacy-ha-token" for profile in report.profiles)
     assert "legacy-ha-token" not in repr(report)
     assert any(
-        profile.credential_ref == "env:DOMOAI_HOME_ASSISTANT_TOKEN"
-        for profile in report.profiles
+        profile.credential_ref == "env:DOMOAI_HOME_ASSISTANT_TOKEN" for profile in report.profiles
     )
 
 
@@ -76,7 +74,12 @@ async def test_manager_import_is_explicit_persisted_and_disabled(tmp_path: Path)
             home_assistant_token=SecretStr("legacy-token"),
         )
         manager = ConnectionManager(
-            repository=ConnectionRepository(database),
+            repository=ConnectionRepository(
+                database,
+                scope=LeaseScope(
+                    tenant_id="default", household_id="default", deployment_id="default"
+                ),
+            ),
             providers=ConnectionProviderRegistry(),
             runtime=ManagedAdapterSet(),
             secret_store=FileSecretStore(tmp_path / "master.key"),

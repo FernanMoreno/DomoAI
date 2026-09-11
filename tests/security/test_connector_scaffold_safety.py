@@ -48,3 +48,16 @@ def test_scaffold_does_not_put_secret_words_in_provider_metadata(tmp_path, value
             ConnectorScaffoldRequest("safe_connector", "Safe", value, tmp_path / "out")
         )
 
+
+def test_recipe_loader_rejects_executable_yaml_tags(tmp_path) -> None:
+    recipe = tmp_path / "unsafe.yaml"
+    recipe.write_text(
+        """!!python/object/apply:os.system [echo unsafe]
+""",
+        encoding="utf-8",
+    )
+
+    from domoai.admin.connector_scaffold import load_connector_recipe
+
+    with pytest.raises(ValueError, match="recipe"):
+        load_connector_recipe(recipe)

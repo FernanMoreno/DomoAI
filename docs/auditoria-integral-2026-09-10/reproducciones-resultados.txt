@@ -1,0 +1,31 @@
+## cancelacion.py
+exit=0
+plan_after_cancel= unknown calls= 0
+plan_after_queue_drain= unknown calls= 1
+
+## ejecucion.py
+exit=0
+ledger_after_confirmed= acknowledged
+recovery_reclassified_successes= 1
+ledger_after_recovery= unknown
+time_12_plans= ['automation:rule12:time:rule12:2026-09-10T12:00', 'automation:rule18:time:rule12:2026-09-10T12:00']
+cancelled_queue_calls= ['PHYSICAL_WRITE']
+
+## energia.py
+exit=0
+CASE 1: composed base_load_forecast=None; cost=0.0; with 1kW base load cost=0.4
+CASE 2: valid passive baseline cost=0.4; status=no_action_required; variations={}
+CASE 3: solar consumed locally=1kWh; later initial battery energy exported=1kWh; reported solar self-consumption=0kWh
+CASE 4: 0.2EUR + 0.2USD accepted without conversion/diagnostic; energy_cost=0.4
+All four reported behaviors reproduced. No repository files changed.
+
+## readiness.py
+exit=0
+{"before": 200, "scheduler_done": true, "running_tasks": 3, "after": 200, "body": {"service": "domoai", "status": "ready", "runtime": {"status": "ready", "started": true, "running_tasks": 3}, "adapter": {"adapter_id": "fixture", "connected": true, "status": "ready"}, "ownership": {"active": true}, "coordination": {"mode": "single_writer", "status": "ready"}, "authorization": {"status": "local"}, "freshness": {"status": "current", "max_age_seconds": 0.034749, "stale_after_seconds": 300.0, "required_snapshot_count": 8, "optional_snapshot_count": 0, "reason_codes": []}, "physical": {"status": "ready", "battery_qualification": "unsupported", "battery_operational_status": "unconfigured"}, "physical_sources": 0, "reason_codes": []}}
+
+## superficie.py
+exit=0
+MANAGEMENT_RESTRICTED_TOKEN: 200 {"disabled":"11111111-1111-1111-1111-111111111111"} ['11111111-1111-1111-1111-111111111111']
+COVERAGE_UNAVAILABLE_ROUTE: False {"schema_version": "v1", "runtime_revision": "1", "routes": [{"device_id": "allowed.lamp", "capability": "power", "protocols": ["mqtt"], "operations": {"read": true, "write": true, "commands": ["turn_off", "turn_on"]}, "guarantees": {"resolution": null, "tolerance": null, "expected_latency_ms": null, "readback_required": false, "reversible": true, "confirmation_required": false, "availability_modes": ["local"], "commissioning_required": "not_required"}, "limits": {"unit": null, "minimum": null, "maximum": null, "enum_values": []}, "status": "active", "writable": true}]}
+INVENTORY_EMPTY_VISIBLE: {"schema_version": "v1", "runtime_revision": "1", "devices": [], "areas": [{"id": "allowed", "name": "Allowed", "parent_id": null, "source_refs": []}, {"id": "private", "name": "Private room", "parent_id": null, "source_refs": []}], "unsupported_sources": [], "refreshed_at": null}
+HA_NULL_BRIGHTNESS_ABORTS_SNAPSHOT: TypeError float() argument must be a string or a real number, not 'NoneType'

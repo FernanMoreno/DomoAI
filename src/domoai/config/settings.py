@@ -110,6 +110,9 @@ class Settings(StrictModel):
     matter_optional_node_ids: tuple[int, ...] = Field(default=(), max_length=64)
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
     scheduler_grace_window_seconds: int = Field(default=900, gt=0)
+    audit_outbox_poll_interval_seconds: float = Field(default=1.0, gt=0, le=3600)
+    audit_outbox_lease_seconds: float = Field(default=30.0, gt=1.0, le=86_400)
+    audit_outbox_batch_size: int = Field(default=100, ge=1, le=1000)
     optimization_max_solver_time_seconds: float = Field(default=30.0, gt=0)
     optimization_max_horizon_slots: int = Field(default=10080, gt=0)
     optimization_worker_queue_capacity: int = Field(default=2, ge=0)
@@ -134,6 +137,7 @@ class Settings(StrictModel):
     solar_inverter_ac_max_kw: float | None = Field(default=None, gt=0)
     solar_timezone: str = Field(default="Europe/Madrid", min_length=1)
     solar_profile_path: Path | None = None
+    base_load_profile_path: Path | None = None
     battery_dispatch_profile_path: Path | None = None
     ev_charging_binding_paths: tuple[Path, ...] = ()
     battery_hil_evidence_path: Path | None = None
@@ -484,6 +488,15 @@ class Settings(StrictModel):
             scheduler_grace_window_seconds=int(
                 os.getenv("DOMOAI_SCHEDULER_GRACE_WINDOW_SECONDS", "900")
             ),
+            audit_outbox_poll_interval_seconds=float(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_POLL_INTERVAL_SECONDS", "1")
+            ),
+            audit_outbox_lease_seconds=float(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_LEASE_SECONDS", "30")
+            ),
+            audit_outbox_batch_size=int(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_BATCH_SIZE", "100")
+            ),
             optimization_max_solver_time_seconds=float(
                 os.getenv("DOMOAI_OPTIMIZATION_MAX_SOLVER_TIME_SECONDS", "30")
             ),
@@ -560,6 +573,11 @@ class Settings(StrictModel):
             solar_profile_path=(
                 Path(profile_path)
                 if (profile_path := os.getenv("DOMOAI_SOLAR_PROFILE_PATH"))
+                else None
+            ),
+            base_load_profile_path=(
+                Path(base_load_path)
+                if (base_load_path := os.getenv("DOMOAI_BASE_LOAD_PROFILE_PATH"))
                 else None
             ),
             battery_dispatch_profile_path=(

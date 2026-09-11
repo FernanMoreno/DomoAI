@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "OnboardingAuthMode": {
+      "enum": [
+        "verified_bearer",
+        "static_bearer",
+        "local_loopback"
+      ],
+      "type": "string"
+    },
+    "OnboardingCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "service",
+            "lifecycle",
+            "ownership",
+            "connectors"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "pending"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "status"
+      ],
+      "title": "OnboardingCheck",
+      "type": "object"
+    },
+    "OnboardingClientConnection": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "transport": {
+          "const": "streamable-http",
+          "default": "streamable-http",
+          "title": "Transport",
+          "type": "string"
+        },
+        "auth_mode": {
+          "$ref": "#/$defs/OnboardingAuthMode"
+        },
+        "status": {
+          "default": "pending",
+          "enum": [
+            "prepared",
+            "pending"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "auth_mode"
+      ],
+      "title": "OnboardingClientConnection",
+      "type": "object"
+    },
+    "OnboardingRecoveryCode": {
+      "enum": [
+        "connection_recovery_pending",
+        "connection_persistence_pending"
+      ],
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "domoai.household-onboarding.v1",
+      "default": "domoai.household-onboarding.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "auth_mode": {
+      "$ref": "#/$defs/OnboardingAuthMode"
+    },
+    "can_manage_connections": {
+      "title": "Can Manage Connections",
+      "type": "boolean"
+    },
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/OnboardingCheck"
+      },
+      "maxItems": 4,
+      "title": "Checks",
+      "type": "array"
+    },
+    "recovery_diagnostics": {
+      "items": {
+        "$ref": "#/$defs/OnboardingRecoveryCode"
+      },
+      "maxItems": 2,
+      "title": "Recovery Diagnostics",
+      "type": "array"
+    },
+    "client_connection": {
+      "$ref": "#/$defs/OnboardingClientConnection"
+    }
+  },
+  "required": [
+    "auth_mode",
+    "can_manage_connections",
+    "checks",
+    "client_connection"
+  ],
+  "title": "HouseholdOnboardingStatus",
+  "type": "object"
+}

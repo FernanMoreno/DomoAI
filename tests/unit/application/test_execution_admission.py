@@ -32,7 +32,7 @@ class _BundleRepository:
         )
 
 
-def _approved_confirmation_plan() -> tuple[Plan, ApprovalStore]:
+def _approved_confirmation_plan(clock=None) -> tuple[Plan, ApprovalStore]:
     now = datetime(2026, 8, 24, 12, tzinfo=UTC)
     plan = Plan(
         id="plan-admission-authority-1",
@@ -54,7 +54,7 @@ def _approved_confirmation_plan() -> tuple[Plan, ApprovalStore]:
         ],
     )
     store = ApprovalStore(
-        operator_token="operator", allow_legacy_token=True, clock=FixedClock(now)
+        operator_token="operator", allow_legacy_token=True, clock=clock or FixedClock(now)
     )
     grant = store.issue(plan, approved_by="operator", operator_token="operator")
     store.consume(grant.approval_id, plan)
@@ -214,9 +214,9 @@ async def test_bundle_member_rejection_audit_is_operation_scoped_and_credential_
     audit = AuditLog()
 
     with pytest.raises(DomainError) as excinfo:
-        await ExecutionAdmission(
-            bundle_repository=_BundleRepository(bundle), audit=audit
-        ).admit(plan, operation=AdmissionOperation.CANCEL)
+        await ExecutionAdmission(bundle_repository=_BundleRepository(bundle), audit=audit).admit(
+            plan, operation=AdmissionOperation.CANCEL
+        )
 
     assert excinfo.value.code is ErrorCode.BUNDLE_MEMBER_CANCEL_FORBIDDEN
     assert len(audit.events) == 1
@@ -349,3 +349,29 @@ async def test_admission_rejects_approved_plan_with_non_confirmation_validation(
         await ExecutionAdmission(approval_store=ApprovalStore()).admit(inconsistent)
 
     assert excinfo.value.code is ErrorCode.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_dispatch_revalidation_keeps_consumed_bundle_capability_single_use() -> None:
+    plan, bundle = _bundle_member_plan_and_bundle()
+    admission = ExecutionAdmission(bundle_repository=_BundleRepository(bundle))
+    capability = await admission.issue_aggregate_capability(bundle.id, plan.id)
+    decision = await admission.admit(plan, aggregate_capability=capability)
+    await admission.revalidate(plan, decision)
+    with pytest.raises(DomainError):
+        await admission.admit(plan, aggregate_capability=capability)
+    bundle.bundle_digest = "changed-bundle"
+    with pytest.raises(DomainError):
+        await admission.revalidate(plan, decision)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_revalidation_rejects_expired_consumed_approval() -> None:
+    clock = FixedClock(datetime(2026, 8, 24, 12, tzinfo=UTC))
+    plan, store = _approved_confirmation_plan(clock)
+    admission = ExecutionAdmission(approval_store=store)
+    decision = await admission.admit(plan)
+    assert plan.approval is not None
+    clock.set(plan.approval.expires_at)
+    with pytest.raises(DomainError):
+        await admission.revalidate(plan, decision)

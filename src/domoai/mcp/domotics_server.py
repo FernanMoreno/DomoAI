@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import Any
@@ -20,6 +21,7 @@ from domoai.application.commissioning import (
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.execution_admission import AdmissionOperation
 from domoai.application.facade import DomoticsFacade
+from domoai.application.household_preferences import HouseholdPreferenceService
 from domoai.application.local_automation import LocalAutomationEngine
 from domoai.application.metrics import RuntimeMetricsCollector
 from domoai.application.optimization_worker import OptimizationWorker, WorkerOperationError
@@ -46,15 +48,18 @@ from domoai.mcp.auth import (
 )
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
+from domoai.mcp.household_preferences import register_household_preference_tools
 from domoai.mcp.request_context import with_request_principal
 from domoai.mcp.resources import (
     as_json,
     capabilities_snapshot,
+    coverage_evidence_snapshot,
     coverage_snapshot,
     energy_context_snapshot,
     energy_snapshot,
     inventory_snapshot,
     policies_snapshot,
+    project_areas,
     runtime_snapshot,
 )
 from domoai.optimizer.energy import EnergyContext
@@ -106,6 +111,27 @@ class DomoticsMcpContext:
     privacy_policy: HouseholdDataPolicy | None = None
     qualification_repository: CommissioningQualificationRepository | None = None
     authority_policy: AuthorityPolicy = field(default_factory=AuthorityPolicy)
+    household_preferences: HouseholdPreferenceService | None = None
+    active_provider_ids_supplier: Callable[[], tuple[str, ...]] | None = None
+
+    def sample_active_provider_ids(self) -> tuple[str, ...]:
+        """Sample live composition once per response, retaining local fixture fallback.
+
+        An empty live sample is authoritative. Inventory revisions do not freeze
+        operational availability between requests, so this must not be cached.
+        """
+        try:
+            if self.active_provider_ids_supplier is not None:
+                return tuple(self.active_provider_ids_supplier())
+            return tuple(self.active_provider_ids)
+        except Exception:
+            # Suppliers (including their iterable materialization) are not a
+            # trusted source of public error text, even when raising DomainError.
+            # Cancellation is a BaseException and must keep propagating.
+            raise DomainError(
+                ErrorCode.SOURCE_UNAVAILABLE,
+                "Provider availability evidence is unavailable",
+            ) from None
 
 
 def _parse_timezone_aware_datetime(value: str) -> datetime:
@@ -183,6 +209,20 @@ def _visible_devices(context: DomoticsMcpContext) -> list[Any]:
         selected = [device for device in selected if device.id in authority.device_ids]
     if authority.area_ids:
         selected = [device for device in selected if device.area_id in authority.area_ids]
+    if authority.capabilities:
+        selected = [
+            device.model_copy(
+                deep=True,
+                update={
+                    "capabilities": [
+                        capability.model_copy(deep=True)
+                        for capability in device.capabilities
+                        if capability.name in authority.capabilities
+                    ]
+                },
+            )
+            for device in selected
+        ]
     return selected
 
 
@@ -192,14 +232,22 @@ def _bind_request_plan(context: DomoticsMcpContext, plan: Plan, *, operation: st
         return plan
     authority = current_authority() or policy.local_context()
     policy.authorize(authority, operation=operation)
-    return policy.bind_plan(plan, authority, operation=operation)
+    device_areas = {device.id: device.area_id for device in context.registry.devices}
+    return policy.bind_plan(
+        plan,
+        authority,
+        operation=operation,
+        device_areas=device_areas,
+    )
 
 
 def _authorize_existing_plan(context: DomoticsMcpContext, plan: Plan, *, operation: str) -> None:
     policy = _authority_policy(context)
+    authority = current_authority() or (policy or AuthorityPolicy()).local_context()
+    if plan.authority.tenant_id != authority.tenant_id:
+        raise DomainError(ErrorCode.INSUFFICIENT_SCOPE, "Plan tenant is not authorized")
     if policy is None:
         return
-    authority = current_authority() or policy.local_context()
     policy.authorize(
         authority,
         operation=operation,
@@ -232,11 +280,51 @@ def _audit_client_request(context: DomoticsMcpContext, *, operation: str, subjec
 
 async def _resolve_plan(context: DomoticsMcpContext, plan_id: str) -> Plan | None:
     plan = context.plans.get(plan_id)
-    if plan is None and context.plan_repository is not None:
-        plan = await context.plan_repository.get(plan_id)
-        if plan is not None:
-            context.plans[plan.id] = plan
+    if context.plan_repository is not None:
+        try:
+            persisted = await context.plan_repository.get(plan_id)
+        except DomainError as error:
+            context.plans.pop(plan_id, None)
+            if error.code is ErrorCode.PLAN_IDENTITY_CONFLICT and error.details.get("reason") in {
+                "revalidation_required",
+                "historical_only",
+            }:
+                return None
+            raise
+        except ValueError:
+            context.plans.pop(plan_id, None)
+            raise
+        if persisted is not None:
+            plan = persisted
+            context.plans[plan.id] = persisted
+    if plan is not None:
+        try:
+            Plan.model_validate(plan.model_dump(mode="python"))
+        except ValueError:
+            context.plans.pop(plan_id, None)
+            return None
     return plan
+
+
+async def _list_compatibility(
+    context: DomoticsMcpContext, repository: Any, *, offset: int
+) -> dict[str, Any]:
+    policy = _authority_policy(context) or AuthorityPolicy()
+    authority = current_authority() or policy.local_context()
+    if authority.area_ids or authority.device_ids or authority.capabilities:
+        return {
+            "status": "unavailable",
+            "reason": "whole_household_authority_required",
+            "records": [],
+            "next_offset": None,
+        }
+    result: dict[str, Any] = await repository.compatibility_diagnostics(
+        tenant_id=policy.tenant_id,
+        household_id=policy.household_id,
+        deployment_id=context.facade.plan_service.deployment_id or "default",
+        offset=offset,
+    )
+    return result
 
 
 async def _admit_mcp_operation(
@@ -346,6 +434,8 @@ async def _persist_approved_plan(context: DomoticsMcpContext, plan: Plan) -> Pla
 
 def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> FastMCP:
     ensure_fastmcp_settings_ready()
+    if context.household_preferences is not None:
+        register_household_preference_tools(server, context.household_preferences)
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
     mutation_annotations = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
@@ -366,10 +456,12 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             if refresh:
                 await context.discovery.refresh()
                 context.last_refreshed_at = context.clock.now()
-            selected = context.registry.devices
+            selected = _visible_devices(context)
+            areas = project_areas(
+                context.registry, visible_devices=selected, authority=current_authority()
+            )
             if area_id is not None:
                 selected = [device for device in selected if device.area_id == area_id]
-            selected = [device for device in selected if device in _visible_devices(context)]
             if types is not None:
                 requested_types = {DeviceType(device_type) for device_type in types}
                 selected = [device for device in selected if device.type in requested_types]
@@ -378,6 +470,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 runtime_revision=context.discovery.state_store.runtime_revision,
                 refreshed_at=context.last_refreshed_at,
                 devices=selected,
+                areas=areas,
             )
         except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -517,6 +610,23 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 device_ids=tuple(devices),
                 capabilities=tuple(capabilities or ()),
             )
+            authority = current_authority()
+            if authority is not None and authority.capabilities:
+                allowed = set(capabilities or authority.capabilities)
+                available = {
+                    cap.name
+                    for device in _visible_devices(context)
+                    if device.id in devices
+                    for cap in device.capabilities
+                }
+                capabilities = sorted(allowed & available)
+                if not capabilities:
+                    return {
+                        "schema_version": "v1",
+                        "runtime_revision": context.discovery.state_store.runtime_revision,
+                        "states": [],
+                        "diagnostics": [],
+                    }
             read_result = await context.state_service.get_with_diagnostics(
                 devices,
                 capabilities,
@@ -992,6 +1102,11 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                 )
                 service = context.bundle_commit_service
                 assert service is not None
+                for member in request.members:
+                    plan = await _resolve_plan(context, member.plan_id)
+                    if plan is None:
+                        raise ValueError(f"Unknown plan: {member.plan_id}")
+                    _authorize_existing_plan(context, plan, operation="commit_or_schedule_bundle")
                 result = await service.commit(request)
                 return {
                     "schema_version": "v1",
@@ -1210,12 +1325,17 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         structured_output=True,
     )
     @with_request_principal
-    async def list_scheduled_plans() -> dict[str, Any]:
+    async def list_scheduled_plans(compatibility_offset: int = 0) -> dict[str, Any]:
         try:
             _authorize_read(context, operation="list")
             if context.scheduler is None:
                 raise ValueError("Scheduling is unavailable in this deployment")
             pending = await context.scheduler.list_pending()
+            compatibility = await _list_compatibility(
+                context,
+                context.scheduler.repository,
+                offset=compatibility_offset,
+            )
             visible: list[Plan] = []
             for plan in pending:
                 try:
@@ -1232,6 +1352,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     }
                     for plan in visible
                 ],
+                "compatibility": compatibility,
             }
         except (ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -1437,8 +1558,10 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             bound_template = _bind_request_plan(
                 context, parsed.plan_template, operation="create_local_automation_rule"
             )
-            parsed = parsed.model_copy(
-                update={"authority": bound_template.authority, "plan_template": bound_template}
+            bound_template = context.facade.plan_service.bind_definition(bound_template)
+            parsed = AutomationRule.model_validate(
+                parsed.model_dump(mode="python", exclude={"schema_version", "definition_digest"})
+                | {"authority": bound_template.authority, "plan_template": bound_template}
             )
             validated_template = context.facade.validate_plan(parsed.plan_template)
             rule_digest = automation_rule_digest(parsed)
@@ -1505,8 +1628,10 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
             bound_template = _bind_request_plan(
                 context, parsed.plan_template, operation="update_local_automation_rule"
             )
-            parsed = parsed.model_copy(
-                update={"authority": bound_template.authority, "plan_template": bound_template}
+            bound_template = context.facade.plan_service.bind_definition(bound_template)
+            parsed = AutomationRule.model_validate(
+                parsed.model_dump(mode="python", exclude={"schema_version", "definition_digest"})
+                | {"authority": bound_template.authority, "plan_template": bound_template}
             )
             validated_template = context.facade.validate_plan(parsed.plan_template)
             rule_digest = automation_rule_digest(parsed)
@@ -1553,12 +1678,17 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
         structured_output=True,
     )
     @with_request_principal
-    async def list_local_automation_rules() -> dict[str, Any]:
+    async def list_local_automation_rules(compatibility_offset: int = 0) -> dict[str, Any]:
         try:
             _authorize_read(context, operation="list")
             if context.local_automation is None:
                 raise ValueError("Local automation is unavailable in this deployment")
             records = await context.local_automation.list_rules()
+            compatibility = await _list_compatibility(
+                context,
+                context.local_automation.repository,
+                offset=compatibility_offset,
+            )
             visible = []
             for record in records:
                 try:
@@ -1591,6 +1721,7 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
                     }
                     for record in visible
                 ],
+                "compatibility": compatibility,
             }
         except (DomainError, ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -1662,10 +1793,11 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
     async def areas_resource() -> str:
         try:
             _authorize_read(context, operation="discover_devices")
-            authority = current_authority()
-            areas = context.registry.areas
-            if authority is not None and authority.area_ids:
-                areas = [area for area in areas if area.id in authority.area_ids]
+            areas = project_areas(
+                context.registry,
+                visible_devices=_visible_devices(context),
+                authority=current_authority(),
+            )
             return as_json(
                 {
                     "schema_version": "v1",
@@ -1694,14 +1826,31 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
     async def coverage_resource() -> str:
         try:
             _authorize_read(context, operation="inspect")
+            provider_ids = context.sample_active_provider_ids()
             return as_json(
                 coverage_snapshot(
                     context.registry,
                     runtime_revision=context.discovery.state_store.runtime_revision,
-                    active_provider_ids=context.active_provider_ids,
+                    active_provider_ids=provider_ids,
                     devices=_visible_devices(context),
                 )
             )
+        except DomainError as error:
+            return as_json(error_envelope(error))
+
+    @server.resource("domotics://coverage-evidence", mime_type="application/json")
+    async def coverage_evidence_resource() -> str:
+        try:
+            _authorize_read(context, operation="inspect")
+            devices = _visible_devices(context)
+            provider_ids = context.sample_active_provider_ids()
+            snapshot = coverage_evidence_snapshot(
+                context.registry,
+                runtime_revision=context.discovery.state_store.runtime_revision,
+                active_provider_ids=provider_ids,
+                devices=devices,
+            )
+            return as_json(snapshot.model_dump(mode="json"))
         except DomainError as error:
             return as_json(error_envelope(error))
 
@@ -1709,12 +1858,16 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
     async def devices_resource() -> str:
         try:
             _authorize_read(context, operation="discover_devices")
+            devices = _visible_devices(context)
             return as_json(
                 inventory_snapshot(
                     context.registry,
                     runtime_revision=context.discovery.state_store.runtime_revision,
                     refreshed_at=context.last_refreshed_at,
-                    devices=_visible_devices(context),
+                    devices=devices,
+                    areas=project_areas(
+                        context.registry, visible_devices=devices, authority=current_authority()
+                    ),
                 )
             )
         except DomainError as error:
@@ -1762,11 +1915,12 @@ def register_domotics_tools(server: FastMCP, context: DomoticsMcpContext) -> Fas
     async def runtime_resource() -> str:
         try:
             _authorize_read(context, operation="inspect")
+            provider_ids = context.sample_active_provider_ids()
             return as_json(
                 runtime_snapshot(
                     context.registry,
                     runtime_revision=context.discovery.state_store.runtime_revision,
-                    active_provider_ids=context.active_provider_ids,
+                    active_provider_ids=provider_ids,
                     battery_qualification=context.battery_qualification,
                     devices=_visible_devices(context),
                 )

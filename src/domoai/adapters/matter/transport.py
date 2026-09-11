@@ -111,14 +111,32 @@ class MatterServerWebSocketTransport:
     """Live client for the Matter Server Python-compatible WebSocket API."""
 
     CLIENT_SCHEMA_VERSION = 13
+    DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
+    DEFAULT_EVENT_QUEUE_MAX_SIZE = 1000
 
-    def __init__(self, url: str, *, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = 5.0,
+        max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
+        event_queue_max_size: int = DEFAULT_EVENT_QUEUE_MAX_SIZE,
+    ) -> None:
+        if isinstance(max_frame_bytes, bool) or max_frame_bytes <= 0:
+            raise ValueError("Matter transport frame limit must be positive")
+        if isinstance(event_queue_max_size, bool) or event_queue_max_size <= 0:
+            raise ValueError("Matter transport event queue limit must be positive")
         self.url = url
         self.timeout = timeout
+        self.max_frame_bytes = max_frame_bytes
+        self.event_queue_max_size = event_queue_max_size
         self._socket: Any = None
         self._reader_task: asyncio.Task[None] | None = None
         self._pending: dict[str, asyncio.Future[Any]] = {}
-        self._events: asyncio.Queue[MatterTransportMessage] = asyncio.Queue()
+        self._events: asyncio.Queue[MatterTransportMessage] = asyncio.Queue(
+            maxsize=event_queue_max_size
+        )
+        self._dropped_event_count = 0
         self._server_info: dict[str, Any] | None = None
         self._connected = False
         self.last_request_context: ExecutionContext | None = None
@@ -131,7 +149,7 @@ class MatterServerWebSocketTransport:
                 self.url,
                 open_timeout=self.timeout,
                 close_timeout=self.timeout,
-                max_size=None,
+                max_size=self.max_frame_bytes,
             )
             raw_info = await asyncio.wait_for(self._socket.recv(), self.timeout)
             info = self._parse_json(raw_info)
@@ -207,6 +225,20 @@ class MatterServerWebSocketTransport:
     async def health(self) -> bool:
         return self._connected and self._socket is not None
 
+    @property
+    def event_queue_depth(self) -> int:
+        return self._events.qsize()
+
+    @property
+    def dropped_event_count(self) -> int:
+        return self._dropped_event_count
+
+    def _enqueue_event(self, message: MatterTransportMessage) -> None:
+        try:
+            self._events.put_nowait(message)
+        except asyncio.QueueFull:
+            self._dropped_event_count += 1
+
     async def _read_messages(self) -> None:
         assert self._socket is not None
         try:
@@ -214,7 +246,7 @@ class MatterServerWebSocketTransport:
                 try:
                     payload = self._parse_json(raw_message)
                 except ValueError:
-                    await self._events.put(
+                    self._enqueue_event(
                         MatterTransportMessage(payload={"event": "malformed", "data": {}})
                     )
                     continue
@@ -229,7 +261,7 @@ class MatterServerWebSocketTransport:
                     else:
                         future.set_result(payload.get("result"))
                 elif "event" in payload:
-                    await self._events.put(MatterTransportMessage(payload=payload))
+                    self._enqueue_event(MatterTransportMessage(payload=payload))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -237,7 +269,7 @@ class MatterServerWebSocketTransport:
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(ConnectionError("Matter Server connection closed"))
-            await self._events.put(
+            self._enqueue_event(
                 MatterTransportMessage(payload={"event": "connection_lost", "data": {}})
             )
 

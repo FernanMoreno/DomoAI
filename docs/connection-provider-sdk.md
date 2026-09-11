@@ -1,5 +1,7 @@
 # Connection Provider SDK v1
 
+> Complete connector documentation: [`docs/documentation/README.md`](documentation/README.md).
+
 DomoAI connection providers implement the contract in
 `domoai.runtime.connection_ports.ConnectionProviderPort` and expose a strict
 `ConnectionProviderManifest`. The manifest is non-secret metadata; credentials
@@ -58,6 +60,40 @@ require a new provider-specific page. Raw credentials are still accepted only
 by the narrow create/reauth operation and are stored through the configured
 secret store.
 
+## Declarative recipes
+
+When the transport engine already exists, a provider can be generated from a
+strict public `ConnectorRecipe` instead of starting with five handwritten
+methods:
+
+```bash
+uv run domoai-admin connector create --recipe ./recipe.yaml --output ./my-connector
+uv run domoai-admin connector check ./my-connector
+```
+
+Recipes support bounded MQTT, REST/OpenAPI, Modbus, KNX and Matter engines.
+They describe `transport_family`, `device_type`, discovery/authentication
+schemes and normalized capability bindings. MQTT topics and REST paths accept
+only the `{device_id}` variable; writes accept `{value}` and require an
+explicit readback. OpenAPI operations are separately allowlisted and their
+JSON response schemas are required. Modbus, KNX and Matter use typed profiles
+for register codecs, group addresses/DPTs and standard endpoint/cluster/
+attribute interactions. See
+[`docs/connector-recipes.md`](connector-recipes.md) for examples and the
+custom-provider boundary.
+
+The recipe is public metadata. Broker/API endpoints are selected during
+onboarding, while tokens and passwords stay in the configured secret store.
+The generated project deliberately reports `incomplete` until its deployment
+engine and contract tests are supplied. Once active, its adapter still
+returns only the normalized `AdapterPort` surface used by the agent.
+
+This is why a new product does not normally require implementing the five
+methods. If its behavior fits a supported recipe, the generator supplies the
+provider lifecycle and the deployment injects the real transport. A custom
+provider remains necessary for proprietary discovery, pairing, serial/BLE/
+Thread flows or semantics outside the typed allowlists.
+
 ## P2 operator workflows
 
 The local management API exposes the reviewed P2 boundaries:
@@ -87,3 +123,8 @@ The P2 routes share the management API's authentication, origin and rate-limit
 middleware. Secret values must be supplied only to the narrow operation that
 stores or rotates them; they must not be placed in endpoint/options metadata,
 repair parameters, logs or audit payloads.
+
+OAuth deployment readiness is checked offline with
+`uv run domoai-admin oauth preflight --env-file deploy/gateway.env`. This
+validates public configuration and reports the external client-registration
+gate; it does not register an application or exchange a token.

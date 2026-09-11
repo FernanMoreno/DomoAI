@@ -3229,3 +3229,60 @@ uv run python scripts/export_schemas.py
 uv run ruff check .
 uv run mypy src tests scripts
 ```
+
+## Optimization accounting evidence (A12 / spec239)
+
+New energy results carry version 1 accounting in the existing
+`constraint_summary.accounting` dictionary. The same block survives
+`OptimizationExplanation` and `ProductSummary`; each `AlternativeEvidence` and
+`ProductAlternative` carries its own evidence in `constraint_effects.accounting`.
+An alternative with no evidence stays unknown. Explanation fallback copies values
+and accounting together, trimming unit/comparison keys to the same 32 metrics.
+No top-level envelope field or contract version selection changes: the v1/v2
+selection by nested plans remains the runtime compatibility contract 253.
+
+`EnergyContext.currency` is a Python property derived from homogeneous import and
+export tariffs. It is not serialized and cannot be supplied as an override.
+Three uppercase characters identify the declared currency; there is no FX or ISO
+registry lookup. Tariffs can be negative but must be finite. Battery degradation
+inherits that context currency as defined by spec046. `None` means unconfigured;
+zero is configured and reports `degradation_currency_source=context_inherited`,
+while preserving the numerical no-op. No separate battery currency field exists.
+
+Accounting declares `objective_units`, `currency`, the SHA-256 hexadecimal digest
+of the complete context `source_revision` UTF-8 bytes, degradation provenance and
+`terminal_value_applied`. The digest neither normalizes nor truncates revision
+text and does not certify external provenance. `energy_cost`, `export_revenue`
+and `battery_degradation_cost` use the context currency. Physical values retain
+kW/kWh, slots use `slot`, and flags use `1`; scaled solver objective tiers are
+not monetary values. `terminal_soc_value_eur` always retains EUR: without a
+valuation policy its historical zero is not applied. An explicit
+`value_eur_per_kwh`, including zero, requires EUR before solver/worker admission;
+a reserve expressed only in kWh is valid with USD.
+
+The standalone schema is `schemas/v1/optimization-accounting.schema.json`,
+exported from `domain.product.AccountingEvidence` with its nested
+`ComparisonAccounting` definition. Existing envelope schemas retain their
+extensible dictionaries. Updated readers validate explicit blocks strictly;
+corrupt blocks are rejected. Missing blocks mean unknown currency, with only the
+closed list of known physical metrics eligible for legacy unit interpretation.
+A valid partial block never infers absent units. An explicit monetary unit with
+`currency=null` remains valid partial evidence; it does not establish the context
+currency or permit financial deltas. Known currency/unit contradictions reject.
+Old readers can parse the dictionary yet ignore its semantics: update financial
+readers together before relying on their calculations or display.
+
+Comparison publishes variation minus baseline only for shared compatible known
+units, with known equal currencies for money. The detached variation result's
+`constraint_summary.accounting.comparison` identifies the baseline scenario and
+definition digest, supplies `diff_units`, and records omitted metrics with
+`currency_mismatch`, `currency_unknown`, `unit_mismatch`, `unit_unknown`,
+`not_applicable` or `accounting_version_mismatch`. Product comparison preserves
+this under `variation.summary.constraint_summary.accounting.comparison`.
+An unapplied terminal value is omitted before testing currencies. Solar metrics
+from incompatible A11 conventions remain noncomparable even with matching kWh.
+Previous comparison metadata is replaced without mutating either input. More
+than 32 shared metrics rejects the comparison instead of publishing truncated
+deltas; existing 16-entry product/alternative metadata limits still apply.
+Comparison remains passive: no plan creation, execution audit, dispatch or
+runtime revision change.

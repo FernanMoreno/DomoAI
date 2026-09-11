@@ -1,0 +1,592 @@
+[
+  {
+    "key": "A-01",
+    "slug": "time-rule-isolation",
+    "title": "Aislamiento de ocurrencias horarias",
+    "goal": "Ejecutar únicamente la regla cuya hora ha llegado.",
+    "requirements": [
+      "Una ocurrencia horaria debe identificar inequívocamente su regla y zona horaria.",
+      "Las reglas de las 12:00 y 18:00 no deben dispararse juntas al evaluar las 12:00.",
+      "La misma ocurrencia repetida no debe duplicar actuación; reglas distintas a la misma hora conservan una ocurrencia cada una."
+    ],
+    "edge": "DST, hora repetida, distintas zonas, regla deshabilitada y evento tardío.",
+    "entities": "AutomationEvent: event_id, rule_id o destinatario equivalente, occurred_at; AutomationRule: trigger, timezone; claim por regla/ocurrencia.",
+    "paths": [
+      "src/domoai/application/local_automation.py",
+      "src/domoai/domain/automation.py",
+      "src/domoai/persistence/repositories.py"
+    ],
+    "deps": [],
+    "decision": "Enrutar por regla y verificar hora/zona antes del claim; conservar identidad determinista de ocurrencia. La hora local repetida seguirá una ocurrencia por instante UTC distinto, política explícita sin confundir replay.",
+    "tests": "tests/unit/application/test_local_automation.py",
+    "directory": "specs/228-time-rule-isolation"
+  },
+  {
+    "key": "A-02",
+    "slug": "queued-dispatch-cancellation",
+    "title": "Cancelación anterior al despacho",
+    "goal": "Evitar que una orden retirada antes del envío actúe después.",
+    "requirements": [
+      "Cancelar un trabajo pendiente debe retirarlo sin escribir en el dispositivo.",
+      "Una orden ya enviada debe reconciliar su resultado sin prometer reversión.",
+      "El trabajo admitido debe revalidar permiso, caducidad y seguridad al abandonar la cola."
+    ],
+    "edge": "Cancelación concurrente con extracción de cola, timeout, shutdown y expiración durante espera.",
+    "entities": "WorkItem: identidad, estado queued/dispatching/sent/terminal; Plan: intento y resultado; Future no equivale a estado físico.",
+    "paths": [
+      "src/domoai/application/household_queue.py",
+      "src/domoai/application/executor.py",
+      "src/domoai/application/execution_admission.py"
+    ],
+    "deps": [],
+    "decision": "Definir punto de no retorno antes de invocar adapter; retirar cancelados pendientes y conservar seguimiento del despacho iniciado. No usar rollback físico genérico.",
+    "tests": "tests/integration/test_exclusive_physical_dispatch.py",
+    "directory": "specs/229-queued-dispatch-cancellation"
+  },
+  {
+    "key": "A-03",
+    "slug": "intent-terminal-transitions",
+    "title": "Cierre durable después de ACK",
+    "goal": "Conservar el resultado confirmado al recuperar una ejecución.",
+    "requirements": [
+      "La recepción de una orden no debe impedir registrar su posterior confirmación o incertidumbre.",
+      "Un resultado terminal debe permanecer terminal al recuperar con un epoch posterior.",
+      "Solo propietario, intento y epoch vigentes pueden cerrar una intención; un competidor no puede sobrescribirla."
+    ],
+    "edge": "ACK duplicado, confirmación tardía, timeout de readback y propietario obsoleto.",
+    "entities": "PhysicalIntent: status, owner_id, execution_attempt_id, fencing_epoch, updated_at; transiciones dispatching/acknowledged/confirmed/unknown.",
+    "paths": [
+      "src/domoai/persistence/coordination.py",
+      "src/domoai/persistence/postgres.py",
+      "src/domoai/application/executor.py"
+    ],
+    "deps": [],
+    "decision": "Permitir CAS desde dispatching y acknowledged según tabla explícita; inmovilizar terminales. Mantener paridad SQLite/PostgreSQL y payload/columnas consistentes.",
+    "tests": "tests/integration/test_phase3_multihost_ledger.py",
+    "directory": "specs/230-intent-terminal-transitions"
+  },
+  {
+    "key": "A-04",
+    "slug": "named-runtime-readiness",
+    "title": "Readiness de tareas obligatorias",
+    "goal": "Mostrar no disponible si el scheduler u otra tarea obligatoria deja de funcionar.",
+    "requirements": [
+      "La disponibilidad debe depender de cada tarea obligatoria configurada, no de un recuento mínimo de tareas.",
+      "Una tarea requerida detenida debe producir estado no listo y causa identificable.",
+      "Una tarea opcional no configurada no debe bloquear; el indicador de proceso vivo permanece distinto."
+    ],
+    "edge": "Fallo de scheduler, consumidor, refresher, outbox; arranque parcial, cierre y excepción no recogida.",
+    "entities": "RuntimeLifecycle: required task names y task state; ReadinessReport: status y reason_codes sin secretos.",
+    "paths": [
+      "src/domoai/application/runtime_lifecycle.py",
+      "src/domoai/mcp/health.py",
+      "src/domoai/application/runtime_factory.py"
+    ],
+    "deps": [],
+    "decision": "Comprobar tareas por nombre y recoger fallos; primera versión informa degradación y exige recuperación controlada, sin reiniciar ciegamente actuadores.",
+    "tests": "tests/integration/test_runtime_lifecycle.py",
+    "directory": "specs/231-named-runtime-readiness"
+  },
+  {
+    "key": "A-05",
+    "slug": "scoped-connection-administration",
+    "title": "Administración explícita de conexiones",
+    "goal": "Separar permiso de actuar sobre un aparato del permiso de administrar sus conexiones.",
+    "requirements": [
+      "Un usuario limitado a un dispositivo no debe deshabilitar ni reconfigurar conexiones globales.",
+      "Crear, modificar, reparar o retirar conexiones debe requerir permiso administrativo explícito y pertenencia al hogar.",
+      "Lectura y administración deben mantener resultados distinguibles de no autenticado y no autorizado."
+    ],
+    "edge": "UUID ajeno, token mutate acotado, token revocado, admin del hogar y rutas de credenciales.",
+    "entities": "ManagementPrincipal: scopes y authority; Connection: household ownership; autorización por operación y conexión.",
+    "paths": [
+      "src/domoai/management/auth.py",
+      "src/domoai/management/api.py",
+      "src/domoai/application/authority.py"
+    ],
+    "deps": [],
+    "decision": "Exigir manage explícito en el control plane; no reinterpretar mutate/home:write como administración. Documentar reprovisión de tokens que antes dependían de ese alias. Supersede permisos administrativos read/mutate de spec 209: no ampliar ACL estática por compatibilidad.",
+    "tests": "tests/contract/test_phase3_identity_contract.py",
+    "directory": "specs/232-scoped-connection-administration"
+  },
+  {
+    "key": "A-06",
+    "slug": "ha-partial-state-normalization",
+    "title": "Estados parciales de Home Assistant",
+    "goal": "Conservar dispositivos válidos aunque otra entidad no tenga brillo.",
+    "requirements": [
+      "Un valor nulo, ausente o no numérico no debe convertirse en un número inventado.",
+      "Una entidad malformada debe generar diagnóstico acotado sin abortar las entidades válidas del snapshot.",
+      "Snapshot y eventos deben compartir la misma semántica de disponibilidad y valores desconocidos."
+    ],
+    "edge": "brightness null, off, unavailable, malformed numeric, lote mixto y reconexión.",
+    "entities": "HA entity: raw state y attributes; StateSnapshot: value/status/available; diagnóstico por entidad.",
+    "paths": [
+      "src/domoai/adapters/home_assistant/provider.py",
+      "src/domoai/adapters/home_assistant/mapper.py",
+      "src/domoai/application/state_refresher.py"
+    ],
+    "deps": [],
+    "decision": "Normalizar nulos antes de convertir; aislar fallo por entidad sin ocultar errores globales de autenticación/transporte. No convertir unknown en off o cero.",
+    "tests": "tests/contract/test_home_assistant_provider.py",
+    "directory": "specs/233-ha-partial-state-normalization"
+  },
+  {
+    "key": "A-07",
+    "slug": "scoped-area-inventory",
+    "title": "Áreas visibles según autoridad",
+    "goal": "Evitar revelar habitaciones fuera del alcance del usuario.",
+    "requirements": [
+      "El inventario debe limitar áreas a la visibilidad autorizada y a la jerarquía permitida.",
+      "Un usuario sin dispositivos o áreas visibles no debe recibir nombres ni referencias de áreas privadas.",
+      "Los recursos hermanos deben utilizar la misma decisión de visibilidad."
+    ],
+    "edge": "Áreas vacías, padres privados, permisos por dispositivo y referencias a fuentes externas.",
+    "entities": "InventoryView: devices/areas; AuthorityContext: area_ids/device_ids; proyección de jerarquía sin fuga.",
+    "paths": [
+      "src/domoai/mcp/resources.py",
+      "src/domoai/mcp/domotics_server.py",
+      "src/domoai/application/authority.py"
+    ],
+    "deps": [
+      "A-05"
+    ],
+    "decision": "Calcular proyección autorizada antes de serializar; no introducir nodos padre fuera del alcance para completar una jerarquía.",
+    "tests": "tests/contract/test_unified_mcp_contract.py",
+    "directory": "specs/234-scoped-area-inventory"
+  },
+  {
+    "key": "A-08",
+    "slug": "effective-route-coverage",
+    "title": "Disponibilidad efectiva de capacidades",
+    "goal": "Distinguir soporte del proveedor y disponibilidad del dispositivo.",
+    "requirements": [
+      "Una ruta no disponible no debe anunciarse activa porque su proveedor esté conectado.",
+      "Soporte, disponibilidad, permiso y cualificación deben conservar significados separados.",
+      "El inventario de cobertura y el de runtime deben coincidir para la misma revisión."
+    ],
+    "edge": "Proveedor activo con dispositivo caído, rutas múltiples, rehidratación y recuperación.",
+    "entities": "CapabilityRoute: available/source_ref; CoverageRecord: supported/effective status/guarantees.",
+    "paths": [
+      "src/domoai/mcp/resources.py",
+      "src/domoai/runtime/registry.py",
+      "src/domoai/mcp/domotics_server.py"
+    ],
+    "deps": [
+      "A-07"
+    ],
+    "decision": "Derivar disponibilidad de las rutas actuales. Mantener campos de soporte y documentar la corrección de status sin conceder autoridad.",
+    "tests": "tests/contract/test_unified_mcp_contract.py",
+    "directory": "specs/235-effective-route-coverage"
+  },
+  {
+    "key": "A-09",
+    "slug": "composed-base-demand",
+    "title": "Demanda base en contexto energético",
+    "goal": "Planificar considerando consumo doméstico no controlable.",
+    "requirements": [
+      "El contexto automático debe poder incluir demanda base con unidad, horizonte, procedencia y frescura.",
+      "La ausencia de medición no debe presentarse como demanda cero conocida ni como garantía del límite doméstico.",
+      "Las cargas controlables no deben contarse dos veces dentro de demanda base y cargas planificadas."
+    ],
+    "edge": "Demanda 1 kW durante 2 h, tarifa 0,20; huecos, carga EV incluida en contador, aumentos repentinos.",
+    "entities": "BaseLoadForecast: slots/power/observed_at/provider/confidence; EnergyContext: base_load_forecast; composición sin doble conteo.",
+    "paths": [
+      "src/domoai/optimizer/providers.py",
+      "src/domoai/optimizer/ports.py",
+      "src/domoai/application/runtime_factory.py",
+      "src/domoai/optimizer/energy.py"
+    ],
+    "deps": [],
+    "decision": "Añadir proveedor de previsión base al compositor. Mantener escenarios explícitos de cero demanda para fixtures; en modo live exigir evidencia o una reserva declarada antes de prometer límites/ahorro. Supersede FR-010 de spec 027 únicamente para composición doméstica completa; ausencia=0 queda como modo legado explícito sin acreditar completitud.",
+    "tests": "tests/integration/test_energy_provider_mcp.py",
+    "directory": "specs/236-composed-base-demand"
+  },
+  {
+    "key": "A-10",
+    "slug": "passive-scenario-comparison",
+    "title": "Comparación de baseline sin actuación",
+    "goal": "Comparar la situación sin automatizar con una alternativa.",
+    "requirements": [
+      "Un resultado válido sin acción debe poder usarse como baseline.",
+      "Las variaciones válidas deben conservar diferencias de objetivos aun sin producir comandos.",
+      "Infactibilidad y timeout no deben producir diferencias inventadas."
+    ],
+    "edge": "Baseline pasivo, alternativa pasiva, baseline inválido, comparación síncrona y asíncrona.",
+    "entities": "OptimizationResult: status/objective_values; CounterfactualResult: baseline/variations/diff.",
+    "paths": [
+      "src/domoai/optimizer/counterfactual.py",
+      "src/domoai/optimizer/product.py",
+      "src/domoai/mcp/ortools_server.py"
+    ],
+    "deps": [],
+    "decision": "Incluir no_action_required como resultado válido para comparación, manteniendo separación entre validez y existencia de plan.",
+    "tests": "tests/integration/test_counterfactual_analysis.py",
+    "directory": "specs/237-passive-scenario-comparison"
+  },
+  {
+    "key": "A-11",
+    "slug": "solar-flow-provenance",
+    "title": "Autoconsumo con origen energético",
+    "goal": "Medir autoconsumo sin restar exportación de batería ajena a la solar del horizonte.",
+    "requirements": [
+      "El autoconsumo debe contabilizar energía solar utilizada localmente y no deducir exportación de otro origen.",
+      "La energía inicial de batería y su carga desde red deben permanecer distinguibles de solar producida.",
+      "Los flujos reportados deben conservar energía y sus unidades en todo el horizonte."
+    ],
+    "edge": "1 kWh solar consumido y 1 kWh de batería precargada exportado; solar cero, carga mixta y pérdidas.",
+    "entities": "EnergyBalanceSlot: flujos por origen/destino; batería inicial de origen desconocido; autoconsumo definido en contrato.",
+    "paths": [
+      "src/domoai/optimizer/cp_sat.py",
+      "src/domoai/optimizer/energy.py",
+      "src/domoai/optimizer/product.py"
+    ],
+    "deps": [
+      "A-09"
+    ],
+    "decision": "Asignar flujos y procedencia conservadora; energía inicial sin evidencia nunca se atribuye a solar del horizonte. Definir solar usada localmente con tratamiento explícito del almacenamiento final.",
+    "tests": "tests/integration/test_solar_self_consumption_mcp.py",
+    "directory": "specs/238-solar-flow-provenance"
+  },
+  {
+    "key": "A-12",
+    "slug": "energy-currency-integrity",
+    "title": "Coherencia monetaria",
+    "goal": "Evitar sumar precios de monedas distintas sin conversión.",
+    "requirements": [
+      "Cada contexto debe tener una moneda de cálculo única en compra, exportación y costes adicionales.",
+      "Monedas mezcladas deben rechazarse antes de optimizar; no se hará conversión implícita.",
+      "El resultado debe identificar su unidad monetaria y mantener comparaciones compatibles."
+    ],
+    "edge": "EUR/USD entre slots, exportación diferente, degradación y comparación de escenarios de distinta moneda.",
+    "entities": "EnergyContext: currency canónica; TariffPoint/export/degradation: currency; resultado y diff monetarios.",
+    "paths": [
+      "src/domoai/optimizer/energy.py",
+      "src/domoai/optimizer/cp_sat.py",
+      "src/domoai/optimizer/counterfactual.py"
+    ],
+    "deps": [
+      "A-10"
+    ],
+    "decision": "Validar moneda homogénea; primera versión no incorpora mercado de cambio. Extensión monetaria aditiva y comparación incompatible diagnosticada.",
+    "tests": "tests/unit/optimizer/test_energy_models.py",
+    "directory": "specs/239-energy-currency-integrity"
+  },
+  {
+    "key": "P-01",
+    "slug": "household-onboarding",
+    "title": "Puesta en marcha doméstica",
+    "goal": "Completar instalación, conexión y primera lectura verificable.",
+    "requirements": [
+      "El usuario debe completar preflight, conexión, descubrimiento y lectura con diagnóstico recuperable.",
+      "El recorrido debe distinguir lectura verificada, control permitido y hardware no cualificado.",
+      "Reanudar tras error no debe duplicar conexión ni revelar secretos."
+    ],
+    "edge": "Proveedor caído, credencial inválida, casa vacía y permisos insuficientes.",
+    "entities": "OnboardingSession: household, stage, diagnostic, connection reference; secretos solo por referencia.",
+    "paths": [
+      "src/domoai/management/ui.py",
+      "src/domoai/management/api.py",
+      "src/domoai/admin/deployment_preflight.py"
+    ],
+    "deps": [
+      "A-05",
+      "A-06",
+      "A-08"
+    ],
+    "decision": "Reutilizar control plane y preflight; HA es recorrido inicial, sin convertirlo en dependencia obligatoria.",
+    "tests": "tests/integration/test_management_ui.py",
+    "directory": "specs/240-household-onboarding",
+    "stage_dependencies": "P-10 mínimo y P-11 mínimo antes de aceptación de onboarding; su cierre completo no bloquea este incremento."
+  },
+  {
+    "key": "P-02",
+    "slug": "household-preferences",
+    "title": "Perfil doméstico durable",
+    "goal": "Mantener preferencias comunes a agentes y sesiones.",
+    "requirements": [
+      "Preferencias de horarios, confort y energía deben tener unidad, vigencia y procedencia.",
+      "Lectura y edición deben respetar hogar, actor y versión esperada.",
+      "Cambios concurrentes y restauración deben preservar historial y evitar sobrescritura silenciosa."
+    ],
+    "edge": "Zonas horarias, conflicto entre residentes, dato expirado y borrado solicitado.",
+    "entities": "HouseholdPreference propuesta: key, value, unit, source, valid_until, version; historial restringido.",
+    "paths": [
+      "src/domoai/domain/models.py",
+      "src/domoai/persistence/repositories.py",
+      "src/domoai/management/api.py"
+    ],
+    "deps": [
+      "P-01"
+    ],
+    "decision": "Añadir perfil persistido sin confundir preferencias con autoridad de ejecución; migración aditiva y rollback documentado.",
+    "tests": "tests/integration/test_management_api.py",
+    "directory": "specs/241-household-preferences"
+  },
+  {
+    "key": "P-03",
+    "slug": "durable-household-tasks",
+    "title": "Tareas domésticas persistentes",
+    "goal": "Conservar intención doméstica y progreso entre planes y sesiones.",
+    "requirements": [
+      "Una tarea debe enlazar objetivo, restricciones, revisiones de planes y resultados.",
+      "Reinicio o cambio de agente debe recuperar estado sin repetir efectos físicos.",
+      "Cancelación y resultado parcial deben distinguir objetivo, plan e intención física."
+    ],
+    "edge": "Plan inviable, resultado desconocido, cambio de plazo y reemplazo concurrente.",
+    "entities": "HouseholdTask propuesta: version, goal, constraints, status, plan_refs, result_refs; estados draft/active/paused/completed/cancelled/failed.",
+    "paths": [
+      "src/domoai/domain/product.py",
+      "src/domoai/application/executor.py",
+      "src/domoai/persistence/repositories.py"
+    ],
+    "deps": [
+      "P-02",
+      "P-04",
+      "A-02",
+      "A-03"
+    ],
+    "decision": "Nueva entidad de negocio enlaza planes; no sustituye ledger, scheduler ni intenciones federadas.",
+    "tests": "tests/integration/test_management_api.py",
+    "directory": "specs/242-durable-household-tasks"
+  },
+  {
+    "key": "P-04",
+    "slug": "household-consent",
+    "title": "Consentimiento comprensible",
+    "goal": "Revisar y revocar permisos con efectos observables.",
+    "requirements": [
+      "La persona debe ver acciones, dispositivos, duración y límites antes de consentir.",
+      "Revocar debe bloquear acciones todavía no enviadas y explicar efectos ya producidos.",
+      "Consentimiento debe ligarse a actor, hogar, alcance y versión del plan o política."
+    ],
+    "edge": "Permiso expirado, plan modificado, efecto parcial y cliente desconectado.",
+    "entities": "ConsentView propuesta: scope, expires_at, plan_digest, revocation_status; reutiliza autoridad existente.",
+    "paths": [
+      "src/domoai/application/authority.py",
+      "src/domoai/management/auth.py",
+      "src/domoai/management/ui.py"
+    ],
+    "deps": [
+      "P-02",
+      "A-02",
+      "A-05"
+    ],
+    "decision": "Construir presentación y revocación sobre autoridad existente; confirmación de una skill no sustituye autorización del runtime.",
+    "tests": "tests/integration/test_management_api.py",
+    "directory": "specs/243-household-consent"
+  },
+  {
+    "key": "P-05",
+    "slug": "daily-home-status",
+    "title": "Estado diario y avisos",
+    "goal": "Entender qué ocurre y qué necesita intervención.",
+    "requirements": [
+      "Vista debe mostrar estado, tareas, acciones pendientes y calidad de datos con timestamp.",
+      "Avisos deben deduplicarse y permitir reconocer, silenciar temporalmente y consultar causa.",
+      "Solo deben exponerse datos del alcance autorizado; secretos y eventos brutos quedan excluidos."
+    ],
+    "edge": "Sin conexión, estado obsoleto, tormenta de eventos y aviso repetido tras reinicio.",
+    "entities": "DailyView propuesta; Notification: id, task_ref, reason, severity, dedup_key, acknowledged_at.",
+    "paths": [
+      "src/domoai/management/ui.py",
+      "src/domoai/management/api.py",
+      "src/domoai/mcp/resources.py"
+    ],
+    "deps": [
+      "P-03",
+      "P-08",
+      "A-07"
+    ],
+    "decision": "Proyección del estado existente y cola durable de avisos; canal local primero, canales externos opcionales.",
+    "tests": "tests/integration/test_management_ui.py",
+    "directory": "specs/244-daily-home-status"
+  },
+  {
+    "key": "P-06",
+    "slug": "measured-energy-savings",
+    "title": "Coste y ahorro medido",
+    "goal": "Distinguir previsiones de resultados económicos observados.",
+    "requirements": [
+      "Informe debe separar ahorro previsto, estimado y verificado con baseline explícito.",
+      "Reconciliación debe identificar cobertura de medición, tarifa, moneda y ventanas comparables.",
+      "No debe atribuir ahorro verificado con datos ausentes, cambios de baseline o cargas duplicadas."
+    ],
+    "edge": "Tarifa negativa, datos tardíos, contador reiniciado y batería de origen desconocido.",
+    "entities": "SavingsReport propuesto: baseline_version, period, currency, predicted/estimated/verified, coverage, uncertainty.",
+    "paths": [
+      "src/domoai/optimizer/product.py",
+      "src/domoai/optimizer/counterfactual.py",
+      "src/domoai/optimizer/providers.py"
+    ],
+    "deps": [
+      "P-02",
+      "A-09",
+      "A-10",
+      "A-11",
+      "A-12"
+    ],
+    "decision": "Reconciliar historial y contratos energéticos existentes; sin promesa monetaria si falta evidencia comparable.",
+    "tests": "tests/integration/test_counterfactual_analysis.py",
+    "directory": "specs/245-measured-energy-savings"
+  },
+  {
+    "key": "P-07",
+    "slug": "adaptive-household-planning",
+    "title": "Replanificación doméstica",
+    "goal": "Adaptar tareas a cambios relevantes con límites estables.",
+    "requirements": [
+      "Replanificación debe responder a cambios de tarifa, estado o previsión con umbral e histéresis.",
+      "Debe preservar consentimiento vigente y pedir nueva autorización si amplía alcance.",
+      "Sustituir plan debe evitar solapamiento y mantener funcionamiento local ante caída del agente."
+    ],
+    "edge": "Oscilación de precio, plan en ejecución, red caída y forecast vencido.",
+    "entities": "ReplanPolicy propuesta: threshold, cooldown, budget, consent_ref; task version y active plan ref.",
+    "paths": [
+      "src/domoai/application/executor.py",
+      "src/domoai/optimizer/providers.py",
+      "src/domoai/application/local_automation.py"
+    ],
+    "deps": [
+      "P-03",
+      "P-04",
+      "P-06",
+      "P-08",
+      "A-04"
+    ],
+    "decision": "Control de horizonte móvil acotado utiliza scheduler/runtime; no bucle LLM por evento de sensor.",
+    "tests": "tests/integration/test_runtime_lifecycle.py",
+    "directory": "specs/246-adaptive-household-planning"
+  },
+  {
+    "key": "P-08",
+    "slug": "manual-priority",
+    "title": "Prioridad manual y conflictos",
+    "goal": "Respetar intervención humana y arbitrar tareas incompatibles.",
+    "requirements": [
+      "Una intervención manual observable debe suspender o limitar planes conflictivos según política explícita.",
+      "Resolver conflictos debe ser determinista, explicable y aislado por hogar.",
+      "Expirar prioridad manual no debe reanudar un plan sin revalidar estado y autoridad."
+    ],
+    "edge": "Adaptador sin procedencia, dos tareas simultáneas y takeover expirado tras reinicio.",
+    "entities": "ManualOverride propuesta: device/capability, observed_at, source_confidence, expires_at; conflict decision.",
+    "paths": [
+      "src/domoai/runtime/control_takeover.py",
+      "src/domoai/application/executor.py",
+      "src/domoai/domain/models.py"
+    ],
+    "deps": [
+      "P-03",
+      "A-01",
+      "A-02"
+    ],
+    "decision": "Generalizar arbitraje usando takeover existente; ausencia de procedencia se informa como incertidumbre, no intervención demostrada.",
+    "tests": "tests/integration/test_runtime_lifecycle.py",
+    "directory": "specs/247-manual-priority"
+  },
+  {
+    "key": "P-09",
+    "slug": "household-routines",
+    "title": "Rutinas por intención",
+    "goal": "Configurar rutinas útiles sin conocer fabricantes.",
+    "requirements": [
+      "Plantilla debe expresar objetivo, parámetros y capacidades requeridas.",
+      "Vista previa debe explicar dispositivos elegidos, límites y permisos faltantes.",
+      "Guardar y ejecutar debe enlazar tarea durable y respetar idempotencia y prioridad manual."
+    ],
+    "edge": "Capacidad ausente, dispositivo eliminado, DST y rutina duplicada.",
+    "entities": "RoutineTemplate propuesta: version, parameters, capability_requirements; instance -> task reference.",
+    "paths": [
+      "src/domoai/skills/catalog.py",
+      "src/domoai/skills/workflow.py",
+      "src/domoai/application/scene.py"
+    ],
+    "deps": [
+      "P-03",
+      "P-04",
+      "P-08",
+      "A-01"
+    ],
+    "decision": "Extender catálogo/escenas/reglas actuales; primera entrega pocas rutinas comprobables, sin catálogo de tools por fabricante.",
+    "tests": "tests/integration/test_management_ui.py",
+    "directory": "specs/248-household-routines"
+  },
+  {
+    "key": "P-10",
+    "slug": "agent-client-qualification",
+    "title": "Clientes MCP y evaluación",
+    "goal": "Demostrar compatibilidad por cliente y versión.",
+    "requirements": [
+      "Mínimo independiente debe probar conexión, negociación, lectura y denegación por alcance.",
+      "Recorridos completos deben evaluar intención, propuesta, consentimiento y resultado con fixtures repetibles.",
+      "Autorización entrante debe tener contrato propio y no reutilizar OAuth saliente de HA como authorization server."
+    ],
+    "edge": "Cliente antiguo, scopes insuficientes, desconexión y lenguaje ambiguo.",
+    "entities": "ClientQualification propuesta: host/version/transport, tested_at, scenarios, limitations; incoming auth contract.",
+    "paths": [
+      "src/domoai/mcp/gateway.py",
+      "src/domoai/mcp/auth.py",
+      "src/domoai/mcp/domotics_server.py"
+    ],
+    "deps": [
+      "A-05",
+      "A-07"
+    ],
+    "decision": "Entrega mínima independiente habilita onboarding; cierre de recorridos requiere P-03/P-04. Integración entrante se especifica separada del cliente OAuth HA.",
+    "tests": "tests/contract/test_ortools_mcp_contract.py",
+    "directory": "specs/249-agent-client-qualification",
+    "stage_dependencies": "Mínimo independiente; cierre de recorridos de tareas después de P-03/P-04."
+  },
+  {
+    "key": "P-11",
+    "slug": "device-coverage-evidence",
+    "title": "Cobertura verificable",
+    "goal": "Publicar compatibilidad sustentada en evidencia.",
+    "requirements": [
+      "Mínimo debe mostrar disponibilidad efectiva por ruta y nivel de evidencia.",
+      "Cualificación debe identificar proveedor, protocolo, perfil, firmware y capacidades verificadas.",
+      "Pruebas simuladas no deben presentarse como HIL; nuevas familias requieren evidencia independiente."
+    ],
+    "edge": "Firmware distinto, lectura válida sin control, ruta caída y certificado vencido.",
+    "entities": "CoverageRecord propuesta/extensión: profile, firmware, capability, evidence_level, tested_at, limitations.",
+    "paths": [
+      "src/domoai/mcp/resources.py",
+      "src/domoai/application/commissioning.py",
+      "src/domoai/runtime/connection_ports.py"
+    ],
+    "deps": [
+      "A-08"
+    ],
+    "decision": "Reutilizar garantías y qualification existentes; publicación mínima no depende del onboarding.",
+    "tests": "tests/contract/test_provider_catalog_contract.py",
+    "directory": "specs/250-device-coverage-evidence"
+  },
+  {
+    "key": "P-12",
+    "slug": "household-operations",
+    "title": "Operación, privacidad y traspaso",
+    "goal": "Operar y recuperar una instalación doméstica completa.",
+    "requirements": [
+      "Backup y restauración deben incluir nuevas preferencias/tareas sin reejecutar efectos.",
+      "Retención, exportación y borrado deben respetar hogar, secretos y obligaciones operativas declaradas.",
+      "Traspaso debe revocar accesos antiguos y verificar recuperación con objetivos RPO/RTO explícitos del piloto."
+    ],
+    "edge": "Restauración parcial, clave perdida, cambio de propietario y datos retenidos por política.",
+    "entities": "OperationsProfile propuesto: retention, backup scope, RPO/RTO; handover checklist y access revocations.",
+    "paths": [
+      "src/domoai/persistence/repositories.py",
+      "src/domoai/management/api.py",
+      "src/domoai/admin/cli.py"
+    ],
+    "deps": [
+      "P-02",
+      "P-03",
+      "P-04",
+      "P-05",
+      "P-06"
+    ],
+    "decision": "Extender backup/retención existentes con ensayo local aislado; RPO<=24h y RTO<=60min objetivos iniciales del piloto, sujetos a medida.",
+    "tests": "tests/integration/test_management_api.py",
+    "directory": "specs/251-household-operations"
+  }
+]

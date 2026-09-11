@@ -13,6 +13,7 @@ try:
 except ImportError:  # pragma: no cover - native Windows uses a different host path.
     fcntl = None  # type: ignore[assignment]
 
+from domoai.persistence.contract_compatibility import check_runtime_floor
 from domoai.runtime.clock import Clock, SystemClock
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
@@ -127,6 +128,11 @@ class SQLiteDatabase:
         # is still single-owner at runtime, while startup/diagnostic close and
         # tests may inspect it from their event-loop thread.
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            check_runtime_floor(self._connection)
+        except BaseException:
+            await self.close()
+            raise
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         self._connection.executescript(_BOOTSTRAP_LEDGER)
@@ -188,14 +194,48 @@ class SQLiteDatabase:
                     (migration.name, self._clock.now().isoformat()),
                 )
                 self._connection.commit()
+            try:
+                # Each migration is already committed. Reserve the writer before
+                # reading the floor so concurrent readers cannot upgrade stale
+                # deferred snapshots into competing write transactions.
+                self._connection.execute("COMMIT")
+                self._connection.execute("BEGIN IMMEDIATE")
+                floor = check_runtime_floor(self._connection)
+                if floor is not None and floor[1] < 3:
+                    self._connection.execute(
+                        "UPDATE runtime_contract_floor SET minimum_reader = 3 "
+                        "WHERE minimum_reader < 3"
+                    )
+                self._connection.commit()
+            except BaseException:
+                rejected = self._connection
+                self._connection = None
+                try:
+                    rejected.rollback()
+                finally:
+                    rejected.close()
+                raise
+        except BaseException:
+            # Any migration/fallback/ledger failure must abort the current
+            # transaction before restoring legacy autocommit below. Otherwise
+            # the success-path commit would publish a partial migration.
+            failed_connection = self._connection
+            self._connection = None
+            if failed_connection is not None:
+                try:
+                    failed_connection.rollback()
+                finally:
+                    failed_connection.close()
+            raise
         finally:
-            self._connection.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL
-            # Leave repository callers at a clean transaction boundary. In
-            # Python 3.12 restoring legacy transaction control can otherwise
-            # leave the connection inside the last migration transaction,
-            # preventing an explicit BEGIN IMMEDIATE from acquiring the
-            # lifecycle write lock.
-            self._connection.commit()
+            if self._connection is not None:
+                self._connection.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL
+                # Leave repository callers at a clean transaction boundary. In
+                # Python 3.12 restoring legacy transaction control can otherwise
+                # leave the connection inside the last migration transaction,
+                # preventing an explicit BEGIN IMMEDIATE from acquiring the
+                # lifecycle write lock.
+                self._connection.commit()
 
     async def open_existing(self) -> None:
         """Open an existing database without creating or migrating it.
@@ -209,6 +249,11 @@ class SQLiteDatabase:
             raise FileNotFoundError(self.path)
         uri = f"file:{quote(str(self.path.resolve()), safe='/')}?mode=rw"
         self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        try:
+            check_runtime_floor(self._connection)
+        except BaseException:
+            await self.close()
+            raise
         self._connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
 
     def advisory_lock(self) -> SQLiteAdvisoryLock:

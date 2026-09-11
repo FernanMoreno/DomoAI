@@ -667,6 +667,26 @@ class BundleRecoveryService:
     async def recover_orphaned_bundles(self) -> list[str]:
         recovered: list[str] = []
         for bundle in await self.bundle_repository.list_non_terminal():
+            try:
+                observed = {
+                    member.plan_id: (
+                        await self.scheduled_repository.get(member.plan_id),
+                        await self.plan_repository.get(member.plan_id)
+                        if self.plan_repository is not None
+                        else None,
+                    )
+                    for member in bundle.members
+                }
+            except DomainError as error:
+                if error.details.get("reason") not in {"revalidation_required", "historical_only"}:
+                    raise
+                self.audit.append(
+                    event_type="bundle_contract_recovery_blocked",
+                    actor="runtime",
+                    subject_id=bundle.id,
+                    payload={"reason": error.details["reason"], "replayed": False},
+                )
+                continue
             members = list(bundle.members)
             committed = 0
             has_unknown = False
@@ -682,12 +702,7 @@ class BundleRecoveryService:
                     has_failed = True
                     all_scheduled = False
                     continue
-                scheduled = await self.scheduled_repository.get(member.plan_id)
-                plan = (
-                    await self.plan_repository.get(member.plan_id)
-                    if self.plan_repository is not None
-                    else None
-                )
+                scheduled, plan = observed[member.plan_id]
                 if scheduled is not None:
                     _scheduled_plan, schedule_status = scheduled
                     if schedule_status == "pending":

@@ -185,6 +185,8 @@ class InMemoryKnxTransport:
 class XknxTransport:
     """Live KNX/IP transport backed by the optional xknx dependency."""
 
+    DEFAULT_EVENT_QUEUE_MAX_SIZE = 1000
+
     def __init__(
         self,
         gateway_host: str,
@@ -195,7 +197,10 @@ class XknxTransport:
         group_dpts: dict[str, str] | None = None,
         secure_config: KnxSecureTransportConfig | None = None,
         clock: Clock | None = None,
+        event_queue_max_size: int = DEFAULT_EVENT_QUEUE_MAX_SIZE,
     ) -> None:
+        if isinstance(event_queue_max_size, bool) or event_queue_max_size <= 0:
+            raise ValueError("KNX transport event queue limit must be positive")
         self.gateway_host = gateway_host
         self.timeout = timeout
         self.gateway_port = gateway_port
@@ -206,7 +211,11 @@ class XknxTransport:
         self.writes: list[KnxWrite] = []
         self._xknx: Any = None
         self._callback: Any = None
-        self._events: asyncio.Queue[KnxGroupValue] = asyncio.Queue()
+        self.event_queue_max_size = event_queue_max_size
+        self._events: asyncio.Queue[KnxGroupValue] = asyncio.Queue(
+            maxsize=event_queue_max_size
+        )
+        self._dropped_event_count = 0
         self._read_responses: dict[str, tuple[str, KnxScalar]] = {}
 
     def set_group_read_response(
@@ -342,6 +351,20 @@ class XknxTransport:
     async def health(self) -> bool:
         return self._xknx is not None and self._xknx.started.is_set()
 
+    @property
+    def event_queue_depth(self) -> int:
+        return self._events.qsize()
+
+    @property
+    def dropped_event_count(self) -> int:
+        return self._dropped_event_count
+
+    def _enqueue_event(self, value: KnxGroupValue) -> None:
+        try:
+            self._events.put_nowait(value)
+        except asyncio.QueueFull:
+            self._dropped_event_count += 1
+
     def _on_telegram(self, telegram: Any) -> None:
         destination = getattr(telegram, "destination_address", None)
         payload = getattr(telegram, "payload", None)
@@ -370,7 +393,7 @@ class XknxTransport:
         # while the mapper and KNX mapping contract use the textual address
         # (e.g. ``1/0/1``).  Preserve the protocol representation here.
         dpt = decoded.transcoder.dpt_number_str()
-        self._events.put_nowait(
+        self._enqueue_event(
             KnxGroupValue(
                 group_address=str(address),
                 dpt=dpt,

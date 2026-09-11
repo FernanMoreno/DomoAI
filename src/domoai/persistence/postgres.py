@@ -10,12 +10,27 @@ from typing import Any, cast
 import psycopg
 from psycopg.conninfo import make_conninfo
 
+from domoai.persistence.contract_compatibility import (
+    UnsupportedRuntimeContract,
+    check_runtime_floor,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock
 
 _SCHEMA_PATH = Path(__file__).with_name("postgres_schema.sql")
-_POSTGRES_SCHEMA_VERSION = "postgres-schema-001"
+_POSTGRES_SCHEMA_VERSION = "postgres-schema-005"
 _SCHEMA_LOCK_KEY = "domoai:postgres-schema-bootstrap"
+
+
+def check_restore_quarantine(connection: Any) -> None:
+    """A durable restore guard is closed unless its single row is ready."""
+    if (
+        connection.execute("SELECT to_regnamespace('domoai_restore_guard')").fetchone()[0]
+        is not None
+    ):
+        rows = connection.execute("SELECT state FROM domoai_restore_guard.status").fetchall()
+        if rows != [("ready",)]:
+            raise RuntimeError("PostgreSQL restore target is quarantined")
 
 
 class _PostgresConnectionProxy:
@@ -93,49 +108,62 @@ class PostgresDatabase(SQLiteDatabase):
 
     async def initialize(self, *, migrations_dir: Path | None = None) -> None:
         connection = self._connection_factory(self.dsn)
-        self._postgres_connection = connection
-        self._proxy = _PostgresConnectionProxy(connection)
-        schema_lock_held = False
         try:
             # Multiple hosts can start against the same Patroni writer at once.
-            # PostgreSQL has no useful IF NOT EXISTS equivalent for functions,
-            # so serialize the complete schema bootstrap with a session lock.
-            connection.execute(
-                "SELECT pg_advisory_lock(hashtext(%s))",
-                (_SCHEMA_LOCK_KEY,),
-            )
-            schema_lock_held = True
-            connection.execute(self.schema_sql())
-            connection.execute(
-                """INSERT INTO schema_migrations (filename, applied_at)
-                   VALUES (%s, CURRENT_TIMESTAMP)
-                   ON CONFLICT(filename) DO NOTHING""",
-                (_POSTGRES_SCHEMA_VERSION,),
-            )
-            connection.execute(
-                "SELECT pg_advisory_unlock(hashtext(%s))",
-                (_SCHEMA_LOCK_KEY,),
-            )
-            schema_lock_held = False
+            # Ownership must last until schema changes are committed and visible
+            # to the next host, including when the factory enables autocommit.
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (_SCHEMA_LOCK_KEY,),
+                )
+                check_restore_quarantine(connection)
+                check_runtime_floor(connection, postgres=True)
+                connection.execute(self.schema_sql())
+                connection.execute(
+                    """INSERT INTO schema_migrations (filename, applied_at)
+                       VALUES (%s, CURRENT_TIMESTAMP)
+                       ON CONFLICT(filename) DO NOTHING""",
+                    (_POSTGRES_SCHEMA_VERSION,),
+                )
+            # A factory may have opened a transaction for connection setup. In
+            # that case transaction() used a savepoint; commit the outer scope
+            # as initialize() always has before exposing a usable connection.
             connection.commit()
         except BaseException:
-            connection.rollback()
-            if schema_lock_held:
-                try:
-                    connection.execute(
-                        "SELECT pg_advisory_unlock(hashtext(%s))",
-                        (_SCHEMA_LOCK_KEY,),
-                    )
-                    connection.commit()
-                except BaseException:
-                    connection.rollback()
+            # The context rolls back DDL; closing also aborts any outer factory
+            # transaction and releases its locks, even if rollback itself fails.
             connection.close()
             self._postgres_connection = None
             self._proxy = None
             raise
+        self._postgres_connection = connection
+        self._proxy = _PostgresConnectionProxy(connection)
 
     async def open_existing(self) -> None:
-        await self.initialize()
+        """Open a provisioned control plane without creating or migrating it."""
+
+        connection = self._connection_factory(self.dsn)
+        try:
+            connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK_KEY,))
+            check_restore_quarantine(connection)
+            check_runtime_floor(connection, postgres=True)
+            row = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE filename = %s",
+                (_POSTGRES_SCHEMA_VERSION,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("PostgreSQL control plane is not provisioned")
+            connection.commit()
+        except BaseException as error:
+            connection.close()
+            if isinstance(error, UnsupportedRuntimeContract):
+                raise
+            if not isinstance(error, Exception):
+                raise
+            raise RuntimeError("PostgreSQL control plane is not provisioned") from error
+        self._postgres_connection = connection
+        self._proxy = _PostgresConnectionProxy(connection)
 
     @property
     def connection(self) -> Any:

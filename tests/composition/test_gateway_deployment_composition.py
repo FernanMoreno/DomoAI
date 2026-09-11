@@ -53,6 +53,14 @@ def test_complete_stack_lifecycle_and_durable_state_contract() -> None:
 
     proxy_mounts = services["proxy"]["volumes"]
     assert "./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro" in proxy_mounts
+    assert (
+        "${DOMOAI_TLS_CERT_FILE_HOST:-./tls/fullchain.pem}:/etc/caddy/certs/fullchain.pem:ro"
+        in proxy_mounts
+    )
+    assert (
+        "${DOMOAI_TLS_KEY_FILE_HOST:-./tls/privkey.pem}:/etc/caddy/certs/privkey.pem:ro"
+        in proxy_mounts
+    )
     assert "caddy-data:/data" in proxy_mounts
     assert "caddy-config:/config" in proxy_mounts
 

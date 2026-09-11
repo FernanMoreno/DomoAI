@@ -11,6 +11,7 @@ from domoai.adapters.knx.transport import InMemoryKnxTransport
 from domoai.application.connection_manager import ConnectionManager
 from domoai.application.connection_providers import ConnectionProviderRegistry, ConnectionSetup
 from domoai.domain.connections import ConnectionDraft
+from domoai.domain.coordination import LeaseScope
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.managed_adapter_set import ManagedAdapterSet
@@ -57,7 +58,10 @@ async def test_knx_onboarding_persists_mapping_and_activates_runtime_adapter(
     await database.initialize()
     runtime = ManagedAdapterSet()
     manager = ConnectionManager(
-        repository=ConnectionRepository(database),
+        repository=ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        ),
         providers=providers,
         runtime=runtime,
     )

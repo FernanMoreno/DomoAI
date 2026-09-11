@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 
 from domoai.domain.connections import ConnectionProfile
+from domoai.domain.coordination import LeaseScope
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import MIGRATIONS_DIR, SQLiteDatabase
 
@@ -41,9 +42,7 @@ async def test_fresh_schema_registers_connection_table_columns_and_indexes(tmp_p
         }
         assert "018_connection_manager.sql" in migrations
 
-        columns = [
-            row[1] for row in database.connection.execute("PRAGMA table_info(connections)")
-        ]
+        columns = [row[1] for row in database.connection.execute("PRAGMA table_info(connections)")]
         assert columns == [
             "id",
             "connector_id",
@@ -56,6 +55,7 @@ async def test_fresh_schema_registers_connection_table_columns_and_indexes(tmp_p
             "schema_version",
             "created_at",
             "updated_at",
+            "credential_transfer_id",
         ]
         indexes = {
             row[1]
@@ -120,13 +120,24 @@ async def test_connection_profile_survives_restart(tmp_path: Path) -> None:
     first_database = SQLiteDatabase(database_path)
     await first_database.initialize()
     profile = _profile()
-    await ConnectionRepository(first_database).save(profile)
+    await ConnectionRepository(
+        first_database,
+        scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+    ).save(profile)
     await first_database.close()
 
     second_database = SQLiteDatabase(database_path)
     await second_database.initialize()
     try:
-        assert await ConnectionRepository(second_database).get(profile.id) == profile
+        assert (
+            await ConnectionRepository(
+                second_database,
+                scope=LeaseScope(
+                    tenant_id="default", household_id="default", deployment_id="default"
+                ),
+            ).get(profile.id)
+            == profile
+        )
     finally:
         await second_database.close()
 
@@ -137,7 +148,10 @@ async def test_online_backup_contains_connection_rows_and_migration_ledger(tmp_p
     await source.initialize()
     try:
         profile = _profile()
-        await ConnectionRepository(source).save(profile)
+        await ConnectionRepository(
+            source,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        ).save(profile)
         backup_path = tmp_path / "backup.sqlite3"
 
         result = source.backup_to(backup_path)
@@ -152,6 +166,11 @@ async def test_online_backup_contains_connection_rows_and_migration_ledger(tmp_p
                 "SELECT filename FROM schema_migrations WHERE filename = ?",
                 ("018_connection_manager.sql",),
             ).fetchone() == ("018_connection_manager.sql",)
+            assert restored.execute(
+                "SELECT tenant_id, household_id, deployment_id FROM connection_ownership "
+                "WHERE connection_id = ?",
+                (str(profile.id),),
+            ).fetchone() == ("default", "default", "default")
             assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         finally:
             restored.close()

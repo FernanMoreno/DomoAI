@@ -7,6 +7,14 @@ from typing import Protocol, cast
 from pydantic import Field
 
 from domoai.domain.models import StrictModel
+from domoai.domain.product import (
+    PHYSICAL_OBJECTIVE_UNITS,
+    AccountingEvidence,
+    ComparisonAccounting,
+    OmissionReason,
+    objective_comparison_omission,
+    validate_accounting,
+)
 from domoai.optimizer.ports import (
     OptimizationResult,
     OptimizationStatus,
@@ -19,6 +27,7 @@ _SUCCESS_STATUSES = {
     OptimizationStatus.FEASIBLE,
     OptimizationStatus.OPTIMAL_HIERARCHY,
     OptimizationStatus.FEASIBLE_HIERARCHY,
+    OptimizationStatus.NO_ACTION_REQUIRED,
 }
 
 
@@ -43,13 +52,65 @@ class AsyncOptimizerPort(Protocol):
     async def optimize(self, scenario: OptimizationScenario) -> OptimizationResult: ...
 
 
-def _diff(variation: OptimizationResult, baseline: OptimizationResult) -> dict[str, float]:
+def _comparison_outcome(
+    variation: OptimizationResult, baseline: OptimizationResult
+) -> VariationOutcome:
     if variation.status not in _SUCCESS_STATUSES:
-        return {}
+        return VariationOutcome(result=variation, diff={})
     shared_keys = variation.objective_values.keys() & baseline.objective_values.keys()
-    return {
-        key: variation.objective_values[key] - baseline.objective_values[key] for key in shared_keys
-    }
+    if len(shared_keys) > 32:
+        raise ValueError("comparison accounting supports at most 32 shared objectives")
+    current = validate_accounting(variation.constraint_summary, variation.objective_values)
+    base = validate_accounting(baseline.constraint_summary, baseline.objective_values)
+    units = (
+        current.objective_units
+        if current is not None
+        else {
+            key: unit
+            for key, unit in PHYSICAL_OBJECTIVE_UNITS.items()
+            if key in variation.objective_values
+        }
+    )
+    diff: dict[str, float] = {}
+    diff_units: dict[str, str] = {}
+    omitted: dict[str, OmissionReason] = {}
+    for key in sorted(shared_keys):
+        unit = units.get(key)
+        reason = objective_comparison_omission(
+            key,
+            current,
+            base,
+            variation_constraints=variation.constraint_summary,
+            baseline_constraints=baseline.constraint_summary,
+        )
+        if reason is not None:
+            omitted[key] = reason
+        else:
+            assert unit is not None
+            diff[key] = variation.objective_values[key] - baseline.objective_values[key]
+            diff_units[key] = unit
+    evidence = (
+        current.model_copy(deep=True)
+        if current is not None
+        else AccountingEvidence(
+            objective_units=units,
+        )
+    )
+    evidence.comparison = ComparisonAccounting(
+        baseline_scenario_id=baseline.scenario_id,
+        baseline_definition_digest=baseline.definition_digest,
+        diff_units=diff_units,
+        omitted_objectives=omitted,
+    )
+    enriched = variation.model_copy(deep=True)
+    enriched.constraint_summary["accounting"] = evidence.model_dump(mode="json")
+    validate_accounting(enriched.constraint_summary, enriched.objective_values)
+    return VariationOutcome(result=enriched, diff=diff)
+
+
+def _diff(variation: OptimizationResult, baseline: OptimizationResult) -> dict[str, float]:
+    """Retain the existing diff helper with the same accounting rules as comparison."""
+    return _comparison_outcome(variation, baseline).diff
 
 
 class CounterfactualAnalyzer:
@@ -71,7 +132,7 @@ class CounterfactualAnalyzer:
         outcomes: dict[str, VariationOutcome] = {}
         for name, scenario in variations.items():
             result = optimizer.optimize(scenario)
-            outcomes[name] = VariationOutcome(result=result, diff=_diff(result, baseline_result))
+            outcomes[name] = _comparison_outcome(result, baseline_result)
 
         return CounterfactualResult(baseline=baseline_result, variations=outcomes)
 
@@ -92,5 +153,5 @@ class CounterfactualAnalyzer:
         outcomes: dict[str, VariationOutcome] = {}
         for name, scenario in variations.items():
             result = await worker.optimize(scenario)
-            outcomes[name] = VariationOutcome(result=result, diff=_diff(result, baseline_result))
+            outcomes[name] = _comparison_outcome(result, baseline_result)
         return CounterfactualResult(baseline=baseline_result, variations=outcomes)

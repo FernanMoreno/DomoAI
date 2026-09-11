@@ -2,24 +2,31 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.optimization_worker import OptimizationWorker
 from domoai.application.plan_service import PlanService
-from domoai.domain.models import ErrorDetail, StrictModel
-from domoai.domain.product import ScenarioComparison, ScenarioComparisonVariation
+from domoai.domain.models import AuthorityContext, ErrorDetail, Plan, StrictModel
+from domoai.domain.product import (
+    ScenarioComparison,
+    ScenarioComparisonVariation,
+    validate_accounting,
+)
+from domoai.mcp.auth import current_authority
 from domoai.mcp.compat import ensure_fastmcp_settings_ready
 from domoai.mcp.errors import error_envelope
 from domoai.mcp.request_context import with_request_principal
 from domoai.optimizer.counterfactual import (
     CounterfactualAnalyzer,
     ScenarioComparisonRequest,
+    VariationOutcome,
 )
 from domoai.optimizer.ports import (
     AlternativeEvidence,
@@ -59,6 +66,16 @@ class OptimizationExplanation(StrictModel):
     forecast_confidence: str | None = None
     next_step: str = "revise_scenario_or_inputs"
 
+    @model_validator(mode="after")
+    def validate_evidence(self) -> OptimizationExplanation:
+        validate_accounting(self.constraint_summary, self.objective_values)
+        for alternative in self.alternatives:
+            validate_accounting(
+                alternative.get("constraint_effects", {}),
+                alternative.get("objective_values", {}),
+            )
+        return self
+
 
 @dataclass
 class OrtoolsMcpContext:
@@ -67,10 +84,105 @@ class OrtoolsMcpContext:
     optimization_service: OptimizationService
     optimization_worker: BoundedOptimizerWorkerPort | None = None
     max_horizon_slots: int = MAX_HORIZON_SLOTS
+    authority_policy: AuthorityPolicy = field(default_factory=AuthorityPolicy)
 
     @property
     def runtime_revision(self) -> str:
         return self.plan_service.current_revision
+
+
+def _request_authority(context: OrtoolsMcpContext) -> AuthorityContext:
+    return current_authority() or context.authority_policy.local_context()
+
+
+def _authorize_resources(
+    context: OrtoolsMcpContext,
+    *,
+    device_ids: tuple[str, ...],
+    capabilities: tuple[str, ...],
+) -> None:
+    authority = _request_authority(context)
+    policy = context.authority_policy
+    policy.authorize(
+        authority,
+        operation="inspect",
+        device_ids=device_ids,
+        capabilities=capabilities,
+    )
+    if authority.area_ids and any(
+        (device := context.registry.get(device_id)) is None
+        or device.area_id not in authority.area_ids
+        for device_id in device_ids
+    ):
+        # An empty area is deliberately passed to the policy so an active area
+        # allowlist rejects missing and out-of-area canonical registry entries.
+        policy.authorize(authority, operation="inspect", area_id="")
+
+
+def _scenario_resources(scenario: OptimizationScenario) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    device_ids: list[str] = []
+    capabilities: list[str] = []
+
+    def add(device_id: str, *commands: str) -> None:
+        device_ids.append(device_id)
+        capabilities.extend(command for command in commands if command)
+
+    for standard_load in scenario.loads:
+        add(standard_load.device_id, standard_load.command, standard_load.end_command or "")
+    for ev_load in scenario.ev_loads:
+        add(ev_load.device_id, ev_load.command)
+    for comfort_load in scenario.comfort_loads:
+        add(comfort_load.device_id, comfort_load.command, comfort_load.end_command or "")
+    energy_context = scenario.energy_context
+    if energy_context is not None:
+        for state in energy_context.ev_states:
+            device_ids.append(state.device_id)
+        if energy_context.battery is not None and energy_context.battery.actuator is not None:
+            battery_actuator = energy_context.battery.actuator
+            add(
+                battery_actuator.device_id,
+                battery_actuator.charge_command,
+                battery_actuator.discharge_command,
+                battery_actuator.stop_command,
+            )
+        if energy_context.thermal is not None and energy_context.thermal.actuator is not None:
+            hvac_actuator = energy_context.thermal.actuator
+            add(
+                hvac_actuator.device_id,
+                hvac_actuator.heat_command,
+                hvac_actuator.cool_command,
+                hvac_actuator.stop_command,
+            )
+    return tuple(dict.fromkeys(device_ids)), tuple(dict.fromkeys(capabilities))
+
+
+def _authorize_scenario(context: OrtoolsMcpContext, scenario: OptimizationScenario) -> None:
+    device_ids, capabilities = _scenario_resources(scenario)
+    _authorize_resources(context, device_ids=device_ids, capabilities=capabilities)
+
+
+def _plan_resources(plan: Plan) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    device_ids = tuple(command.device_id for command in plan.commands)
+    capabilities = tuple(
+        capability
+        for command in plan.commands
+        for capability in (
+            command.command,
+            *(postcondition.capability for postcondition in command.postconditions),
+        )
+    )
+    return device_ids, capabilities
+
+
+def _authorize_result(context: OrtoolsMcpContext, result: OptimizationResult) -> None:
+    plans = list(result.plans)
+    if result.plan is not None and result.plan not in plans:
+        plans.insert(0, result.plan)
+    if not plans:
+        _authorize_resources(context, device_ids=(), capabilities=())
+    for plan in plans:
+        device_ids, capabilities = _plan_resources(plan)
+        _authorize_resources(context, device_ids=device_ids, capabilities=capabilities)
 
 
 def explain_result(result: OptimizationResult) -> OptimizationExplanation:
@@ -121,11 +233,34 @@ def explain_result(result: OptimizationResult) -> OptimizationExplanation:
     hard_effect = (
         hard_satisfied if isinstance(hard_satisfied, bool) else None
     )
-    shared_constraint_effects = {
+    shared_constraint_effects: dict[str, Any] = {
         "hard_satisfied": hard_effect,
         "soft_violations": soft_violations[:16],
     }
     shared_objective_values = dict(list(result.objective_values.items())[:32])
+    accounting = validate_accounting(result.constraint_summary, result.objective_values)
+    if accounting is not None:
+        # Fallback values are bounded together with their unit and comparison keys.
+        accounting = accounting.model_copy(deep=True)
+        accounting.objective_units = {
+            key: unit
+            for key, unit in accounting.objective_units.items()
+            if key in shared_objective_values
+        }
+        if accounting.comparison is not None:
+            accounting.comparison.diff_units = {
+                key: unit
+                for key, unit in accounting.comparison.diff_units.items()
+                if key in shared_objective_values
+            }
+            accounting.comparison.omitted_objectives = {
+                key: reason
+                for key, reason in accounting.comparison.omitted_objectives.items()
+                if key in shared_objective_values
+            }
+        shared_constraint_effects["accounting"] = accounting.model_dump(
+            mode="json", exclude_unset=True
+        )
     shared_forecast_assumptions = _forecast_assumptions(result)
     alternatives = []
     for item in bundle[:16]:
@@ -212,6 +347,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     async def validate_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
+            _authorize_scenario(context, parsed)
             diagnostics = validate_scenario_model(
                 parsed, context.registry, max_horizon_slots=context.max_horizon_slots
             )
@@ -238,6 +374,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     ) -> dict[str, Any]:
         try:
             parsed = OptimizationScenario.model_validate(scenario)
+            _authorize_scenario(context, parsed)
             if parsed.ev_loads:
                 diagnostics = validate_executable_scenario(
                     parsed,
@@ -275,6 +412,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     async def explain_solution(result: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationResult.model_validate(result)
+            _authorize_result(context, parsed)
             return explain_result(parsed).model_dump(mode="json")
         except (ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -291,6 +429,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
     async def summarize_solution(result: dict[str, Any]) -> dict[str, Any]:
         try:
             parsed = OptimizationResult.model_validate(result)
+            _authorize_result(context, parsed)
             return build_product_summary(parsed).model_dump(mode="json")
         except (ValueError, ValidationError) as error:
             return error_envelope(error)
@@ -312,9 +451,13 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
             request = ScenarioComparisonRequest.model_validate(
                 {"baseline": baseline, "variations": variations or {}}
             )
-            parsed_scenarios = [request.baseline, *request.variations.values()]
-            invalid: dict[str, OptimizationResult] = {}
-            for scenario in parsed_scenarios:
+            parsed_scenarios: list[tuple[str | None, OptimizationScenario]] = [
+                (None, request.baseline), *request.variations.items()
+            ]
+            invalid_baseline: OptimizationResult | None = None
+            invalid_variations: dict[str, OptimizationResult] = {}
+            for name, scenario in parsed_scenarios:
+                _authorize_scenario(context, scenario)
                 diagnostics = validate_scenario_model(
                     scenario, context.registry, max_horizon_slots=context.max_horizon_slots
                 )
@@ -325,17 +468,21 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
                         max_horizon_slots=context.max_horizon_slots,
                     )
                 if diagnostics:
-                    invalid[scenario.id] = build_result(
+                    invalid_result = build_result(
                         scenario_id=scenario.id,
                         status=OptimizationStatus.INVALID,
                         definition_digest=scenario_definition_digest(scenario),
                         diagnostics=[item.model_dump(mode="json") for item in diagnostics],
                     )
+                    if name is None:
+                        invalid_baseline = invalid_result
+                    else:
+                        invalid_variations[name] = invalid_result
 
             comparison: dict[str, Any]
-            if request.baseline.id in invalid:
+            if invalid_baseline is not None:
                 comparison = {
-                    "baseline": invalid[request.baseline.id],
+                    "baseline": invalid_baseline,
                     "variations": {},
                 }
             else:
@@ -343,7 +490,7 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
                 safe_variations = {
                     name: scenario
                     for name, scenario in request.variations.items()
-                    if scenario.id not in invalid
+                    if name not in invalid_variations
                 }
                 comparison_result = await analyzer.compare_async(
                     request.baseline, safe_variations
@@ -352,12 +499,8 @@ def register_ortools_tools(server: FastMCP, context: OrtoolsMcpContext) -> FastM
                     "baseline": comparison_result.baseline,
                     "variations": comparison_result.variations,
                 }
-                for name, scenario in request.variations.items():
-                    if scenario.id in invalid:
-                        comparison["variations"][name] = {
-                            "result": invalid[scenario.id],
-                            "diff": {},
-                        }
+                for name, invalid_result in invalid_variations.items():
+                    comparison["variations"][name] = VariationOutcome(result=invalid_result)
 
             baseline_result = comparison["baseline"]
             variation_results = comparison["variations"]

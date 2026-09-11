@@ -12,6 +12,7 @@ from pathlib import Path
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from domoai.application.authority import authority_from_token_claims, roles_from_scopes
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import AuthorityContext, PrincipalRole
 
@@ -31,6 +32,8 @@ class ClientTokenRecord(BaseModel):
     tenant_id: str = Field(default="default", min_length=1)
     household_ids: list[str] = Field(default_factory=lambda: ["default"], min_length=1)
     roles: list[PrincipalRole] = Field(default_factory=list)
+    # Preserve original provisioning intent when token tools serialize defaults.
+    management_authority_explicit: bool | None = None
     area_ids: list[str] = Field(default_factory=list)
     device_ids: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
@@ -59,6 +62,12 @@ class ClientTokenRecord(BaseModel):
             raise ValueError("client token revocation cannot precede creation")
         if len(set(self.household_ids)) != len(self.household_ids):
             raise ValueError("client token household IDs must be unique")
+        declared = bool(self.roles) and {"roles", "tenant_id", "household_ids"}.issubset(
+            self.model_fields_set
+        )
+        self.management_authority_explicit = (
+            declared and self.management_authority_explicit is not False
+        )
         return self
 
 
@@ -147,6 +156,7 @@ class StaticBearerTokenVerifier(TokenVerifier):
                 claims={
                     "client_id": record.client_id,
                     "authority": authority.model_dump(mode="json"),
+                    "management_authority_explicit": record.management_authority_explicit,
                 },
             )
         return None
@@ -167,16 +177,20 @@ def require_client_scope(token: AccessToken | None, scope: str) -> None:
     )
 
 
+def authority_from_access_token(token: AccessToken) -> AuthorityContext:
+    """Decode verified, non-secret authority claims from one access token."""
+
+    return authority_from_token_claims(
+        client_id=token.client_id,
+        scopes=token.scopes,
+        claims=token.claims or {},
+    )
+
+
 def _roles_from_scopes(scopes: list[str]) -> list[PrincipalRole]:
     """Keep legacy token files usable while assigning the least role needed."""
 
-    if "*" in scopes:
-        return [PrincipalRole.OWNER]
-    if "mutate" in scopes or "home:write" in scopes:
-        return [PrincipalRole.OPERATOR]
-    if "plan" in scopes or "home:plan" in scopes:
-        return [PrincipalRole.PLANNER]
-    return [PrincipalRole.VIEWER]
+    return roles_from_scopes(scopes)
 
 
 def current_access_token() -> AccessToken | None:
@@ -200,14 +214,4 @@ def current_authority() -> AuthorityContext | None:
     token = current_access_token()
     if token is None:
         return None
-    claims = token.claims or {}
-    raw_authority = claims.get("authority")
-    if not isinstance(raw_authority, dict):
-        return AuthorityContext(
-            principal_id=token.client_id,
-            roles=_roles_from_scopes(token.scopes),
-        )
-    try:
-        return AuthorityContext.model_validate(raw_authority)
-    except (TypeError, ValueError):
-        return None
+    return authority_from_access_token(token)

@@ -133,6 +133,11 @@ async def test_maximize_solar_self_consumption_end_to_end_via_mcp(
         OptimizationStatus.OPTIMAL_HIERARCHY.value,
     }
     assert proposal["plan"] is not None
+    assert proposal["objective_values"]["solar_self_consumption_kwh"] == pytest.approx(0.25)
+    accounting = proposal["constraint_summary"]["solar_accounting"]
+    assert accounting["convention"]["evidence_kind"] == "modeled_attribution"
+    assert accounting["convention"]["unit"] == "kWh"
+    assert accounting["self_consumption_kwh"] == pytest.approx(0.25)
     command = next(
         cmd for cmd in proposal["plan"]["commands"] if cmd["device_id"] == device_id
     )

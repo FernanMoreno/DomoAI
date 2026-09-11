@@ -12,6 +12,7 @@ from domoai.application.connection_providers import (
     ConnectionSetup,
 )
 from domoai.domain.connections import ConnectionCandidate, ConnectionDraft
+from domoai.domain.coordination import LeaseScope
 from domoai.domain.models import Command
 from domoai.persistence.connection_repository import ConnectionRepository
 from domoai.persistence.sqlite import SQLiteDatabase
@@ -93,7 +94,10 @@ async def test_home_assistant_onboarding_activates_existing_runtime_adapter(
         )
     )
     manager = ConnectionManager(
-        repository=ConnectionRepository(database),
+        repository=ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="default", household_id="default", deployment_id="default"),
+        ),
         providers=providers,
         runtime=runtime,
         secret_store=secret_store,

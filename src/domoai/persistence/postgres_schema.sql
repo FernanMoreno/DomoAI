@@ -175,8 +175,15 @@ CREATE TABLE IF NOT EXISTS audit_outbox (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     last_error TEXT,
     delivered_at TEXT,
-    authority_payload TEXT NOT NULL DEFAULT '{}'
+    authority_payload TEXT NOT NULL DEFAULT '{}',
+    lease_owner TEXT,
+    lease_id TEXT,
+    lease_expires_at TEXT
 );
+
+ALTER TABLE audit_outbox ADD COLUMN IF NOT EXISTS lease_owner TEXT;
+ALTER TABLE audit_outbox ADD COLUMN IF NOT EXISTS lease_id TEXT;
+ALTER TABLE audit_outbox ADD COLUMN IF NOT EXISTS lease_expires_at TEXT;
 
 CREATE TABLE IF NOT EXISTS automation_rules (
     rule_id TEXT PRIMARY KEY,
@@ -212,11 +219,23 @@ CREATE TABLE IF NOT EXISTS physical_intents (
     household_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     payload TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('prepared', 'acknowledged', 'confirmed', 'rejected', 'unknown')),
+    status TEXT NOT NULL CHECK (
+        status IN ('prepared', 'dispatching', 'acknowledged', 'confirmed', 'rejected', 'unknown')
+    ),
     fencing_epoch BIGINT NOT NULL CHECK (fencing_epoch > 0),
+    owner_id TEXT,
+    execution_attempt_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (household_id, idempotency_key)
+);
+
+ALTER TABLE physical_intents
+    ADD COLUMN IF NOT EXISTS owner_id TEXT,
+    ADD COLUMN IF NOT EXISTS execution_attempt_id TEXT;
+ALTER TABLE physical_intents DROP CONSTRAINT IF EXISTS physical_intents_status_check;
+ALTER TABLE physical_intents ADD CONSTRAINT physical_intents_status_check CHECK (
+    status IN ('prepared', 'dispatching', 'acknowledged', 'confirmed', 'rejected', 'unknown')
 );
 
 CREATE TABLE IF NOT EXISTS operational_metric_history (
@@ -234,6 +253,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS approval_grants_assertion_nonce
     WHERE json_extract(payload, '$.assertion_nonce') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_bundle_commits_status ON bundle_commits (status);
 CREATE INDEX IF NOT EXISTS idx_audit_outbox_pending ON audit_outbox (status, sequence);
+CREATE INDEX IF NOT EXISTS idx_audit_outbox_claim
+    ON audit_outbox (status, lease_expires_at, sequence);
 CREATE INDEX IF NOT EXISTS idx_automation_rules_status ON automation_rules (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_connections_connector_id ON connections (connector_id);
 CREATE INDEX IF NOT EXISTS idx_connections_enabled ON connections (enabled, updated_at DESC);
@@ -260,3 +281,74 @@ CREATE INDEX IF NOT EXISTS idx_approval_grants_household
     ON approval_grants (json_extract(payload, '$.authority.household_id'));
 CREATE INDEX IF NOT EXISTS idx_commissioning_qualifications_household
     ON commissioning_qualifications (json_extract(payload, '$.authority.household_id'));
+
+-- A05: no inferred ownership for pre-existing connection profiles.
+CREATE TABLE IF NOT EXISTS connection_ownership (
+    connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    household_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
+    bound_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connection_ownership_scope
+    ON connection_ownership (tenant_id, household_id, deployment_id);
+
+-- This marker constrains updated readers; it cannot exclude pre-floor binaries.
+CREATE TABLE IF NOT EXISTS runtime_contract_floor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    minimum_reader INTEGER NOT NULL CHECK (minimum_reader > 0),
+    checkpoint_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+INSERT INTO runtime_contract_floor
+    (singleton, minimum_reader, checkpoint_id, created_at)
+VALUES (1, 2, 'postgres-schema-003-runtime-contract-floor', CURRENT_TIMESTAMP)
+ON CONFLICT(singleton) DO NOTHING;
+ALTER TABLE connections ADD COLUMN IF NOT EXISTS credential_transfer_id TEXT;
+
+CREATE TABLE IF NOT EXISTS connection_secret_transfers (
+    transfer_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    household_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
+    secret_ref TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    connector_id TEXT NOT NULL,
+    unique_id TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('create', 'reauth')),
+    expected_old_ref TEXT,
+    envelope_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'adopted', 'discarding', 'discarded')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connection_secret_transfers_scope
+    ON connection_secret_transfers (tenant_id, household_id, deployment_id, profile_id);
+UPDATE runtime_contract_floor SET minimum_reader = 3 WHERE minimum_reader < 3;
+
+CREATE TABLE IF NOT EXISTS household_preference_heads (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    generation TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision >= 0),
+    PRIMARY KEY (tenant_id, household_id)
+);
+CREATE TABLE IF NOT EXISTS household_preferences (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    preference_id TEXT NOT NULL, key TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('device', 'area')),
+    target_id TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, household_id, preference_id),
+    UNIQUE (tenant_id, household_id, key, target_kind, target_id)
+);
+CREATE TABLE IF NOT EXISTS household_preference_history (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    preference_id TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, household_id, revision)
+);
+CREATE TABLE IF NOT EXISTS household_preference_requests (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    generation TEXT NOT NULL, principal_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    preference_id TEXT NOT NULL, response TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, household_id, generation, principal_id, idempotency_key)
+);

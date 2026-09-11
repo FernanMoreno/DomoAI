@@ -133,6 +133,7 @@ async def test_unified_server_exposes_one_complete_semantic_catalog() -> None:
         "domotics://areas",
         "domotics://capabilities",
         "domotics://coverage",
+        "domotics://coverage-evidence",
         "domotics://devices",
         "domotics://energy",
         "domotics://policies",

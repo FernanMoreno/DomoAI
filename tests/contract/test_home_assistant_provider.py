@@ -20,6 +20,74 @@ from domoai.optimizer.providers import battery_soc_observation_from_percentage_m
 from tests.fixtures.home_assistant_provider import FakeHomeAssistantProviderClient
 
 
+@pytest.mark.asyncio
+async def test_provider_preserves_known_brightness_without_inventing_a_value() -> None:
+    client = FakeHomeAssistantProviderClient(
+        [
+            {
+                "entity_id": "light.off_with_known_brightness",
+                "state": "off",
+                "supported_features": ["brightness"],
+                "attributes": {"brightness": None},
+                "device_id": "ha-light-1",
+            },
+            {
+                "entity_id": "light.invalid_brightness",
+                "state": "on",
+                "supported_features": ["brightness"],
+                "attributes": {"brightness": "bad"},
+                "device_id": "ha-light-2",
+            },
+            {
+                "entity_id": "sensor.valid_power",
+                "state": "250",
+                "attributes": {"measurement": "power", "unit_of_measurement": "W"},
+                "device_id": "ha-sensor-1",
+            },
+        ]
+    )
+    provider = HomeAssistantProvider(client)
+
+    snapshot = await provider.snapshot()
+
+    entities = {str(entity["entity_id"]): entity for entity in snapshot.source_entities}
+    states = {
+        (str(state["entity_id"]), str(state["capability"])): state
+        for state in snapshot.source_states
+    }
+    capabilities = entities["light.off_with_known_brightness"]["capabilities"]
+    assert {item["name"] for item in capabilities} == {
+        "power",
+        "brightness",
+    }
+    assert states[("light.off_with_known_brightness", "power")]["value"] is False
+    assert states[("light.off_with_known_brightness", "power")]["status"] == "current"
+    assert states[("light.off_with_known_brightness", "brightness")] == {
+        **states[("light.off_with_known_brightness", "brightness")],
+        "value": None,
+        "status": "unavailable",
+    }
+    assert states[("light.invalid_brightness", "brightness")]["value"] is None
+    assert states[("light.invalid_brightness", "brightness")]["status"] == "invalid"
+    assert states[("sensor.valid_power", "power")]["value"] == 250
+
+
+@pytest.mark.asyncio
+async def test_provider_propagates_entity_registry_transport_failure() -> None:
+    class RegistryFailureClient(FakeHomeAssistantProviderClient):
+        async def fetch_entity_registry(self) -> list[dict[str, Any]]:
+            raise OSError("registry transport failed")
+
+    provider = HomeAssistantProvider(
+        RegistryFailureClient(
+            [{"entity_id": "light.valid", "state": "on", "attributes": {}}]
+        )
+    )
+
+    with pytest.raises(OSError, match="registry transport failed"):
+        await provider.snapshot()
+
+
 def _capacity_attestation() -> NominalCapacityAttestation:
     return NominalCapacityAttestation(
         evidence_type="vendor_documentation",

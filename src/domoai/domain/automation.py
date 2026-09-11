@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime, time
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
@@ -98,9 +98,19 @@ class AutomationRule(StrictModel):
     status: AutomationRuleStatus = AutomationRuleStatus.DISABLED
     definition_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
+    @model_validator(mode="before")
+    @classmethod
+    def select_contract_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "schema_version" not in value and "plan_template" in value:
+            template = Plan.model_validate(value["plan_template"])
+            return {**value, "plan_template": template, "schema_version": template.schema_version}
+        return value
+
     @model_validator(mode="after")
     def validate_template(self) -> AutomationRule:
         template = self.plan_template
+        if self.schema_version != template.schema_version:
+            raise ValueError("automation rule schema_version does not match its plan template")
         if len(template.commands) > 10:
             raise ValueError("automation action plan is limited to 10 commands")
         if (
@@ -126,6 +136,12 @@ class AutomationEvent(StrictModel):
     event_id: str = Field(min_length=1, max_length=200)
     event_type: Literal["state_changed", "time"]
     occurred_at: datetime
+    target_rule_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda value: value is None,
+    )
     device_id: str | None = Field(default=None, min_length=1)
     capability: str | None = Field(default=None, min_length=1)
     value: ScalarValue | None = None
@@ -138,6 +154,10 @@ class AutomationEvent(StrictModel):
             self.device_id is None or self.capability is None
         ):
             raise ValueError("state_changed event requires device_id and capability")
+        if self.event_type == "state_changed" and self.target_rule_id is not None:
+            raise ValueError("state_changed event cannot target an automation rule")
+        if self.event_type == "time" and self.target_rule_id is None:
+            raise ValueError("time event requires target_rule_id")
         return self
 
 

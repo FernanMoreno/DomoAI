@@ -115,7 +115,7 @@ class SerializedStorageExecutor:
             self._operation_count += 1
         return result
 
-    async def run(self, operation: Callable[[], T]) -> T:
+    async def run(self, operation: Callable[[], T], *, drain_on_timeout: bool = False) -> T:
         """Admit and await one synchronous operation without blocking the loop."""
 
         acquired = await asyncio.to_thread(self._acquire_slot, True, self.queue_wait_seconds)
@@ -137,9 +137,14 @@ class SerializedStorageExecutor:
             with self._state_lock:
                 self._timeout_count += 1
             result.add_done_callback(self._release_slot)
+            if drain_on_timeout and await self._drain_terminal(result):
+                raise asyncio.CancelledError from error
             raise StorageOperationTimeoutError("storage operation timed out") from error
         except asyncio.CancelledError:
             result.add_done_callback(self._release_slot)
+            if drain_on_timeout:
+                await self._drain_terminal(result)
+                raise
             # Cancellation cannot interrupt the synchronous worker. Drain its
             # result before propagating cancellation so callers cannot clean
             # up files or release ownership while the operation still uses
@@ -149,14 +154,42 @@ class SerializedStorageExecutor:
             except BaseException:
                 pass
             raise
+        except BaseException:
+            # A terminal repository failure (including a normal DomainError)
+            # owns the same admission slot as a successful result.
+            self._release_slot()
+            raise
         else:
             self._release_slot()
             return cast(T, value)
 
-    async def run_async(self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    @staticmethod
+    async def _drain_terminal(result: Future[Any]) -> bool:
+        """Keep ownership until worker completion, including repeated cancellation."""
+
+        wrapped = asyncio.wrap_future(result)
+        cancelled = False
+        while not wrapped.done():
+            try:
+                await asyncio.shield(wrapped)
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException:
+                break
+        # Retrieve the terminal exception too. The original timeout/cancellation
+        # remains the caller outcome; a committed mutation has a durable receipt.
+        try:
+            wrapped.result()
+        except BaseException:
+            pass
+        return cancelled
+
+    async def run_async(
+        self, operation: Callable[[], Coroutine[Any, Any, T]], *, drain_on_timeout: bool = False
+    ) -> T:
         """Run an async-shaped repository operation on the storage thread."""
 
-        return await self.run(lambda: asyncio.run(operation()))
+        return await self.run(lambda: asyncio.run(operation()), drain_on_timeout=drain_on_timeout)
 
     def submit_nowait(self, operation: Callable[[], T]) -> Future[T]:
         """Submit fire-and-forget work for synchronous audit sinks.
@@ -233,16 +266,22 @@ class SerializedStorageExecutor:
 class SerializedRepositoryProxy:
     """Duck-typed repository facade that offloads every method call."""
 
-    def __init__(self, target: T, storage: SerializedStorageExecutor) -> None:
+    def __init__(
+        self, target: T, storage: SerializedStorageExecutor, *, drain_on_timeout: bool = False
+    ) -> None:
         self._target = target
         self._storage = storage
+        self._drain_on_timeout = drain_on_timeout
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._target, name)
         if inspect.iscoroutinefunction(attribute):
 
             async def invoke(*args: Any, **kwargs: Any) -> Any:
-                return await self._storage.run_async(lambda: attribute(*args, **kwargs))
+                return await self._storage.run_async(
+                    lambda: attribute(*args, **kwargs),
+                    drain_on_timeout=self._drain_on_timeout,
+                )
 
             return invoke
 

@@ -14,6 +14,7 @@ from domoai.domain.connections import (
     SetupStep,
     ValidationResult,
 )
+from domoai.domain.connector_recipes import ConnectorRecipe
 from domoai.domain.models import StrictModel
 from domoai.runtime.ports import AdapterPort
 
@@ -31,12 +32,15 @@ class ConnectionProviderManifest(StrictModel):
     supports_discovery: bool = True
     supports_manual_setup: bool = True
     steps: tuple[SetupStep, ...] = ()
+    recipe: ConnectorRecipe | None = None
 
     @model_validator(mode="after")
     def validate_steps(self) -> ConnectionProviderManifest:
         step_ids = [step.step_id for step in self.steps]
         if len(step_ids) != len(set(step_ids)):
             raise ValueError("provider setup step IDs must be unique")
+        if self.recipe is not None and self.recipe.connector_id != self.connector_id:
+            raise ValueError("provider recipe connector ID must match manifest")
         return self
 
 

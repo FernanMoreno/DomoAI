@@ -59,3 +59,22 @@ async def test_discovery_rejects_credential_bearing_metadata_url_before_request(
 
     assert result.manual_required is True
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_rejects_remote_http_endpoint_returned_by_metadata() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "authorization_endpoint": "https://example/authorize",
+                "token_endpoint": "http://remote.example/token",
+            },
+        )
+
+    result = await HomeAssistantOAuthMetadataService(
+        HomeAssistantOAuthClient(transport=httpx.MockTransport(handler))
+    ).discover("https://example")
+
+    assert result.manual_required is True
+    assert result.metadata is None

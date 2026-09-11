@@ -67,6 +67,12 @@ async def test_current_epoch_reaches_adapter_and_stale_host_is_blocked(tmp_path:
         assert summary.outcomes[0].status.value in {"confirmed_success", "unknown"}
         assert adapter.contexts[0] is not None
         assert adapter.contexts[0].fencing_epoch == runtime.coordination_token.epoch
+        persisted = await runtime.plan_repository.get(current.id)
+        assert persisted is not None
+        assert persisted.deployment_id == runtime.coordination_token.scope.deployment_id
+        assert persisted.execution_lease is not None
+        assert persisted.execution_lease.lease_id == runtime.coordination_token.lease_id
+        assert persisted.execution_lease.fencing_epoch == runtime.coordination_token.epoch
 
         replay = _plan(
             runtime,

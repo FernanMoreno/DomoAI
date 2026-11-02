@@ -28,9 +28,9 @@ class RateLimiter:
             if len(self._requests) >= self.max_keys:
                 oldest_key = min(
                     self._requests,
-                    key=lambda item: self._requests[item][-1]
-                    if self._requests[item]
-                    else float("-inf"),
+                    key=lambda item: (
+                        self._requests[item][-1] if self._requests[item] else float("-inf")
+                    ),
                 )
                 self._requests.pop(oldest_key, None)
             window = deque()

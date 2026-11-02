@@ -1,0 +1,357 @@
+{
+  "$defs": {
+    "AuthorityContext": {
+      "additionalProperties": false,
+      "description": "Non-secret identity and resource scope attached to authority records.\n\nThe defaults are the legacy single-home local runtime. They let v1 rows be\nread during an additive migration while every new authority record still\ncarries an explicit principal and household.",
+      "properties": {
+        "tenant_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "household_id": {
+          "default": "default",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Household Id",
+          "type": "string"
+        },
+        "household_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Household Ids",
+          "type": "array"
+        },
+        "principal_id": {
+          "default": "system",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/PrincipalRole"
+          },
+          "maxItems": 5,
+          "title": "Roles",
+          "type": "array"
+        },
+        "area_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Area Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "title": "AuthorityContext",
+      "type": "object"
+    },
+    "PrincipalRole": {
+      "description": "Role granted by a trusted identity provider for one deployment.",
+      "enum": [
+        "viewer",
+        "planner",
+        "operator",
+        "owner",
+        "service"
+      ],
+      "title": "PrincipalRole",
+      "type": "string"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SourceCursor": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "stream_id": {
+          "minLength": 1,
+          "title": "Stream Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minLength": 1,
+          "title": "Epoch",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "resync": {
+          "default": false,
+          "title": "Resync",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_id",
+        "stream_id",
+        "epoch",
+        "sequence"
+      ],
+      "title": "SourceCursor",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "StateSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityContext"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/StateStatus"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "source_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "value",
+        "observed_at",
+        "received_at",
+        "status",
+        "source_ref"
+      ],
+      "title": "StateSnapshot",
+      "type": "object"
+    },
+    "StateStatus": {
+      "enum": [
+        "current",
+        "stale",
+        "unavailable",
+        "invalid"
+      ],
+      "title": "StateStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "domoai.household-onboarding.v1",
+      "default": "domoai.household-onboarding.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "runtime_revision": {
+      "title": "Runtime Revision",
+      "type": "string"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "states": {
+      "items": {
+        "$ref": "#/$defs/StateSnapshot"
+      },
+      "title": "States",
+      "type": "array"
+    },
+    "diagnostics": {
+      "items": {
+        "enum": [
+          "state_missing",
+          "stale",
+          "invalid",
+          "unavailable",
+          "source_unavailable",
+          "connection_mismatch",
+          "source_mismatch",
+          "capability_unavailable"
+        ],
+        "type": "string"
+      },
+      "maxItems": 8,
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "read_status": {
+      "default": "pending",
+      "enum": [
+        "verified",
+        "pending",
+        "unavailable"
+      ],
+      "title": "Read Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "runtime_revision",
+    "device_id",
+    "observed_at"
+  ],
+  "title": "HouseholdOnboardingRead",
+  "type": "object"
+}

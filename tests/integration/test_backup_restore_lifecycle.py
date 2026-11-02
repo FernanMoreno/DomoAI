@@ -20,6 +20,39 @@ async def _database(path: Path) -> SQLiteDatabase:
     return database
 
 
+@pytest.mark.asyncio
+async def test_preference_backup_restore_rotates_generation_before_open(tmp_path: Path):
+    from tests.integration.test_household_preference_persistence import repository, set_value
+
+    source = await _database(tmp_path / "source" / "domoai.sqlite3")
+    audit = await _database(tmp_path / "source" / "domoai-audit.sqlite3")
+    repo = await repository(source)
+    initial, _ = await repo.snapshot()
+    confirmed = await set_value(repo, initial)
+    service = BackupService()
+    try:
+        manifest = await service.create(
+            sources=(BackupSource("operational", source), BackupSource("audit", audit)),
+            output_dir=tmp_path / "backups", deployment_id="home-a",
+        )
+        await service.restore(backup_dir=tmp_path / "backups" / manifest.backup_id,
+                              target_data_dir=tmp_path / "restored", deployment_id="home-a")
+        # Inspect offline destination before any runtime bootstrap can mask a
+        # missing restore hook.
+        with sqlite3.connect(tmp_path / "restored" / "domoai.sqlite3") as connection:
+            restored = connection.execute(
+                "SELECT generation, revision FROM household_preference_heads"
+            ).fetchone()
+            assert restored[0] != str(confirmed.version.generation)
+            assert restored[1] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM household_preference_history"
+            ).fetchone()[0] == 1
+    finally:
+        await source.close()
+        await audit.close()
+
+
 def _marker(database: SQLiteDatabase, table: str, value: str) -> None:
     database.connection.execute(f"CREATE TABLE IF NOT EXISTS {table} (value TEXT NOT NULL)")
     database.connection.execute(f"INSERT INTO {table} (value) VALUES (?)", (value,))

@@ -1,0 +1,32 @@
+services:
+  mqtt:
+    ports:
+      - "127.0.0.1:${DOMOAI_MQTT_HOST_PORT:-1883}:1883"
+      - "${DOMOAI_MQTT_TLS_BIND:?DOMOAI_MQTT_TLS_BIND is required}:${DOMOAI_MQTT_TLS_HOST_PORT:-8883}:8883"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        test -f /mosquitto/certs-input/server.crt
+        test -r /mosquitto/certs-input/server.crt
+        test -f /mosquitto/certs-input/server.key
+        test -r /mosquitto/certs-input/server.key
+        mkdir -p /mosquitto/auth /mosquitto/certs
+        printf '%s\n%s\n' "$$DOMOAI_MQTT_PASSWORD" "$$DOMOAI_MQTT_PASSWORD" |
+          mosquitto_passwd -c /mosquitto/auth/passwd "$$DOMOAI_MQTT_USERNAME" >/dev/null
+        cp /mosquitto/certs-input/server.crt /mosquitto/certs/server.crt
+        cp /mosquitto/certs-input/server.key /mosquitto/certs/server.key
+        chown 1883:1883 /mosquitto/auth /mosquitto/auth/passwd /mosquitto/certs
+        chown 1883:1883 /mosquitto/certs/server.crt /mosquitto/certs/server.key
+        chmod 0644 /mosquitto/certs/server.crt
+        chmod 0640 /mosquitto/certs/server.key
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    volumes:
+      - ./mqtt/mosquitto.shared.conf:/mosquitto/config/mosquitto.conf:ro
+      - ${DOMOAI_MQTT_TLS_CERT_FILE:?DOMOAI_MQTT_TLS_CERT_FILE is required}:/mosquitto/certs-input/server.crt:ro
+      - ${DOMOAI_MQTT_TLS_KEY_FILE:?DOMOAI_MQTT_TLS_KEY_FILE is required}:/mosquitto/certs-input/server.key:ro
+      - mqtt-tls:/mosquitto/certs
+
+volumes:
+  mqtt-tls:

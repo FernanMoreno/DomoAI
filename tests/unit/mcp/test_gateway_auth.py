@@ -222,3 +222,277 @@ def test_denied_mutation_is_audited_without_persisting_the_bearer(
     assert event.event_type == "mcp_authorization_rejected"
     assert event.actor == "agent:claude"
     assert secret not in event.model_dump_json()
+
+
+def test_t012_a_snapshot_shape_digest_and_deep_immutability(tmp_path: Path) -> None:
+    from dataclasses import FrozenInstanceError
+
+    from domoai.domain.models import PrincipalRole
+    from domoai.mcp.auth import StaticBearerTokenVerifier
+
+    record = {
+        "client_id": "resident",
+        "token_hash": hashlib.sha256(b"snapshot-secret").hexdigest(),
+        "scopes": ["consent:human", "consent:human"],
+        "enabled": True,
+        "created_at": "2026-01-01T01:00:00+01:00",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "revoked_at": None,
+        "tenant_id": "tenant-a",
+        "household_ids": ["home-a", "home-b"],
+        "roles": ["operator"],
+        "management_authority_explicit": True,
+        "area_ids": ["room"],
+        "device_ids": ["light"],
+        "capabilities": ["switch"],
+        "operations": ["review_consent"],
+    }
+    path = tmp_path / "records.json"
+    path.write_text(json.dumps({"clients": [record]}), encoding="utf-8")
+    verifier = StaticBearerTokenVerifier.from_file(path)
+    snapshot = verifier.credential_snapshot()
+    assert snapshot.schema_version == "domoai.credential-snapshot.v1"
+    assert snapshot.source is not None
+    stat = path.stat()
+    source = {"canonical_path": str(path.resolve()), "device_id": stat.st_dev, "inode": stat.st_ino}
+    assert snapshot.source.canonical_path == source["canonical_path"]
+    assert (snapshot.source.device_id, snapshot.source.inode) == (stat.st_dev, stat.st_ino)
+    item = snapshot.records[0]
+    assert item.roles == (PrincipalRole.OPERATOR,)
+    assert item.scopes == ("consent:human", "consent:human")
+    assert item.operations == ("review_consent",)
+    assert item.area_ids == ("room",) and item.device_ids == ("light",)
+    assert item.capabilities == ("switch",) and item.household_ids == ("home-a", "home-b")
+    assert item.management_authority_explicit is True
+    assert item.provided_fields == frozenset(record)
+    expected_record = dict(record)
+    expected_record.update(
+        created_at="2026-01-01T00:00:00.000000+00:00",
+        expires_at="2030-01-01T00:00:00.000000+00:00",
+        provided_fields=sorted(record),
+    )
+    payload = {
+        "schema_version": "domoai.credential-snapshot.v1",
+        "source": source,
+        "records": [expected_record],
+    }
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        ).encode()
+    ).hexdigest()
+    assert snapshot.revision_digest == expected_digest
+    assert snapshot == verifier.credential_snapshot()
+    for obj, attr in [
+        (snapshot, "records"),
+        (snapshot.source, "canonical_path"),
+        (item, "tenant_id"),
+    ]:
+        with pytest.raises(FrozenInstanceError):
+            setattr(obj, attr, "changed")
+    for values in (
+        item.roles,
+        item.scopes,
+        item.operations,
+        item.area_ids,
+        item.device_ids,
+        item.capabilities,
+        item.household_ids,
+        snapshot.records,
+    ):
+        assert isinstance(values, tuple)
+        with pytest.raises(AttributeError):
+            getattr(values, "append")("changed")  # noqa: B009 -- deliberate invalid mutation
+    assert isinstance(item.provided_fields, frozenset)
+    assert "snapshot-secret" not in repr(snapshot) + repr(item)
+    assert item.token_hash not in repr(snapshot) + repr(item)
+    access = asyncio.run(verifier.verify_token("snapshot-secret"))
+    assert access is not None and access.claims is not None
+    assert access.claims["authority"]["tenant_id"] == "tenant-a"
+
+
+def test_t012_a_snapshot_preserves_legacy_marker_and_inactive_records(tmp_path: Path) -> None:
+    from domoai.mcp.auth import ClientTokenDocument, StaticBearerTokenVerifier
+
+    changes: list[dict[str, object]] = [
+        {},
+        {"enabled": False},
+        {"revoked_at": "2026-01-01T00:00:00Z"},
+        {"expires_at": "2020-01-01T00:00:00Z"},
+    ]
+    records = [
+        {
+            "client_id": str(i),
+            "token_hash": hashlib.sha256(str(i).encode()).hexdigest(),
+            "scopes": ["manage"],
+            **change,
+        }
+        for i, change in enumerate(changes)
+    ]
+    path = tmp_path / "records.json"
+    path.write_text(json.dumps({"clients": records}), encoding="utf-8")
+    verifier = StaticBearerTokenVerifier.from_file(path)
+    snapshot = verifier.credential_snapshot()
+    assert len(snapshot.records) == 4
+    assert all(
+        item.roles == () and item.management_authority_explicit is False
+        for item in snapshot.records
+    )
+    assert snapshot.records[0].provided_fields == frozenset(
+        {"client_id", "token_hash", "scopes", "management_authority_explicit"}
+    )
+    # Same serialization contract as TokenFileManager: defaults do not promote intent.
+    document = ClientTokenDocument.model_validate_json(path.read_text())
+    path.write_text(document.model_dump_json(), encoding="utf-8")
+    verifier.reload()
+    assert all(
+        item.management_authority_explicit is False
+        for item in verifier.credential_snapshot().records
+    )
+    assert asyncio.run(verifier.verify_token("0")) is not None  # legacy unchanged
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"scopes": [[]]},
+        {"roles": ["invented"]},
+        {"operations": None},
+        {"token_hash": "invalid"},
+        {"expires_at": datetime(2030, 1, 1)},
+        {"management_authority_explicit": "true"},
+    ],
+)
+def test_t012_a_snapshot_rejects_bypassed_active_record(changes: dict[str, object]) -> None:
+    from domoai.mcp.auth import ClientTokenRecord, StaticBearerTokenVerifier
+
+    record = ClientTokenRecord(client_id="resident", token_hash="a" * 64).model_copy(update=changes)
+    verifier = StaticBearerTokenVerifier((record,))
+    with pytest.raises(ValueError, match="invalid active credential snapshot"):
+        verifier.credential_snapshot()
+
+
+def test_t012_a_incomplete_record_cannot_publish_partial_snapshot() -> None:
+    from domoai.mcp.auth import ClientTokenRecord, StaticBearerTokenVerifier
+
+    verifier = StaticBearerTokenVerifier((ClientTokenRecord.model_construct(token_hash="a" * 64),))
+    with pytest.raises(ValueError, match="invalid active credential snapshot"):
+        verifier.credential_snapshot()
+
+
+@pytest.mark.parametrize(
+    "field_name,year", [("created_at", 2020), ("expires_at", 2099), ("revoked_at", 2021)]
+)
+@pytest.mark.parametrize("offset_hours", [0, 2])
+def test_t012_a_r1_snapshot_detaches_mutable_datetime(
+    field_name: str, year: int, offset_hours: int
+) -> None:
+    from datetime import timedelta, timezone
+
+    from domoai.mcp.auth import ClientTokenRecord, StaticBearerTokenVerifier
+
+    class MutableDateTime(datetime):
+        expired = False
+
+        def timestamp(self) -> float:
+            return 0.0 if self.expired else super().timestamp()
+
+    zone = timezone(timedelta(hours=offset_hours))
+    value = MutableDateTime(year, 1, 2, 3, 4, 5, 123456, tzinfo=zone)
+    record = ClientTokenRecord.model_validate(
+        {
+            "client_id": "resident",
+            "token_hash": hashlib.sha256(b"datetime-secret").hexdigest(),
+            field_name: value,
+        }
+    )
+    verifier = StaticBearerTokenVerifier((record,))
+    admitted = asyncio.run(verifier.verify_token("datetime-secret")) is not None
+    assert admitted is (field_name != "revoked_at")
+    snapshot = verifier.credential_snapshot()
+    exported = getattr(snapshot.records[0], field_name)
+    expected = datetime(year, 1, 2, 3 - offset_hours, 4, 5, 123456, tzinfo=UTC)
+    assert type(exported) is datetime
+    assert exported == expected and exported.tzinfo is UTC
+    assert exported is not getattr(record, field_name)
+    with pytest.raises(AttributeError):
+        setattr(exported, "expired", True)  # noqa: B010 -- deliberate invalid mutation
+    assert value.expired is False
+    assert (asyncio.run(verifier.verify_token("datetime-secret")) is not None) is admitted
+    value.expired = True  # Mutation of active input cannot alter the detached view either.
+    assert exported == expected and exported.timestamp() == expected.timestamp()
+
+
+def test_t012_a_r1_reload_snapshot_never_pairs_new_records_with_old_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, get_ident
+
+    from domoai.mcp.auth import StaticBearerTokenVerifier
+    from domoai.mcp.token_lifecycle import TokenFileManager
+
+    path = tmp_path / "records.json"
+    manager = TokenFileManager(path)
+    first = manager.rotate("resident", scopes=["consent:human"])
+    verifier = StaticBearerTokenVerifier.from_file(path)
+    before = verifier.credential_snapshot()
+    second = manager.rotate("resident", scopes=["consent:human"])
+    expected_source = path.stat()
+    expected = StaticBearerTokenVerifier.from_file(path).credential_snapshot()
+    assert before.source is not None and expected.source is not None
+    assert before.source.inode != expected_source.st_ino
+    assert before.records[0].token_hash == hashlib.sha256(first.token.encode()).hexdigest()
+
+    records_published, release_writer, reader_attempted = Event(), Event(), Event()
+    reader_id: int | None = None
+    reader_blocked = False
+    real_lock = verifier._snapshot_lock
+
+    class ObservedLock:
+        """Observe a real acquisition so the scheduler needs no sleep/negative timeout."""
+
+        def __enter__(self) -> None:
+            nonlocal reader_blocked
+            if get_ident() == reader_id:
+                acquired = real_lock.acquire(blocking=False)
+                reader_blocked = not acquired
+                reader_attempted.set()
+                if not acquired:
+                    assert real_lock.acquire(timeout=5), "reader lock acquisition timed out"
+            else:
+                assert real_lock.acquire(timeout=5), "writer lock acquisition timed out"
+
+        def __exit__(self, *args: object) -> None:
+            real_lock.release()
+
+    def pause_publication(instance: object, name: str, value: object) -> None:
+        object.__setattr__(instance, name, value)
+        if instance is verifier and name == "_records":
+            records_published.set()
+            assert release_writer.wait(5), "publication barrier timed out"
+
+    def read_snapshot() -> object:
+        nonlocal reader_id
+        reader_id = get_ident()
+        return verifier.credential_snapshot()
+
+    monkeypatch.setattr(verifier, "_snapshot_lock", ObservedLock())
+    monkeypatch.setattr(StaticBearerTokenVerifier, "__setattr__", pause_publication)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(verifier.reload)
+        try:
+            assert records_published.wait(5), "reload did not reach publication"
+            reader = pool.submit(read_snapshot)
+            assert reader_attempted.wait(5), "snapshot did not reach acquisition"
+            if reader_blocked:
+                release_writer.set()
+            observed = reader.result(timeout=5)
+        finally:
+            release_writer.set()
+            writer.result(timeout=5)
+    # With publication lock removed the reader finishes while source is still old.
+    assert observed == expected, "snapshot mixed new records with old source/revision"
+    assert verifier.credential_snapshot() == expected
+    assert expected.records[0].token_hash == hashlib.sha256(second.token.encode()).hexdigest()
+    assert expected.source.inode == expected_source.st_ino

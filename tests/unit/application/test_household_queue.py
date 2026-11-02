@@ -47,3 +47,77 @@ async def test_household_queue_preserves_fifo_and_closes_cleanly() -> None:
     assert order == [1, 2, 3]
     assert queues.depths() == {}
     await queues.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_recovers_capacity_without_running_work() -> None:
+    queues = HouseholdWorkQueues(max_per_household=2, max_total=2)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def blocked():
+        entered.set()
+        await release.wait()
+
+    active = asyncio.create_task(queues.submit("a", blocked))
+    await entered.wait()
+    pending = asyncio.create_task(queues.submit("a", lambda: calls.append("cancelled")))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    try:
+        assert queues.depths() == {"a": 1}
+        assert await queues.submit("b", lambda: "other") == "other"
+    finally:
+        release.set()
+        await active
+        await queues.close()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_queued_work_uses_each_request_principal() -> None:
+    from domoai.runtime.execution_context import current_execution_principal, execution_principal
+
+    queues = HouseholdWorkQueues()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked():
+        entered.set()
+        await release.wait()
+        return current_execution_principal()
+
+    with execution_principal("alice"):
+        first = asyncio.create_task(queues.submit("a", blocked))
+    await entered.wait()
+    with execution_principal("bob"):
+        second = asyncio.create_task(queues.submit("a", current_execution_principal))
+    await asyncio.sleep(0)
+    release.set()
+    assert await first == "alice"
+    assert await second == "bob"
+    await queues.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_close_still_drains_running_work() -> None:
+    queues = HouseholdWorkQueues()
+    entered, release = asyncio.Event(), asyncio.Event()
+    effects = []
+
+    async def work():
+        entered.set()
+        await release.wait()
+        effects.append("settled")
+
+    submit = asyncio.create_task(queues.submit("a", work))
+    await entered.wait()
+    close = asyncio.create_task(queues.close())
+    await asyncio.sleep(0)
+    close.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(submit, close, return_exceptions=True)
+    assert effects == ["settled"]
+    assert queues.depths() == {}

@@ -1,0 +1,29 @@
+schema_version: v1
+connector_id: example_modbus_temperature
+display_name: Example Modbus temperature sensor
+device_type: sensor
+transport_family: modbus
+discovery_strategies:
+  - manual
+auth_schemes:
+  - none
+capabilities:
+  - capability_id: temperature
+    kind: number
+    unit: °C
+    read_path: modbus://temperature
+protocol_profile:
+  transport: modbus
+  unit_ids: [1]
+  entities:
+    - entity_id: temperature
+      name: Temperature
+      semantic_type: sensor
+      unit_id: 1
+      capabilities:
+        - name: temperature
+          state:
+            area: input_register
+            address: 20
+            data_type: int16
+            scale: 0.1

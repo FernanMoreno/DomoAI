@@ -1,0 +1,86 @@
+{
+  "additionalProperties": false,
+  "description": "A household assumption, not execution authority or a measured power guarantee.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "household_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Household Id",
+      "type": "string"
+    },
+    "source_id": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "declared_at": {
+      "format": "date-time",
+      "title": "Declared At",
+      "type": "string"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "format": "date-time",
+      "title": "Valid Until",
+      "type": "string"
+    },
+    "power": {
+      "minimum": 0,
+      "title": "Power",
+      "type": "number"
+    },
+    "unit": {
+      "const": "kW",
+      "title": "Unit",
+      "type": "string"
+    },
+    "kind": {
+      "const": "declared_reserve",
+      "title": "Kind",
+      "type": "string"
+    },
+    "scope": {
+      "const": "uncontrolled_demand",
+      "title": "Scope",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tenant_id",
+    "household_id",
+    "source_id",
+    "source_revision",
+    "declared_at",
+    "valid_from",
+    "valid_until",
+    "power",
+    "unit",
+    "kind",
+    "scope"
+  ],
+  "title": "DeclaredBaseLoadProfile",
+  "type": "object"
+}

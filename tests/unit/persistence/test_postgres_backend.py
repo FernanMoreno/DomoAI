@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from domoai.persistence.postgres import PostgresDatabase
 
 
@@ -9,9 +12,18 @@ class _RecordingPostgresConnection:
         self.committed = False
         self.closed = False
 
-    def execute(self, sql: str, *args: object) -> None:
+    def execute(self, sql: str, *args: object):
         del args
         self.statements.append(sql)
+        return self
+
+    def fetchone(self):
+        return (None,)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        yield
+        self.commit()
 
     def commit(self) -> None:
         self.committed = True
@@ -28,12 +40,14 @@ def test_postgres_sql_adapter_converts_sqlite_repository_statements() -> None:
     assert PostgresDatabase.adapt_sql("SELECT * FROM plans WHERE id = ?") == (
         "SELECT * FROM plans WHERE id = %s"
     )
-    assert PostgresDatabase.adapt_sql(
-        "INSERT OR IGNORE INTO audit_events (id) VALUES (?)"
-    ) == "INSERT INTO audit_events (id) VALUES (%s) ON CONFLICT DO NOTHING"
-    assert PostgresDatabase.adapt_sql(
-        "SELECT * FROM operational_metric_history LIMIT -1 OFFSET ?"
-    ) == "SELECT * FROM operational_metric_history OFFSET %s"
+    assert (
+        PostgresDatabase.adapt_sql("INSERT OR IGNORE INTO audit_events (id) VALUES (?)")
+        == "INSERT INTO audit_events (id) VALUES (%s) ON CONFLICT DO NOTHING"
+    )
+    assert (
+        PostgresDatabase.adapt_sql("SELECT * FROM operational_metric_history LIMIT -1 OFFSET ?")
+        == "SELECT * FROM operational_metric_history OFFSET %s"
+    )
 
 
 def test_postgres_schema_declares_shared_phase3_tables() -> None:
@@ -48,6 +62,9 @@ def test_postgres_schema_declares_shared_phase3_tables() -> None:
         "operational_metric_history",
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in schema
+    assert "'dispatching'" in schema
+    assert "owner_id TEXT" in schema
+    assert "execution_attempt_id TEXT" in schema
 
 
 def test_postgres_schema_is_not_sqlite_only() -> None:
@@ -67,7 +84,13 @@ async def test_postgres_initialization_serializes_shared_schema_bootstrap() -> N
 
     await database.initialize()
 
-    assert "pg_advisory_lock" in connection.statements[0]
-    assert "CREATE OR REPLACE FUNCTION json_extract" in connection.statements[1]
-    assert any("pg_advisory_unlock" in statement for statement in connection.statements)
+    def position(fragment: str) -> int:
+        return next(i for i, statement in enumerate(connection.statements) if fragment in statement)
+
+    lock = position("pg_advisory_xact_lock")
+    quarantine = position("to_regnamespace('domoai_restore_guard')")
+    floor = position("to_regclass('public.runtime_contract_floor')")
+    schema = position("CREATE OR REPLACE FUNCTION json_extract")
+    assert lock < quarantine < schema
+    assert lock < floor < schema
     assert connection.committed is True

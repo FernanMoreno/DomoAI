@@ -257,6 +257,7 @@ dev = [
     { name = "pyyaml" },
     { name = "ruff" },
     { name = "testcontainers" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -285,6 +286,7 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "ruff", specifier = ">=0.11,<1" },
     { name = "testcontainers", specifier = ">=4.15.0" },
+    { name = "uvicorn", specifier = ">=0.52.3,<0.53" },
 ]
 
 [[package]]

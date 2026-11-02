@@ -54,7 +54,7 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      - run: uv run pytest tests/unit --cov=domoai --cov-report=term-missing --cov-report=xml --junitxml=junit-unit.xml
+      - run: uv run pytest tests/unit --cov=domoai --cov-fail-under=60 --cov-report=term-missing --cov-report=xml --junitxml=junit-unit.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
@@ -96,6 +96,8 @@ jobs:
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
       - run: uv run pytest tests/integration --junitxml=junit-integration.xml
+      - name: Chat confirmation security regressions
+        run: uv run pytest tests/security/test_chat_confirmation.py tests/security/test_chat_confirmation_hardening.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -131,16 +133,40 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
-      # ubuntu-latest ships a running Docker daemon; the one Docker-backed
-      # composition test (real Mosquitto via Testcontainers) skips itself if
-      # it isn't reachable, so this job stays green on runners without
-      # Docker instead of failing the build.
+      # This broad suite retains explicit skips for lab-only infrastructure.
+      # The mandatory representative Docker smoke is enforced below.
+      - name: Install browser test dependencies
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
       - run: uv run pytest tests/composition --junitxml=junit-composition.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: junit-composition
           path: junit-composition.xml
+          if-no-files-found: ignore
+
+  test-docker-composition:
+    name: Test (mandatory Docker composition)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      - name: Require a reachable Docker daemon
+        run: docker info
+      - name: Run mandatory real-dependency and deployment smoke
+        run: scripts/ci/run_mandatory_docker_composition.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: junit-docker-composition
+          path: junit-docker-composition.xml
           if-no-files-found: ignore
 
   package:
@@ -229,6 +255,7 @@ jobs:
       - test-integration
       - test-performance
       - test-composition
+      - test-docker-composition
       - package
       - schema-check
       - contract-docs
@@ -268,6 +295,7 @@ jobs:
       - test-integration
       - test-performance
       - test-composition
+      - test-docker-composition
       - package
       - schema-check
       - contract-docs

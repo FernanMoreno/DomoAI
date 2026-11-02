@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "Identifier": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "PreferenceKey": {
+      "enum": [
+        "schedule.preferred_run_window",
+        "comfort.temperature_target",
+        "energy.minimum_soc",
+        "energy.device_use_allowed"
+      ],
+      "type": "string"
+    },
+    "PreferenceTarget": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "alias": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "alias"
+          ]
+        }
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "device",
+            "area"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alias": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alias"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "PreferenceTarget",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "key": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreferenceKey"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreferenceTarget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "effective_only": {
+      "default": true,
+      "title": "Effective Only",
+      "type": "boolean"
+    },
+    "limit": {
+      "default": 50,
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Limit",
+      "type": "integer"
+    },
+    "cursor": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cursor"
+    }
+  },
+  "title": "PreferenceRead",
+  "type": "object"
+}

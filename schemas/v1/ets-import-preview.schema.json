@@ -1,0 +1,361 @@
+{
+  "$defs": {
+    "EtsGroupAddress": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "maxLength": 16,
+          "minLength": 3,
+          "pattern": "^\\d+/\\d+(?:/\\d+)?$",
+          "title": "Address",
+          "type": "string"
+        },
+        "dpt": {
+          "maxLength": 16,
+          "minLength": 3,
+          "pattern": "^\\d{1,3}\\.\\d{1,3}$",
+          "title": "Dpt",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "area": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "support": {
+          "$ref": "#/$defs/EtsSupportStatus"
+        },
+        "capability": {
+          "anyOf": [
+            {
+              "enum": [
+                "power",
+                "brightness",
+                "temperature",
+                "humidity",
+                "occupancy",
+                "battery.soc",
+                "battery.power",
+                "battery.capacity"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability"
+        }
+      },
+      "required": [
+        "address",
+        "dpt",
+        "name",
+        "support"
+      ],
+      "title": "EtsGroupAddress",
+      "type": "object"
+    },
+    "EtsImportWarning": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "address": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Address"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "EtsImportWarning",
+      "type": "object"
+    },
+    "EtsMappingCapability": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "power",
+            "brightness",
+            "temperature",
+            "humidity",
+            "occupancy",
+            "battery.soc",
+            "battery.power",
+            "battery.capacity"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "dpt": {
+          "minLength": 1,
+          "title": "Dpt",
+          "type": "string"
+        },
+        "state_group_address": {
+          "minLength": 3,
+          "title": "State Group Address",
+          "type": "string"
+        },
+        "command_group_address": {
+          "anyOf": [
+            {
+              "minLength": 3,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Group Address"
+        }
+      },
+      "required": [
+        "name",
+        "dpt",
+        "state_group_address"
+      ],
+      "title": "EtsMappingCapability",
+      "type": "object"
+    },
+    "EtsMappingDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/EtsMappingEntity"
+          },
+          "minItems": 1,
+          "title": "Entities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "entities"
+      ],
+      "title": "EtsMappingDocument",
+      "type": "object"
+    },
+    "EtsMappingEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "area_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Id"
+        },
+        "semantic_type": {
+          "enum": [
+            "light",
+            "switch",
+            "sensor",
+            "energy"
+          ],
+          "title": "Semantic Type",
+          "type": "string"
+        },
+        "manufacturer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manufacturer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/EtsMappingCapability"
+          },
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "name",
+        "semantic_type",
+        "capabilities"
+      ],
+      "title": "EtsMappingEntity",
+      "type": "object"
+    },
+    "EtsSourceKind": {
+      "enum": [
+        "xml",
+        "knxproj"
+      ],
+      "title": "EtsSourceKind",
+      "type": "string"
+    },
+    "EtsSupportStatus": {
+      "enum": [
+        "supported",
+        "unsupported",
+        "ambiguous"
+      ],
+      "title": "EtsSupportStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Digest",
+      "type": "string"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/EtsSourceKind"
+    },
+    "project_name": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Project Name",
+      "type": "string"
+    },
+    "group_addresses": {
+      "items": {
+        "$ref": "#/$defs/EtsGroupAddress"
+      },
+      "maxItems": 1000,
+      "title": "Group Addresses",
+      "type": "array"
+    },
+    "mapping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EtsMappingDocument"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/EtsImportWarning"
+      },
+      "maxItems": 256,
+      "title": "Warnings",
+      "type": "array"
+    },
+    "review_required": {
+      "const": true,
+      "default": true,
+      "title": "Review Required",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "source_digest",
+    "source_kind",
+    "project_name",
+    "group_addresses",
+    "warnings"
+  ],
+  "title": "EtsImportPreview",
+  "type": "object"
+}

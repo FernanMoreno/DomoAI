@@ -72,3 +72,47 @@ def decode_json_value(
         maximum=maximum,
         enum_values=enum_values,
     )
+
+
+def decode_mqtt_value(
+    payload: bytes,
+    *,
+    kind: CapabilityKind,
+    minimum: float | int | None = None,
+    maximum: float | int | None = None,
+    enum_values: Sequence[str] = (),
+    payload_on: str | None = None,
+    payload_off: str | None = None,
+) -> ScalarValue:
+    """Decode a declared payload, allowing only static boolean translations."""
+
+    if kind is CapabilityKind.BOOLEAN and (payload_on is not None or payload_off is not None):
+        raw = payload.decode("utf-8")
+        if payload_on is not None and raw == payload_on:
+            return True
+        if payload_off is not None and raw == payload_off:
+            return False
+    return decode_json_value(
+        payload,
+        kind=kind,
+        minimum=minimum,
+        maximum=maximum,
+        enum_values=enum_values,
+    )
+
+
+def encode_mqtt_value(
+    value: ScalarValue,
+    *,
+    kind: CapabilityKind,
+    payload_on: str | None = None,
+    payload_off: str | None = None,
+) -> bytes:
+    """Encode a declared command; static mappings are the only transformation."""
+
+    if kind is CapabilityKind.BOOLEAN and isinstance(value, bool):
+        if value and payload_on is not None:
+            return payload_on.encode("utf-8")
+        if not value and payload_off is not None:
+            return payload_off.encode("utf-8")
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")

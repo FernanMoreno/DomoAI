@@ -576,3 +576,60 @@ def test_energy_context_rejects_exterior_forecast_slot_mismatch() -> None:
     payload = context.model_copy(update={"exterior_temperature_forecast": short_forecast})
     with pytest.raises(ValidationError, match="must contain exactly one point"):
         EnergyContext.model_validate(payload.model_dump(mode="python"))
+
+
+@pytest.mark.parametrize(
+    "series,index", [("tariffs", 1), ("export_tariffs", 1), ("export_tariffs", 0)]
+)
+def test_a12_rejects_mixed_currency(series, index):
+    payload = energy_context_for().model_dump(mode="python")
+    payload["export_tariffs"] = [dict(point) for point in payload["tariffs"]]
+    if index == 0:
+        for point in payload[series]:
+            point["currency"] = "USD"
+    else:
+        payload[series][index]["currency"] = "USD"
+    with pytest.raises(ValidationError, match="currency"):
+        EnergyContext.model_validate(payload)
+
+
+@pytest.mark.parametrize("currency", ["EUR", "USD"])
+def test_a12_currency_is_derived_and_not_serialized(currency):
+    payload = energy_context_for().model_dump(mode="python")
+    for field in ("tariffs", "export_tariffs"):
+        for point in payload.get(field) or []:
+            point["currency"] = currency
+            point["price_per_kwh"] = -0.2
+    context = EnergyContext.model_validate(payload)
+    assert context.currency == currency
+    assert "currency" not in context.model_dump()
+    assert EnergyContext.model_validate_json(context.model_dump_json()).currency == currency
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        EnergyContext.model_validate({**payload, "currency": currency})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("field", ["tariffs", "degradation"])
+def test_a12_monetary_inputs_must_be_finite(value, field):
+    payload = energy_context_for().model_dump(mode="python")
+    if field == "tariffs":
+        payload["tariffs"][0]["price_per_kwh"] = value
+    else:
+        payload["battery"]["degradation_cost_per_kwh"] = value
+    with pytest.raises(ValidationError):
+        EnergyContext.model_validate(payload)
+
+
+@pytest.mark.parametrize("currency", ["", "eur", "EURO", 1, None])
+def test_a12_currency_code_is_strict(currency):
+    payload = energy_context_for().model_dump(mode="python")
+    payload["tariffs"][0]["currency"] = currency
+    with pytest.raises(ValidationError):
+        EnergyContext.model_validate(payload)
+
+
+def test_a12_legacy_battery_does_not_accept_an_independent_currency_override():
+    payload = energy_context_for().model_dump(mode="python")
+    payload["battery"]["degradation_currency"] = "USD"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        EnergyContext.model_validate(payload)

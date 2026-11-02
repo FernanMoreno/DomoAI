@@ -15,6 +15,7 @@ from domoai.adapters.home_assistant.config import (
 from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.domain.energy import DispatchableBatteryBinding, EVChargingBinding
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterExecutionAck,
     AdapterHealth,
     AdapterSnapshot,
@@ -50,11 +51,14 @@ class HomeAssistantProviderAdapter:
         self,
         provider: HomeAssistantProvider,
         *,
+        adapter_id: str | None = None,
         clock: Clock | None = None,
         dispatchable_battery_binding: DispatchableBatteryBinding | None = None,
         ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     ) -> None:
         self.provider = provider
+        if adapter_id is not None:
+            self.adapter_id = adapter_id
         self._clock = clock or SystemClock()
         self._connected = False
         self._source_by_command: dict[tuple[str, str], list[str]] = {}
@@ -74,8 +78,7 @@ class HomeAssistantProviderAdapter:
         self._connected = True
 
     async def disconnect(self) -> None:
-        if self._connected:
-            await self.provider.disconnect()
+        await self.provider.disconnect()
         self._connected = False
 
     async def discover(self) -> AdapterSnapshot:
@@ -99,19 +102,16 @@ class HomeAssistantProviderAdapter:
                 observed_at,
                 _parse_source_timestamp(state.get("received_at"), fallback=now),
             )
+            status = _source_state_status(state)
             states.append(
                 StateSnapshot(
                     device_id=str(state["entity_id"]),
                     capability=str(state["capability"]),
-                    value=state.get("value") if state.get("available", True) else None,
+                    value=state.get("value") if status is StateStatus.CURRENT else None,
                     unit=state.get("unit"),
                     observed_at=observed_at,
                     received_at=received_at,
-                    status=(
-                        StateStatus.CURRENT
-                        if state.get("available", True)
-                        else StateStatus.UNAVAILABLE
-                    ),
+                    status=status,
                     source_ref=SourceRef(
                         adapter_id=self.adapter_id,
                         external_id=str(state["entity_id"]),
@@ -165,15 +165,21 @@ class HomeAssistantProviderAdapter:
         }:
             return AdapterExecutionAck(
                 accepted=False,
-                source_ref=result.source_ref,
+                source_ref=self._runtime_source_ref(result.source_ref, source_entity_id),
                 message=result.message or "Home Assistant provider rejected command",
             )
         return AdapterExecutionAck(
             accepted=True,
-            source_ref=result.source_ref
-            or SourceRef(adapter_id=self.adapter_id, external_id=source_entity_id),
+            source_ref=self._runtime_source_ref(result.source_ref, source_entity_id),
             message=result.message,
         )
+
+    def _runtime_source_ref(self, source_ref: SourceRef | None, external_id: str) -> SourceRef:
+        """Keep provider acknowledgements inside this connection namespace."""
+
+        if source_ref is None:
+            return SourceRef(adapter_id=self.adapter_id, external_id=external_id)
+        return source_ref.model_copy(update={"adapter_id": self.adapter_id})
 
     async def acquire_control(self, request: ControlTakeoverRequest) -> TakeoverResult:
         """Read a declared HA battery baseline without pretending to disable native control.
@@ -376,7 +382,43 @@ class HomeAssistantProviderAdapter:
 
     async def _event_stream(self) -> AsyncIterator[SourceEvent]:
         async for event in self.provider.client.subscribe_state_events():
-            yield StateChangedEvent(payload=event)
+            snapshot = self._project_semantic_snapshot(self.provider.normalize_state_event(event))
+            now = self._clock.now()
+            states = []
+            for state in snapshot.source_states:
+                status = _source_state_status(state)
+                observed_at = _parse_source_timestamp(state.get("observed_at"), fallback=now)
+                received_at = max(
+                    observed_at,
+                    _parse_source_timestamp(state.get("received_at"), fallback=now),
+                )
+                states.append(
+                    StateSnapshot(
+                        device_id=str(state["entity_id"]),
+                        capability=str(state["capability"]),
+                        value=state.get("value") if status is StateStatus.CURRENT else None,
+                        unit=state.get("unit"),
+                        observed_at=observed_at,
+                        received_at=received_at,
+                        status=status,
+                        source_ref=SourceRef(
+                            adapter_id=self.adapter_id, external_id=str(state["entity_id"])
+                        ),
+                    ).model_dump(mode="json")
+                )
+            if states:
+                yield StateChangedEvent(
+                    source_adapter_id=self.adapter_id,
+                    external_id=str(snapshot.source_states[0]["entity_id"]),
+                    payload={"states": states},
+                )
+            for diagnostic in snapshot.unsupported_sources:
+                yield AdapterDiagnosticEvent(
+                    source_adapter_id=self.adapter_id,
+                    external_id=diagnostic.get("entity_id"),
+                    code="invalid_state",
+                    message="Home Assistant entity state is invalid",
+                )
 
     async def health(self) -> AdapterHealth:
         connected = self._connected and await self.provider.client.health()
@@ -424,6 +466,16 @@ def _parse_source_timestamp(value: object, *, fallback: datetime) -> datetime:
     if parsed.tzinfo is None:
         return fallback
     return parsed.astimezone(fallback.tzinfo)
+
+
+def _source_state_status(state: dict[str, object]) -> StateStatus:
+    raw_status = state.get("status")
+    if raw_status is not None:
+        try:
+            return StateStatus(str(raw_status))
+        except ValueError:
+            return StateStatus.INVALID
+    return StateStatus.CURRENT if state.get("available", True) else StateStatus.UNAVAILABLE
 
 
 def _slug(value: str) -> str:

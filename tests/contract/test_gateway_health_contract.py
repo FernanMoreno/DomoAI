@@ -18,7 +18,10 @@ from tests.unit.mcp.test_gateway import _build_context
 class _Lifecycle:
     started = True
     closed = False
-    running_task_count = 2
+    required_task_states = {
+        "domoai-event-consumer": "running",
+        "domoai-scheduler": "running",
+    }
 
 
 class _Ownership:
@@ -42,6 +45,7 @@ class _Runtime:
         self.knx_connected = knx_connected
         self.knx_message = knx_message
         self.state_store = None
+        self.closing = False
 
     async def health(self) -> AdapterHealth:
         return AdapterHealth(
@@ -217,3 +221,67 @@ async def test_optional_unavailable_matter_node_does_not_mask_required_state(
     assert payload["freshness"]["status"] == "current"
     assert payload["freshness"]["optional_snapshot_count"] == 1
     assert "optional_state_unavailable" in payload["freshness"]["reason_codes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task_name",
+    [
+        "domoai-event-consumer",
+        "domoai-scheduler",
+        "domoai-state-refresher",
+        "domoai-audit-outbox-dispatcher",
+    ],
+)
+async def test_readyz_rejects_each_configured_required_task_that_is_not_running(
+    task_name: str,
+) -> None:
+    runtime = _Runtime(Settings())
+    runtime.lifecycle.required_task_states = {
+        "domoai-event-consumer": "running",
+        "domoai-scheduler": "running",
+        "domoai-state-refresher": "running",
+        "domoai-audit-outbox-dispatcher": "running",
+    }
+    runtime.lifecycle.required_task_states[task_name] = "failed"
+
+    response = await readyz(runtime, object())  # type: ignore[arg-type]
+    payload = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert payload["runtime"]["required_tasks"][task_name] == "failed"
+    assert f"runtime_task_failed:{task_name}" in payload["reason_codes"]
+    assert "secret" not in response.body.decode().lower()
+
+
+@pytest.mark.asyncio
+async def test_readyz_accepts_only_the_configured_required_tasks_without_count_fallback() -> None:
+    runtime = _Runtime(Settings(), knx_connected=True)
+    delattr(runtime.lifecycle, "running_task_count") if hasattr(
+        runtime.lifecycle, "running_task_count"
+    ) else None
+    runtime.lifecycle.required_task_states = {
+        "domoai-event-consumer": "running",
+        "domoai-scheduler": "running",
+    }
+
+    response = await readyz(runtime, object())  # type: ignore[arg-type]
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["runtime"]["required_tasks"] == {
+        "domoai-event-consumer": "running",
+        "domoai-scheduler": "running",
+    }
+
+
+@pytest.mark.asyncio
+async def test_readyz_rejects_runtime_while_composition_is_closing() -> None:
+    runtime = _Runtime(Settings())
+    runtime.closing = True
+
+    response = await readyz(runtime, object())  # type: ignore[arg-type]
+
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload["runtime"]["status"] == "not_ready"
+    assert "runtime_closing" in payload["reason_codes"]

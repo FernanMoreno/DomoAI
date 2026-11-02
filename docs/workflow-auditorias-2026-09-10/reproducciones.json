@@ -1,0 +1,42 @@
+[
+  {
+    "command": [
+      ".venv/bin/python",
+      "docs/auditoria-integral-2026-09-10/reproducciones/ejecucion.py"
+    ],
+    "exit_code": 0,
+    "output": "repro-ejecucion.txt"
+  },
+  {
+    "command": [
+      ".venv/bin/python",
+      "docs/auditoria-integral-2026-09-10/reproducciones/cancelacion.py"
+    ],
+    "exit_code": 0,
+    "output": "repro-cancelacion.txt"
+  },
+  {
+    "command": [
+      ".venv/bin/python",
+      "docs/auditoria-integral-2026-09-10/reproducciones/readiness.py"
+    ],
+    "exit_code": 0,
+    "output": "repro-readiness.txt"
+  },
+  {
+    "command": [
+      ".venv/bin/python",
+      "docs/auditoria-integral-2026-09-10/reproducciones/superficie.py"
+    ],
+    "exit_code": 0,
+    "output": "repro-superficie.txt"
+  },
+  {
+    "command": [
+      ".venv/bin/python",
+      "docs/auditoria-integral-2026-09-10/reproducciones/energia.py"
+    ],
+    "exit_code": 0,
+    "output": "repro-energia.txt"
+  }
+]

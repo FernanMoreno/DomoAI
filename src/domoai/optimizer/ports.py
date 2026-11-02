@@ -5,9 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Protocol
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from domoai.domain.models import ErrorDetail, Plan, StrictModel
+from domoai.domain.product import validate_accounting
 from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.horizon import Horizon
 from domoai.optimizer.scenario import OptimizationScenario
@@ -57,6 +58,11 @@ class AlternativeEvidence(StrictModel):
     constraint_effects: dict[str, Any] = Field(default_factory=dict, max_length=16)
     forecast_assumptions: dict[str, Any] = Field(default_factory=dict, max_length=16)
 
+    @model_validator(mode="after")
+    def validate_evidence(self) -> AlternativeEvidence:
+        validate_accounting(self.constraint_effects, self.objective_values)
+        return self
+
 
 class OptimizationResult(StrictModel):
     schema_version: str = "v1"
@@ -71,6 +77,35 @@ class OptimizationResult(StrictModel):
     alternative_evidence: dict[str, AlternativeEvidence] = Field(default_factory=dict)
     diagnostics: list[ErrorDetail] = Field(default_factory=list)
     solver_evidence: SolverEvidence | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def select_contract_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "schema_version" not in value:
+            plans = [Plan.model_validate(item) for item in value.get("plans", [])]
+            plan = Plan.model_validate(value["plan"]) if value.get("plan") is not None else None
+            version = (
+                "v2"
+                if any(item.schema_version == "v2" for item in [*plans, *([plan] if plan else [])])
+                else "v1"
+            )
+            return {**value, "plans": plans, "plan": plan, "schema_version": version}
+        return value
+
+    @model_validator(mode="after")
+    def validate_contract_version(self) -> OptimizationResult:
+        validate_accounting(self.constraint_summary, self.objective_values)
+        version = (
+            "v2"
+            if any(
+                item.schema_version == "v2"
+                for item in [*self.plans, *([self.plan] if self.plan else [])]
+            )
+            else "v1"
+        )
+        if self.schema_version != version:
+            raise ValueError("optimization result schema_version does not match its plans")
+        return self
 
 
 class OptimizerPort(Protocol):

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
-from domoai.domain.models import Command, Plan, PlanStatus
+from domoai.domain.models import Command, Plan, PlanExecutionLease, PlanStatus
 from domoai.persistence.repositories import PlanRepository
 from domoai.persistence.sqlite import SQLiteDatabase
 
@@ -20,6 +22,16 @@ def _plan(plan_id: str, status: PlanStatus) -> Plan:
                 idempotency_key=f"{plan_id}:intent",
             )
         ],
+    )
+
+
+def _lease(deployment_id: str, *, epoch: int, expires_at: datetime) -> PlanExecutionLease:
+    return PlanExecutionLease(
+        deployment_id=deployment_id,
+        owner_id=f"owner-{deployment_id}",
+        lease_id=f"lease-{deployment_id}-{epoch}",
+        fencing_epoch=epoch,
+        expires_at=expires_at,
     )
 
 
@@ -192,3 +204,80 @@ async def test_lifecycle_specific_approval_and_settlement_guards(tmp_path) -> No
     completed = executing.model_copy(update={"status": PlanStatus.COMPLETED})
     await repository.settle_execution(completed)
     assert (await repository.get(completed.id)).status is PlanStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_repository_binds_plan_to_configured_deployment(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database, deployment_id="edge-a")
+
+    plan = _plan("plan-bound", PlanStatus.DRAFT)
+    await repository.save(plan)
+
+    persisted = await repository.get(plan.id)
+    assert persisted is not None
+    assert persisted.deployment_id == "edge-a"
+
+    with pytest.raises(DomainError) as error:
+        await repository.save(
+            Plan.model_validate(
+                plan.model_dump(exclude={"schema_version"}) | {"deployment_id": "edge-b"}
+            )
+        )
+
+    assert error.value.code is ErrorCode.PLAN_IDENTITY_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_list_by_status_filters_plans_by_deployment(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    await repository.save(
+        Plan.model_validate(
+            _plan("plan-a", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+            | {"deployment_id": "edge-a"}
+        )
+    )
+    await repository.save(
+        Plan.model_validate(
+            _plan("plan-b", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+            | {"deployment_id": "edge-b"}
+        )
+    )
+
+    result = await repository.list_by_status(
+        frozenset({PlanStatus.EXECUTING}), deployment_id="edge-a"
+    )
+
+    assert [plan.id for plan in result] == ["plan-a"]
+
+
+@pytest.mark.asyncio
+async def test_mark_unknown_requires_the_expected_execution_lease(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "repo.sqlite3")
+    await database.initialize()
+    repository = PlanRepository(database)
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    lease = _lease("edge-a", epoch=1, expires_at=expires_at)
+    plan = Plan.model_validate(
+        _plan("plan-lease-cas", PlanStatus.EXECUTING).model_dump(exclude={"schema_version"})
+        | {"deployment_id": "edge-a", "execution_lease": lease}
+    )
+    await repository.save(plan)
+
+    stale = lease.model_copy(update={"lease_id": "different-lease"})
+    assert (
+        await repository.mark_unknown_if_executing(
+            plan.id, expected_execution_lease=stale
+        )
+    ) is False
+    persisted = await repository.get(plan.id)
+    assert persisted is not None and persisted.status is PlanStatus.EXECUTING
+
+    assert (
+        await repository.mark_unknown_if_executing(
+            plan.id, expected_execution_lease=lease
+        )
+    ) is True

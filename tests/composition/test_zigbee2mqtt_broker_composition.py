@@ -22,8 +22,11 @@ import pytest
 import pytest_asyncio
 
 from domoai.adapters.zigbee2mqtt.adapter import Zigbee2MqttAdapter
+from domoai.adapters.zigbee2mqtt.connection import Zigbee2MqttConnectionProvider
 from domoai.adapters.zigbee2mqtt.transport import AiomqttTransport
+from domoai.application.connection_providers import ConnectionSetup
 from domoai.application.discovery_service import DiscoveryService
+from domoai.domain.connections import ConnectionDraft, ProductStatus, TransportStatus
 from domoai.runtime.events import AuditLog
 from domoai.runtime.registry import DeviceRegistry
 from domoai.runtime.state_store import StateStore
@@ -101,3 +104,33 @@ async def test_discovery_over_real_mosquitto_matches_fixture_registry(
     assert len(snapshot.devices) == 3
     assert all(device.protocol == "zigbee2mqtt" for device in snapshot.devices)
     assert health.connected is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.composition
+async def test_onboarding_provider_probes_real_mosquitto_bridge(mosquitto_port: int) -> None:
+    host = "127.0.0.1"
+    await _publish_fixture(host, mosquitto_port)
+    provider = Zigbee2MqttConnectionProvider(
+        secret_resolver=lambda reference: reference,
+        timeout_seconds=2.0,
+    )
+    candidate = provider.manual_candidate(f"mqtt://{host}:{mosquitto_port}")
+    setup = ConnectionSetup(
+        candidate=candidate,
+        draft=ConnectionDraft(
+            connector_id="zigbee2mqtt",
+            unique_id=candidate.candidate_id,
+            endpoint=candidate.endpoint,
+            options={},
+        ),
+    )
+
+    probe = await provider.probe(candidate)
+    validation = await provider.validate(setup)
+
+    assert probe.transport_status is TransportStatus.REACHABLE
+    assert probe.product_status is ProductStatus.CONNECTED
+    assert validation.valid is True
+    assert validation.normalized_draft is not None
+    assert validation.normalized_draft.options["base_topic"] == "zigbee2mqtt"

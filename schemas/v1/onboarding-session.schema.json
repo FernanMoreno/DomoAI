@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "OnboardingSessionStatus": {
+      "enum": [
+        "active",
+        "completed",
+        "failed",
+        "expired"
+      ],
+      "title": "OnboardingSessionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Explicit lifecycle state for a multi-step provider setup flow.",
+  "properties": {
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "connector_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "candidate_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Candidate Id"
+    },
+    "status": {
+      "$ref": "#/$defs/OnboardingSessionStatus"
+    },
+    "current_step_id": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Step Id"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "connector_id",
+    "status",
+    "expires_at",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "OnboardingSession",
+  "type": "object"
+}

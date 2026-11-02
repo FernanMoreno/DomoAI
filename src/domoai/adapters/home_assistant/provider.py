@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -181,6 +182,9 @@ class HomeAssistantProvider:
             for binding_id, binding in (ev_charging_bindings or {}).items()
         }
         self._entities: dict[str, dict[str, Any]] = {}
+        # Capability evidence belongs to this provider/entity, independently
+        # of the latest valid state batch. It carries no values or routes.
+        self._known_brightness_entities: set[str] = set()
         self._entity_device: dict[str, str] = {}
         self._entity_commands: dict[str, set[str]] = {}
         self._resolved_capacity_device_ids: dict[str, str] = {}
@@ -305,27 +309,75 @@ class HomeAssistantProvider:
 
     async def subscribe(self) -> AsyncIterator[Measurement]:
         async for message in self.client.subscribe_state_events():
-            entity_id, new_state = _state_changed_payload(message)
-            if entity_id is None or new_state is None:
-                continue
-            entity = deepcopy(self._entities.get(entity_id, {"entity_id": entity_id}))
-            entity.update(new_state)
-            entity = self._apply_configured_canonical_ids([entity])[0]
-            entity = self._normalize_entity(entity)
-            self._entities[entity_id] = entity
-            normalized = [entity]
-            snapshot = self.mapper.to_snapshot(normalized)
-            snapshot = self._project_battery_control_capabilities(snapshot)
-            snapshot = self._project_ev_charging_capabilities(snapshot)
+            snapshot = self.normalize_state_event(message)
             for measurement in self._measurements_for_snapshot(snapshot.source_states, None):
                 yield measurement
+
+    def normalize_state_event(self, message: object) -> AdapterSnapshot:
+        """Materialize event evidence once for SDK and runtime consumers.
+
+        Only registry metadata and established capability support survive an
+        update. Values, attributes and availability belong to the new event.
+        Transport/authentication errors stay outside this entity boundary.
+        """
+
+        entity_id, new_state = _state_changed_payload(message)
+        if entity_id is None or new_state is None:
+            return AdapterSnapshot(unsupported_sources=[self._state_diagnostic(entity_id)])
+        entity = deepcopy(self._entities.get(entity_id, {}))
+        for key in (
+            "state",
+            "state_status",
+            "attributes",
+            "available",
+            "last_updated",
+            "last_changed",
+            "received_at",
+        ):
+            entity.pop(key, None)
+        entity.update(new_state)
+        entity["entity_id"] = entity_id
+        normalized, snapshot = self._normalize_entities([entity])
+        normalized = self._apply_configured_canonical_ids(normalized)
+        for item in normalized:
+            self._entities[str(item["entity_id"])] = item
+        snapshot = self._project_battery_control_capabilities(snapshot)
+        return self._project_ev_charging_capabilities(snapshot)
+
+    def _normalize_entities(
+        self, entities: Sequence[object]
+    ) -> tuple[list[dict[str, Any]], AdapterSnapshot]:
+        normalized: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, object]] = []
+        for entity in entities:
+            entity_id = entity.get("entity_id") if isinstance(entity, dict) else None
+            try:
+                if not isinstance(entity, dict):
+                    raise ValueError("Home Assistant entity must be an object")
+                item = self._normalize_entity(entity)
+                # Capability validation is also local to this entity.
+                self.mapper.to_snapshot([item])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                diagnostics.append(self._state_diagnostic(entity_id))
+                continue
+            normalized.append(item)
+            if item["domain"] == "light" and "brightness" in _feature_names(
+                item.get("supported_features")
+            ):
+                self._known_brightness_entities.add(str(item["entity_id"]))
+            if "invalid" in item.get("state_status", {}).values():
+                diagnostics.append(self._state_diagnostic(entity_id))
+        snapshot = self.mapper.to_snapshot(normalized)
+        return normalized, snapshot.model_copy(update={"unsupported_sources": diagnostics})
 
     async def _load_snapshot(self) -> AdapterSnapshot:
         entities = await self.client.fetch_states()
         entities = await self._merge_entity_registry(entities)
-        normalized = [self._normalize_entity(entity) for entity in entities]
+        normalized, snapshot = self._normalize_entities(entities)
         normalized = self._apply_configured_canonical_ids(normalized)
-        snapshot = self.mapper.to_snapshot(normalized)
+        snapshot = self.mapper.to_snapshot(normalized).model_copy(
+            update={"unsupported_sources": snapshot.unsupported_sources}
+        )
         self._remember_routes(normalized, snapshot.source_entities)
         snapshot = self._project_battery_control_capabilities(snapshot)
         snapshot = self._project_ev_charging_capabilities(snapshot)
@@ -333,6 +385,15 @@ class HomeAssistantProvider:
         self._resolve_configured_device_ids(snapshot.source_entities)
         self._validate_capacity_bindings()
         return snapshot
+
+    def _state_diagnostic(self, entity_id: object) -> dict[str, object]:
+        return {
+            "adapter_id": self.manifest.provider_id,
+            "entity_id": _safe_entity_id(entity_id),
+            "event_type": "adapter_state_invalid",
+            "reason": "Home Assistant entity state is invalid",
+            "failure": False,
+        }
 
     def _project_battery_control_capabilities(self, snapshot: AdapterSnapshot) -> AdapterSnapshot:
         """Expose configured battery commands without fabricating telemetry."""
@@ -601,21 +662,15 @@ class HomeAssistantProvider:
         magnitude = max(abs(float(minimum)), abs(float(maximum)))
         return 0.0, magnitude
 
-    async def _merge_entity_registry(self, entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def _merge_entity_registry(self, entities: list[Any]) -> list[Any]:
         if not entities:
             return entities
         fetch_registry = getattr(self.client, "fetch_entity_registry", None)
         if not callable(fetch_registry):
             return entities
-        try:
-            registry_entries = await fetch_registry()
-        except Exception:
-            return entities
+        registry_entries = await fetch_registry()
         fetch_devices = getattr(self.client, "fetch_device_registry", None)
-        try:
-            device_entries = await fetch_devices() if callable(fetch_devices) else []
-        except Exception:
-            device_entries = []
+        device_entries = await fetch_devices() if callable(fetch_devices) else []
         registry = {
             str(entry["entity_id"]): entry
             for entry in registry_entries
@@ -626,8 +681,11 @@ class HomeAssistantProvider:
             for entry in device_entries
             if isinstance(entry, dict) and entry.get("id")
         }
-        merged: list[dict[str, Any]] = []
+        merged: list[Any] = []
         for entity in entities:
+            if not isinstance(entity, dict) or not entity.get("entity_id"):
+                merged.append(entity)
+                continue
             item = deepcopy(entity)
             item.update(
                 {
@@ -1201,10 +1259,16 @@ class HomeAssistantProvider:
                 _timestamp(raw.get("received_at"), fallback=received_at),
             )
             value = _scalar(state.get("value"))
-            quality = (
-                MeasurementQuality.GOOD
-                if state.get("available", True) and value is not None
-                else MeasurementQuality.UNAVAILABLE
+            quality = {
+                "invalid": MeasurementQuality.INVALID,
+                "unavailable": MeasurementQuality.UNAVAILABLE,
+            }.get(
+                str(state.get("status")),
+                (
+                    MeasurementQuality.GOOD
+                    if state.get("available", True) and value is not None
+                    else MeasurementQuality.UNAVAILABLE
+                ),
             )
             measurements.append(
                 Measurement(
@@ -1260,30 +1324,65 @@ class HomeAssistantProvider:
                 return battery_binding.capacity_metric
         return self._metric_for(entity_id, capability)
 
-    @staticmethod
-    def _normalize_entity(entity: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_entity(self, entity: dict[str, Any]) -> dict[str, Any]:
         item = deepcopy(entity)
-        entity_id = str(item["entity_id"])
+        entity_id = _safe_entity_id(item.get("entity_id"))
+        if entity_id is None:
+            raise ValueError("Home Assistant entity identifier is invalid")
         item["entity_id"] = entity_id
+        _validate_entity_metadata(item)
         item["domain"] = str(item.get("domain") or entity_id.split(".", 1)[0])
-        attributes = dict(item.get("attributes", {}))
+        attributes = item.get("attributes", {})
+        if not isinstance(attributes, dict):
+            raise ValueError("Home Assistant entity attributes must be an object")
+        attributes = dict(attributes)
         if attributes.get("friendly_name") and not item.get("name"):
             item["name"] = attributes["friendly_name"]
         if attributes.get("unit_of_measurement") and "unit" not in attributes:
             attributes["unit"] = attributes["unit_of_measurement"]
         item["attributes"] = attributes
         if isinstance(item.get("state"), dict):
+            # Fixture/legacy clients already use percentages and typed power.
+            # Validate their evidence without applying HA's 0..255 scale twice.
+            values = dict(item["state"])
+            if item["domain"] == "light" and self._brightness_supported(item, attributes):
+                values.setdefault("brightness", None)
+                item["supported_features"] = _with_feature(
+                    item.get("supported_features"), "brightness"
+                )
+            statuses = {}
+            for name, value in values.items():
+                if not item.get("available", True) or value is None:
+                    values[name], statuses[name] = None, "unavailable"
+                elif name == "brightness" and item["domain"] == "light":
+                    _, statuses[name] = _brightness(value)
+                    if statuses[name] != "current":
+                        values[name] = None
+                elif name == "power" and item["domain"] in {"light", "switch"}:
+                    if isinstance(value, bool):
+                        statuses[name] = "current"
+                    else:
+                        values[name], statuses[name] = _power_state(value)
+                else:
+                    statuses[name] = "current"
+            item["state"] = values
+            item["state_status"] = statuses
             return item
 
         raw_state = item.get("state", "unknown")
         domain = item["domain"]
         if domain in {"light", "switch"}:
-            state: dict[str, Any] = {"power": _on_state(raw_state)}
-            if "brightness" in attributes:
-                state["brightness"] = round(float(attributes["brightness"]) * 100 / 255)
+            power, power_status = _power_state(raw_state)
+            state: dict[str, Any] = {"power": power}
+            statuses = {"power": power_status}
+            if self._brightness_supported(item, attributes):
+                brightness, status = _brightness(attributes.get("brightness"))
+                state["brightness"] = brightness
+                statuses["brightness"] = status
                 item["supported_features"] = _with_feature(
                     item.get("supported_features"), "brightness"
                 )
+            item["state_status"] = statuses
         elif domain == "cover":
             state = {"position": _scalar(attributes.get("current_position", raw_state))}
             if "current_position" in attributes:
@@ -1305,8 +1404,28 @@ class HomeAssistantProvider:
         else:
             state = {"value": _scalar(raw_state)}
         item["state"] = state
-        item["available"] = item.get("available", raw_state not in {"unknown", "unavailable"})
+        item["available"] = item.get(
+            "available", str(raw_state).casefold() not in {"unknown", "unavailable"}
+        )
+        if not item["available"]:
+            item["state"] = {name: None for name in state}
+            item["state_status"] = {name: "unavailable" for name in state}
         return item
+
+    def _brightness_supported(self, item: dict[str, Any], attributes: dict[str, Any]) -> bool:
+        if "brightness" in attributes:
+            return True
+        if "brightness" in _feature_names(item.get("supported_features")):
+            return True
+        # HA's legacy SUPPORT_BRIGHTNESS bit and modern color-mode metadata
+        # are explicit support evidence even when no value is reported.
+        for features in (item.get("supported_features"), attributes.get("supported_features")):
+            if isinstance(features, int) and not isinstance(features, bool) and features & 1:
+                return True
+        modes = _feature_names(attributes.get("supported_color_modes"))
+        if modes & {"brightness", "color_temp", "hs", "xy", "rgb", "rgbw", "rgbww", "white"}:
+            return True
+        return str(item["entity_id"]) in self._known_brightness_entities
 
     def _translate_command(
         self, entity_id: str, command: ProviderCommand
@@ -1403,19 +1522,55 @@ class HomeAssistantProvider:
         )
 
 
-def _state_changed_payload(message: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+def _state_changed_payload(message: object) -> tuple[str | None, dict[str, Any] | None]:
+    if not isinstance(message, dict):
+        return None, None
     event = message.get("event", message)
     if not isinstance(event, dict):
         return None, None
     data = event.get("data", event)
     if not isinstance(data, dict):
         return None, None
-    entity_id = data.get("entity_id")
+    entity_id = _safe_entity_id(data.get("entity_id"))
     new_state = data.get("new_state")
-    return (
-        str(entity_id) if entity_id else None,
-        dict(new_state) if isinstance(new_state, dict) else None,
-    )
+    if isinstance(new_state, dict) and new_state.get("entity_id", entity_id) != entity_id:
+        return entity_id, None
+    return entity_id, dict(new_state) if isinstance(new_state, dict) else None
+
+
+def _validate_entity_metadata(item: dict[str, Any]) -> None:
+    # The mapper and registry consume these as text, not arbitrary JSON.
+    # Reject malformed entity metadata before mapping can escape the local
+    # validation boundary (for example area_id.replace on a number).
+    for field in (
+        "area_id",
+        "device_id",
+        "domain",
+        "name",
+        "manufacturer",
+        "model",
+        "canonical_id",
+        "local_canonical_id",
+    ):
+        value = item.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("Home Assistant entity text metadata must be a string")
+    if "available" in item and not isinstance(item["available"], bool):
+        raise ValueError("Home Assistant entity availability must be a boolean")
+    attributes = item.get("attributes", {})
+    if isinstance(attributes, dict):
+        for field in (
+            "friendly_name", "unit", "unit_of_measurement", "measurement", "device_class"
+        ):
+            value = attributes.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError("Home Assistant attribute text metadata must be a string")
+
+
+def _safe_entity_id(value: object) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,255}", value):
+        return value
+    return None
 
 
 def _finite_number(value: object) -> bool:
@@ -1436,6 +1591,12 @@ def _with_feature(features: object, value: str) -> list[str]:
     return _unique_strings([*existing, value])
 
 
+def _feature_names(features: object) -> set[str]:
+    if not isinstance(features, (list, tuple, set)):
+        return set()
+    return {str(feature) for feature in features}
+
+
 def _sensor_measurement(attributes: Mapping[str, Any]) -> str:
     device_class = str(attributes.get("device_class", "value"))
     return {
@@ -1447,8 +1608,39 @@ def _sensor_measurement(attributes: Mapping[str, Any]) -> str:
     }.get(device_class, "value")
 
 
-def _on_state(value: object) -> bool:
-    return str(value).casefold() in {"on", "true", "1", "open"}
+def _on_state(value: object) -> bool | None:
+    text = str(value).casefold()
+    if text in {"unknown", "unavailable", "none", "null", ""}:
+        return None
+    return text in {"on", "true", "1", "open"}
+
+
+def _power_state(value: object) -> tuple[bool | None, str]:
+    if value is None or value in ("unknown", "unavailable", "none", "null", ""):
+        return None, "unavailable"
+    if isinstance(value, str):
+        if value.casefold() == "on":
+            return True, "current"
+        if value.casefold() == "off":
+            return False, "current"
+    return None, "invalid"
+
+
+def _brightness(value: object) -> tuple[int | None, str]:
+    if value is None or (
+        isinstance(value, str)
+        and value.casefold() in {"unknown", "unavailable", "none", "null", ""}
+    ):
+        return None, "unavailable"
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None, "invalid"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, "invalid"
+    if not math.isfinite(numeric) or not 0 <= numeric <= 255:
+        return None, "invalid"
+    return round(numeric * 100 / 255), "current"
 
 
 def _scalar(value: object) -> bool | int | float | str | None:

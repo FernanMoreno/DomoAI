@@ -75,9 +75,7 @@ class PostWriteSocAdapter(RecordingAdapter):
         self.read_refs.append([ref.external_id for ref in source_refs])
         snapshots = await super().read_state(source_refs)
         return [
-            item.model_copy(update={"value": 2.0})
-            if item.capability == "battery_power"
-            else item
+            item.model_copy(update={"value": 2.0}) if item.capability == "battery_power" else item
             for item in snapshots
         ]
 
@@ -357,9 +355,7 @@ async def test_battery_feedback_readback_uses_its_own_canonical_route() -> None:
         ),
         audit,
         authorized_actuator_commands={
-            "battery.home": frozenset(
-                {"charge_battery", "discharge_battery", "stop_battery"}
-            )
+            "battery.home": frozenset({"charge_battery", "discharge_battery", "stop_battery"})
         },
     )
     executor = PlanExecutor(adapter, plan_service, audit)
@@ -374,9 +370,7 @@ async def test_battery_feedback_readback_uses_its_own_canonical_route() -> None:
                 unit="kW",
                 idempotency_key="battery-command",
                 postconditions=[
-                    CommandPostcondition(
-                        capability="battery_power", expected=2.0, tolerance=0.1
-                    )
+                    CommandPostcondition(capability="battery_power", expected=2.0, tolerance=0.1)
                 ],
             )
         ],
@@ -390,9 +384,23 @@ async def test_battery_feedback_readback_uses_its_own_canonical_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_write_soc_readback_is_persisted_without_replaying_write(tmp_path) -> None:
+@pytest.mark.parametrize("command_count", [1, 2])
+async def test_post_write_soc_readback_is_persisted_without_replaying_write(
+    tmp_path, command_count
+) -> None:
     snapshot = reconciliable_battery_snapshot()
-    adapter = PostWriteSocAdapter(snapshot)
+
+    class ChangingSocAdapter(PostWriteSocAdapter):
+        async def read_state(self, source_refs):
+            states = await super().read_state(source_refs)
+            return [
+                state.model_copy(update={"value": 58.0})
+                if self.writes and state.capability == "battery.soc"
+                else state
+                for state in states
+            ]
+
+    adapter = ChangingSocAdapter(snapshot) if command_count == 2 else PostWriteSocAdapter(snapshot)
     await adapter.connect()
     registry = DeviceRegistry()
     registry.apply_snapshot(snapshot, adapter.adapter_id)
@@ -415,9 +423,7 @@ async def test_post_write_soc_readback_is_persisted_without_replaying_write(tmp_
         ),
         audit,
         authorized_actuator_commands={
-            "battery.home": frozenset(
-                {"charge_battery", "discharge_battery", "stop_battery"}
-            )
+            "battery.home": frozenset({"charge_battery", "discharge_battery", "stop_battery"})
         },
     )
     database = SQLiteDatabase(tmp_path / "soc-reconciliation.sqlite3")
@@ -451,14 +457,36 @@ async def test_post_write_soc_readback_is_persisted_without_replaying_write(tmp_
         ],
     )
 
+    if command_count == 2:
+        soc_ref = SourceRef(adapter_id="fixture", external_id="battery.soc")
+        soc_state = (await adapter.read_state([soc_ref]))[0]
+        await state_store.save(soc_state.model_copy(update={"device_id": "battery.home"}))
+        adapter.read_refs.clear()
+        plan.commands[0].preconditions = [
+            Precondition(
+                device_id="battery.home",
+                capability="battery.soc",
+                expected=57.0,
+            )
+        ]
+        plan.commands.append(
+            plan.commands[0].model_copy(
+                update={
+                    "id": "second-charge",
+                    "idempotency_key": "second-charge",
+                    "preconditions": [],
+                }
+            )
+        )
     summary = await executor.execute(plan_service.validate(plan))
 
     assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
-    assert len(adapter.writes) == 1
-    assert adapter.read_refs == [["battery.telemetry"], ["battery.soc"]]
+    assert all(outcome.status is ExecutionStatus.CONFIRMED_SUCCESS for outcome in summary.outcomes)
+    assert len(adapter.writes) == command_count
+    assert adapter.read_refs == [["battery.telemetry"], ["battery.soc"]] * command_count
     persisted = await state_repository.list_all()
     soc = next(item for item in persisted if item.capability == "battery.soc")
-    assert soc.value == 57.0
+    assert soc.value == (58.0 if command_count == 2 else 57.0)
     assert soc.status is StateStatus.CURRENT
     restored_store = StateStore()
     restored_store.load_persisted(persisted)
@@ -493,9 +521,7 @@ async def test_explicit_soc_reconciliation_route_is_required_before_execution() 
         ),
         audit,
         authorized_actuator_commands={
-            "battery.home": frozenset(
-                {"charge_battery", "discharge_battery", "stop_battery"}
-            )
+            "battery.home": frozenset({"charge_battery", "discharge_battery", "stop_battery"})
         },
     )
     plan = Plan(
@@ -558,9 +584,7 @@ async def test_readback_persistence_failure_is_unknown_without_write_replay() ->
         ),
         audit,
         authorized_actuator_commands={
-            "battery.home": frozenset(
-                {"charge_battery", "discharge_battery", "stop_battery"}
-            )
+            "battery.home": frozenset({"charge_battery", "discharge_battery", "stop_battery"})
         },
     )
     plan = Plan(
@@ -626,9 +650,7 @@ async def _build_settling_context(
         ),
         audit,
         authorized_actuator_commands={
-            "battery.home": frozenset(
-                {"charge_battery", "discharge_battery", "stop_battery"}
-            )
+            "battery.home": frozenset({"charge_battery", "discharge_battery", "stop_battery"})
         },
     )
     clock = FixedClock(datetime.now(UTC))
@@ -811,9 +833,15 @@ async def test_plan_preflight_rejects_later_unmet_precondition_before_first_writ
 
 @pytest.mark.asyncio
 async def test_preflight_rejection_is_persisted_terminal_and_not_replayed(tmp_path) -> None:
-    adapter, registry, _, audit, plan_service, _, plan_repository = (
-        await build_plan_context_with_repository(tmp_path)
-    )
+    (
+        adapter,
+        registry,
+        _,
+        audit,
+        plan_service,
+        _,
+        plan_repository,
+    ) = await build_plan_context_with_repository(tmp_path)
     switch_id = next(device.id for device in registry.devices if device.type.value == "switch")
     climate_id = next(device.id for device in registry.devices if device.type.value == "climate")
     plan = Plan(
@@ -1009,9 +1037,7 @@ async def test_sensitive_command_requires_matching_operator_approval() -> None:
         await executor.execute(validated)
     assert adapter.calls == []
 
-    grant = ApprovalStore(
-        operator_token="test-operator-secret", allow_legacy_token=True
-    ).issue(
+    grant = ApprovalStore(operator_token="test-operator-secret", allow_legacy_token=True).issue(
         validated, approved_by="local_operator", operator_token="test-operator-secret"
     )
     approved = plan_service.approve(validated, grant=grant)
@@ -1048,9 +1074,9 @@ async def test_expired_persisted_approval_never_reaches_the_adapter() -> None:
             ],
         )
     )
-    grant = ApprovalStore(
-        clock=clock, operator_token="operator", allow_legacy_token=True
-    ).issue(validated, approved_by="operator", operator_token="operator")
+    grant = ApprovalStore(clock=clock, operator_token="operator", allow_legacy_token=True).issue(
+        validated, approved_by="operator", operator_token="operator"
+    )
     approved = plan_service.approve(validated, grant=grant)
     assert approved.approval is not None
     assert approved.approval.expires_at is not None
@@ -1760,9 +1786,7 @@ async def test_explicit_stale_exception_is_policy_bound_and_audited() -> None:
 
     assert summary.outcomes[0].status is ExecutionStatus.CONFIRMED_SUCCESS
     exception_events = [
-        event
-        for event in audit.events
-        if event.event_type == "precondition_stale_exception"
+        event for event in audit.events if event.event_type == "precondition_stale_exception"
     ]
     assert exception_events
     assert exception_events[0].payload["policy_id"] == "policy-explicit-stale"

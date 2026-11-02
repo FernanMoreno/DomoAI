@@ -1,0 +1,695 @@
+{
+  "$defs": {
+    "DevicePreferenceTarget": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "alias": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "alias"
+          ]
+        }
+      ],
+      "properties": {
+        "kind": {
+          "const": "device",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alias": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alias"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "DevicePreferenceTarget",
+      "type": "object"
+    },
+    "DeviceUsePreference": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/DevicePreferenceTarget"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PreferenceProvenanceInput"
+        },
+        "key": {
+          "const": "energy.device_use_allowed",
+          "title": "Key",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "boolean"
+        },
+        "unit": {
+          "const": "dimensionless",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until",
+        "timezone",
+        "target",
+        "provenance",
+        "key",
+        "value",
+        "unit"
+      ],
+      "title": "DeviceUsePreference",
+      "type": "object"
+    },
+    "HouseholdPreference": {
+      "additionalProperties": false,
+      "properties": {
+        "preference_id": {
+          "format": "uuid",
+          "title": "Preference Id",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/PreferenceKey"
+        },
+        "target": {
+          "$ref": "#/$defs/PreferenceTarget"
+        },
+        "preference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Preference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreferenceProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/PreferenceVersion"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "deleted": {
+          "default": false,
+          "title": "Deleted",
+          "type": "boolean"
+        },
+        "erased": {
+          "default": false,
+          "title": "Erased",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preference_id",
+        "key",
+        "target",
+        "preference",
+        "provenance",
+        "version",
+        "updated_at"
+      ],
+      "title": "HouseholdPreference",
+      "type": "object"
+    },
+    "Identifier": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "MinimumSocPreference": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/DevicePreferenceTarget"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PreferenceProvenanceInput"
+        },
+        "key": {
+          "const": "energy.minimum_soc",
+          "title": "Key",
+          "type": "string"
+        },
+        "value": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        },
+        "unit": {
+          "const": "percent",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until",
+        "timezone",
+        "target",
+        "provenance",
+        "key",
+        "value",
+        "unit"
+      ],
+      "title": "MinimumSocPreference",
+      "type": "object"
+    },
+    "Preference": {
+      "discriminator": {
+        "mapping": {
+          "comfort.temperature_target": "#/$defs/TemperaturePreference",
+          "energy.device_use_allowed": "#/$defs/DeviceUsePreference",
+          "energy.minimum_soc": "#/$defs/MinimumSocPreference",
+          "schedule.preferred_run_window": "#/$defs/SchedulePreference"
+        },
+        "propertyName": "key"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SchedulePreference"
+        },
+        {
+          "$ref": "#/$defs/TemperaturePreference"
+        },
+        {
+          "$ref": "#/$defs/MinimumSocPreference"
+        },
+        {
+          "$ref": "#/$defs/DeviceUsePreference"
+        }
+      ]
+    },
+    "PreferenceKey": {
+      "enum": [
+        "schedule.preferred_run_window",
+        "comfort.temperature_target",
+        "energy.minimum_soc",
+        "energy.device_use_allowed"
+      ],
+      "type": "string"
+    },
+    "PreferenceProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "user_request",
+            "manual",
+            "import"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ref"
+        },
+        "updated_by": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "source_kind",
+        "updated_by",
+        "recorded_at"
+      ],
+      "title": "PreferenceProvenance",
+      "type": "object"
+    },
+    "PreferenceProvenanceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "user_request",
+            "manual",
+            "import"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ref"
+        }
+      },
+      "required": [
+        "source_kind"
+      ],
+      "title": "PreferenceProvenanceInput",
+      "type": "object"
+    },
+    "PreferenceTarget": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "alias": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "alias"
+          ]
+        }
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "device",
+            "area"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alias": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alias"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "PreferenceTarget",
+      "type": "object"
+    },
+    "PreferenceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "title": "Generation",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision"
+      ],
+      "title": "PreferenceVersion",
+      "type": "object"
+    },
+    "PreferenceView": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "$ref": "#/$defs/HouseholdPreference"
+        },
+        "state": {
+          "enum": [
+            "scheduled",
+            "effective",
+            "expired",
+            "deleted"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "state"
+      ],
+      "title": "PreferenceView",
+      "type": "object"
+    },
+    "RunWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "weekdays": {
+          "items": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "title": "Weekdays",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "start": {
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+          "title": "End",
+          "type": "string"
+        },
+        "overnight": {
+          "title": "Overnight",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "weekdays",
+        "start",
+        "end",
+        "overnight"
+      ],
+      "title": "RunWindow",
+      "type": "object"
+    },
+    "SchedulePreference": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/DevicePreferenceTarget"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PreferenceProvenanceInput"
+        },
+        "key": {
+          "const": "schedule.preferred_run_window",
+          "title": "Key",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/RunWindow"
+        },
+        "unit": {
+          "const": "local_time",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until",
+        "timezone",
+        "target",
+        "provenance",
+        "key",
+        "value",
+        "unit"
+      ],
+      "title": "SchedulePreference",
+      "type": "object"
+    },
+    "TemperaturePreference": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/PreferenceTarget"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PreferenceProvenanceInput"
+        },
+        "key": {
+          "const": "comfort.temperature_target",
+          "title": "Key",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "ge": 5,
+          "le": 35,
+          "title": "Value"
+        },
+        "unit": {
+          "const": "degC",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until",
+        "timezone",
+        "target",
+        "provenance",
+        "key",
+        "value",
+        "unit"
+      ],
+      "title": "TemperaturePreference",
+      "type": "object"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "version": {
+      "$ref": "#/$defs/PreferenceVersion"
+    },
+    "observed_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "next_transition_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "preferences": {
+      "items": {
+        "$ref": "#/$defs/PreferenceView"
+      },
+      "title": "Preferences",
+      "type": "array"
+    },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Cursor"
+    }
+  },
+  "required": [
+    "version",
+    "observed_at",
+    "next_transition_at",
+    "preferences"
+  ],
+  "title": "PreferenceProfile",
+  "type": "object"
+}

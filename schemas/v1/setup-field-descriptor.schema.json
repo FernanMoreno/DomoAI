@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "SetupFieldType": {
+      "description": "Small, renderer-independent vocabulary for provider setup inputs.",
+      "enum": [
+        "text",
+        "url",
+        "password",
+        "number",
+        "select"
+      ],
+      "title": "SetupFieldType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Secret-free metadata used to render one setup input.",
+  "properties": {
+    "key": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]*$",
+      "title": "Key",
+      "type": "string"
+    },
+    "label": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Label",
+      "type": "string"
+    },
+    "input_type": {
+      "$ref": "#/$defs/SetupFieldType"
+    },
+    "required": {
+      "default": true,
+      "title": "Required",
+      "type": "boolean"
+    },
+    "secret": {
+      "default": false,
+      "title": "Secret",
+      "type": "boolean"
+    },
+    "help_text": {
+      "default": "",
+      "maxLength": 256,
+      "title": "Help Text",
+      "type": "string"
+    },
+    "options": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Options",
+      "type": "array"
+    }
+  },
+  "required": [
+    "key",
+    "label",
+    "input_type"
+  ],
+  "title": "SetupFieldDescriptor",
+  "type": "object"
+}

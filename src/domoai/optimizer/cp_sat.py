@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -12,6 +13,8 @@ import ortools
 from ortools.sat.python import cp_model
 
 from domoai.domain.models import Command, CommandPostcondition, Plan
+from domoai.domain.product import MONETARY_OBJECTIVES, PHYSICAL_OBJECTIVE_UNITS, AccountingEvidence
+from domoai.optimizer.energy import EnergyContext
 from domoai.optimizer.ports import (
     OptimizationResult,
     OptimizationStatus,
@@ -20,6 +23,11 @@ from domoai.optimizer.ports import (
     build_result,
 )
 from domoai.optimizer.scenario import Objective, OptimizationScenario, validate_scenario
+from domoai.optimizer.solar_accounting import (
+    SolarAccountingConvention,
+    SolarAccountingFlow,
+    accounting_evidence,
+)
 from domoai.runtime.registry import DeviceRegistry
 
 POWER_SCALE = 1_000_000  # mW when the public unit is kW
@@ -129,6 +137,15 @@ def _optimize_legacy(scenario: OptimizationScenario) -> OptimizationResult:
 def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
     context = scenario.energy_context
     assert context is not None
+    if not _solar_numeric_domain_supported(scenario):
+        return build_result(
+            scenario_id=scenario.id,
+            status=OptimizationStatus.INVALID,
+            diagnostics=[{
+                "code": "energy_numeric_domain",
+                "message": "Energy inputs exceed the safe integer accounting domain",
+            }],
+        )
     model: Any = cp_model.CpModel()
     start_variables = _start_variables(model, scenario)
     horizon_slots = scenario.horizon.slots
@@ -278,6 +295,11 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         if constraint.type in {"max_grid_import", "max_grid_export"}:
             grid_bound = max(grid_bound, to_solver_int(constraint.value, constraint.unit))
 
+    solar_slots: list[_SolarAccountingVariables] = []
+    origin_inventory: tuple[Any, ...] = (
+        0, 0, 60 * EFFICIENCY_SCALE * to_energy_int(battery.initial_soc_kwh) if battery else 0,
+    )
+    origin_bound = 60 * EFFICIENCY_SCALE * max_soc if battery else 0
     grid_import: list[Any] = []
     grid_export: list[Any] = []
     peak_import = model.NewIntVar(0, grid_bound, "peak_grid_import")
@@ -381,6 +403,17 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             active_load + charge + base_load_powers[slot]
             == solar_powers[slot] + grid_in + discharge - grid_out
         )
+        solar_slot = _add_solar_accounting_slot(
+            model, slot=slot, solar=solar_powers[slot],
+            local=active_load + base_load_powers[slot], charge=charge, discharge=discharge,
+            grid_export=grid_out, initial=origin_inventory,
+            terminal_soc=soc_variables[slot + 1] if battery else 0,
+            origin_bound=origin_bound, max_charge=max_charge, max_discharge=max_discharge,
+            minutes=scenario.horizon.resolution_minutes,
+            charge_gain=charge_gain, discharge_cost=discharge_cost,
+        )
+        solar_slots.append(solar_slot)
+        origin_inventory = solar_slot.terminal
         _add_energy_constraints(
             model,
             scenario,
@@ -424,6 +457,7 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         charge_variables=charge_variables,
         discharge_variables=discharge_variables,
         terminal_soc_variable=(soc_variables[-1] if battery is not None else None),
+        solar_credit_power_variables=[slot.credit_power for slot in solar_slots],
     )
     failure = _failure_result(scenario, status)
     if failure is not None:
@@ -472,11 +506,19 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         battery_dispatch_slots,
         hvac_dispatch_slots,
     )
-    slots: list[dict[str, float | int]] = []
+    convention = SolarAccountingConvention(
+        power_scale=POWER_SCALE, soc_scale=SOC_SCALE, efficiency_scale=EFFICIENCY_SCALE,
+        resolution_minutes=scenario.horizon.resolution_minutes,
+        charge_gain=charge_gain, discharge_cost=discharge_cost,
+        quantization_bound_kwh=(
+            horizon_slots * scenario.horizon.resolution_minutes / (60 * POWER_SCALE)
+        ),
+    )
+    solar_flows = [slot.solved(solver) for slot in solar_slots]
+    solar_accounting = accounting_evidence(solar_flows, convention, scope="horizon")
+    slots: list[dict[str, Any]] = []
     energy_cost = 0.0
     export_revenue = 0.0
-    export_kwh = 0.0
-    solar_kwh = 0.0
     battery_throughput_kwh = 0.0
     resolution_hours = scenario.horizon.resolution_minutes / 60
     for slot in range(horizon_slots):
@@ -515,11 +557,12 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             export_revenue += (
                 export_kw * resolution_hours * context.export_tariffs[slot].price_per_kwh
             )
-        export_kwh += export_kw * resolution_hours
-        solar_kwh += solar_kw * resolution_hours
         slots.append(
             {
                 "slot": slot,
+                "solar_accounting": accounting_evidence(
+                    [solar_flows[slot]], convention, scope="slot"
+                ).model_dump(mode="json"),
                 "load_power_kw": load_power / POWER_SCALE,
                 "solar_power_kw": solar_kw,
                 "grid_import_kw": import_kw,
@@ -562,7 +605,7 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
             "energy_cost": energy_cost - export_revenue + battery_degradation_cost,
             "export_revenue": export_revenue,
             "peak_import_kw": max((item["grid_import_kw"] for item in slots), default=0.0),
-            "solar_self_consumption_kwh": max(0.0, solar_kwh - export_kwh),
+            "solar_self_consumption_kwh": solar_accounting.self_consumption_kwh,
             "conservative_mode_active": 1.0 if scenario.conservative else 0.0,
             "battery_throughput_kwh": battery_throughput_kwh,
             "battery_degradation_cost": battery_degradation_cost,
@@ -588,9 +631,37 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
                 constraint.type: constraint.enforcement for constraint in scenario.constraints
             },
             "slots": slots,
+            "accounting": AccountingEvidence(
+                currency=context.currency,
+                source_revision_digest=hashlib.sha256(
+                    context.source_revision.encode("utf-8")
+                ).hexdigest(),
+                objective_units={
+                    **PHYSICAL_OBJECTIVE_UNITS,
+                    **{key: context.currency for key in MONETARY_OBJECTIVES},
+                    "terminal_soc_value_eur": "EUR",
+                },
+                degradation_currency_source=(
+                    "context_inherited"
+                    if battery is not None and battery.degradation_cost_per_kwh is not None
+                    else "not_configured"
+                ),
+                terminal_value_applied=(
+                    scenario.terminal_soc_policy is not None
+                    and scenario.terminal_soc_policy.value_eur_per_kwh is not None
+                ),
+            ).model_dump(mode="json"),
+            "solar_accounting": solar_accounting.model_dump(mode="json"),
             "violations": [],
             "soft_violations": _reported_soft_violations(solver, soft_violations),
             "forecast_confidence": forecast_confidence,
+            "forecast_assumptions": {
+                "confidence": forecast_confidence,
+                "conservative": scenario.conservative,
+                "constraint_scope": "modeled_inputs",
+                "base_load": _base_load_assumptions(context),
+                "solar_accounting": solar_accounting.convention.model_dump(mode="json"),
+            },
             "terminal_soc_policy": (
                 scenario.terminal_soc_policy.model_dump(mode="json")
                 if scenario.terminal_soc_policy is not None
@@ -599,6 +670,139 @@ def _optimize_energy(scenario: OptimizationScenario) -> OptimizationResult:
         },
         solver_evidence=solver_evidence,
     )
+
+
+@dataclass
+class _SolarAccountingVariables:
+    generated: int
+    direct_local: Any
+    direct_export: Any
+    credit_power: Any
+    initial: tuple[Any, ...]
+    terminal: tuple[Any, ...]
+    charged: tuple[Any, ...]
+    local_draw: tuple[Any, ...]
+    export_draw: tuple[Any, ...]
+
+    def solved(self, solver: Any) -> SolarAccountingFlow:
+        return SolarAccountingFlow(
+            generated=self.generated,
+            direct_local=solver.Value(self.direct_local),
+            direct_export=solver.Value(self.direct_export),
+            credit_power=solver.Value(self.credit_power),
+            initial=tuple(solver.Value(value) for value in self.initial),
+            terminal=tuple(solver.Value(value) for value in self.terminal),
+            charged=tuple(solver.Value(value) for value in self.charged),
+            local_draw=tuple(solver.Value(value) for value in self.local_draw),
+            export_draw=tuple(solver.Value(value) for value in self.export_draw),
+        )
+
+
+def _solar_numeric_domain_supported(scenario: OptimizationScenario) -> bool:
+    """Reserve int64 headroom for the attribution variables before building them.
+
+    The existing SOC equality already uses these products. Budgeting their
+    aggregate domains also avoids CP-SAT's overflow rejection for long horizons.
+    This guard makes no claim to validate unrelated objectives or thermal input.
+    """
+    assert scenario.energy_context is not None
+    battery = scenario.energy_context.battery
+    if battery is None:
+        return True
+    try:
+        minutes = scenario.horizon.resolution_minutes
+        bound = max(
+            60 * EFFICIENCY_SCALE * to_energy_int(battery.max_soc_kwh),
+            minutes * round(battery.charge_efficiency * EFFICIENCY_SCALE)
+            * to_solver_int(battery.max_charge_kw, "kW"),
+            minutes * round(EFFICIENCY_SCALE / battery.discharge_efficiency)
+            * to_solver_int(battery.max_discharge_kw, "kW"),
+            minutes * round(EFFICIENCY_SCALE / battery.discharge_efficiency),
+        )
+        return bound * 64 * scenario.horizon.slots < cp_model.INT_MAX
+    except (OverflowError, ValueError):
+        return False
+
+
+def _add_solar_accounting_slot(
+    model: Any,
+    *,
+    slot: int,
+    solar: int,
+    local: Any,
+    charge: Any,
+    discharge: Any,
+    grid_export: Any,
+    initial: tuple[Any, ...],
+    terminal_soc: Any,
+    origin_bound: int,
+    max_charge: int,
+    max_discharge: int,
+    minutes: int,
+    charge_gain: int,
+    discharge_cost: int,
+) -> _SolarAccountingVariables:
+    """D1 attribution is fixed by the physical trace, never chosen by an objective."""
+    direct = model.NewIntVar(0, solar, f"solar_direct_{slot}")
+    model.AddMinEquality(direct, [solar, local])
+    solar_charge = model.NewIntVar(0, min(solar, max_charge), f"solar_charge_{slot}")
+    model.AddMinEquality(solar_charge, [solar - direct, charge])
+    direct_export = solar - direct - solar_charge
+    battery_export = model.NewIntVar(0, max_discharge, f"battery_export_{slot}")
+    model.Add(battery_export == grid_export - direct_export)
+    battery_local = discharge - battery_export
+    model.Add(battery_local >= 0)
+    charged = (solar_charge, charge - solar_charge, 0)
+    remaining_inventory = [
+        initial[r] + minutes * charge_gain * charged[r] for r in range(3)
+    ]
+    draws: list[tuple[Any, ...]] = []
+    draw_bound = min(origin_bound, minutes * discharge_cost * max_discharge)
+    for destination, power, order in (
+        ("export", battery_export, (0, 1, 2)),
+        ("local", battery_local, (2, 1, 0)),
+    ):
+        remaining = minutes * discharge_cost * power
+        taken: list[Any] = [0, 0, 0]
+        for origin in order:
+            withdrawal = model.NewIntVar(
+                0, draw_bound, f"origin_{origin}_{destination}_{slot}"
+            )
+            model.AddMinEquality(withdrawal, [remaining_inventory[origin], remaining])
+            remaining_inventory[origin] -= withdrawal
+            remaining -= withdrawal
+            taken[origin] = withdrawal
+        model.Add(remaining == 0)
+        draws.append(tuple(taken))
+    terminal = tuple(
+        model.NewIntVar(0, origin_bound, f"origin_{origin}_soc_{slot + 1}")
+        for origin in range(3)
+    )
+    for origin in range(3):
+        model.Add(terminal[origin] == remaining_inventory[origin])
+    model.Add(sum(terminal) == 60 * EFFICIENCY_SCALE * terminal_soc)
+    local_credit = model.NewIntVar(0, max_discharge, f"solar_local_credit_{slot}")
+    model.AddDivisionEquality(local_credit, draws[1][0], minutes * discharge_cost)
+    return _SolarAccountingVariables(
+        generated=solar, direct_local=direct, direct_export=direct_export,
+        credit_power=direct + local_credit, initial=initial, terminal=terminal,
+        charged=charged, export_draw=draws[0], local_draw=draws[1],
+    )
+
+
+def _base_load_assumptions(context: EnergyContext) -> dict[str, Any]:
+    points = context.base_load_forecast
+    source = context.base_load_source
+    return {
+        **(source.model_dump(mode="json", exclude_none=True) if source is not None else {}),
+        "status": "provided" if points is not None else "unknown",
+        "kind": source.kind if source is not None else (
+            "unspecified" if points is not None else "unknown"
+        ),
+        "coverage": "complete" if points is not None else "missing",
+        "all_zero": all(point.power == 0 for point in points) if points is not None else None,
+        "household_limit_guaranteed": False,
+    }
 
 
 def _start_variables(model: Any, scenario: OptimizationScenario) -> dict[str, dict[int, Any]]:
@@ -743,6 +947,7 @@ def _objective_terms(
     peak_import: Any,
     charge_variables: list[Any] | None = None,
     discharge_variables: list[Any] | None = None,
+    solar_credit_power_variables: list[Any] | None = None,
 ) -> list[Any]:
     sign = -1 if objective.direction == "maximize" else 1
     weight = objective.weight
@@ -794,14 +999,10 @@ def _objective_terms(
     elif objective.name == "minimize_peak_import":
         terms.append(round(sign * weight * OBJECTIVE_SCALE) * peak_import)
     elif objective.name == "maximize_solar_self_consumption":
-        # grid_export has inverse polarity to self-consumption (solar is a
-        # fixed exogenous input, so maximizing self-consumption means
-        # minimizing export), unlike every other objective's term variable —
-        # apply the direction sign a second time to correct for that
-        # inversion.
-        for variable in grid_export:
-            coefficient = round(-sign * weight * resolution_hours * OBJECTIVE_SCALE)
-            terms.append(coefficient * variable)
+        if solar_credit_power_variables is None:
+            raise ValueError("Solar objective requires attributed native-power credit")
+        coefficient = round(sign * weight * resolution_hours * OBJECTIVE_SCALE)
+        terms.extend(coefficient * variable for variable in solar_credit_power_variables)
     return terms
 
 
@@ -827,6 +1028,7 @@ def _solve_tiers(
     charge_variables: list[Any] | None = None,
     discharge_variables: list[Any] | None = None,
     terminal_soc_variable: Any | None = None,
+    solar_credit_power_variables: list[Any] | None = None,
 ) -> tuple[Any, int, list[SolvedTier], float, bool]:
     tiers: list[dict[str, Any]] = []
     if soft_violations:
@@ -852,6 +1054,7 @@ def _solve_tiers(
                     peak_import,
                     charge_variables,
                     discharge_variables,
+                    solar_credit_power_variables,
                 )
             )
         if tier_terms:

@@ -1,0 +1,1 @@
+"""Modbus adapter tests."""

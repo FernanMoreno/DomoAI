@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from secrets import token_urlsafe
 from typing import Any, cast
@@ -71,6 +71,8 @@ class AdmissionDecision:
     plan_id: str
     bundle_id: str | None
     predecessor_plan_ids: tuple[str, ...] = ()
+    bundle_digest: str | None = None
+    expires_at: datetime | None = None
 
 
 class ExecutionAdmission:
@@ -206,6 +208,69 @@ class ExecutionAdmission:
                 },
             )
         predecessor_ids = tuple(member.all_predecessor_plan_ids)
+        self._verify_predecessors(plan, bundle, predecessor_ids)
+        expected_bundle_digest = bundle.bundle_digest if member is not None else None
+        self._verify_execution(
+            plan,
+            operation=operation,
+            expected_bundle_digest=expected_bundle_digest,
+        )
+        assert aggregate_capability is not None
+        self._issued_capabilities.pop(aggregate_capability.nonce, None)
+        return AdmissionDecision(
+            plan_id=plan.id,
+            bundle_id=bundle.id,
+            predecessor_plan_ids=predecessor_ids,
+            bundle_digest=bundle.bundle_digest,
+            expires_at=aggregate_capability.expires_at,
+        )
+
+    async def revalidate(self, plan: Plan, decision: AdmissionDecision) -> None:
+        """Recheck an admitted invocation without reusing its consumed capability.
+
+        This decision is local to the executor invocation; it cannot authorize
+        another execute call, which must still enter through admit().
+        """
+        if decision.plan_id != plan.id:
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID, "Admission decision belongs to another plan"
+            )
+        if decision.bundle_id is None:
+            await self.admit(plan)
+            return
+        bundle = (
+            await self.bundle_repository.get_for_plan(plan.id)
+            if self.bundle_repository is not None
+            else None
+        )
+        if (
+            bundle is None
+            or bundle.id != decision.bundle_id
+            or bundle.bundle_digest != decision.bundle_digest
+            or bundle.authority.tenant_id != plan.authority.tenant_id
+            or bundle.authority.household_id != plan.authority.household_id
+            or (decision.expires_at is not None and self.clock.now() >= decision.expires_at)
+        ):
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Bundle admission changed or expired before dispatch",
+            )
+        member = next((item for item in bundle.members if item.plan_id == plan.id), None)
+        if (
+            member is None
+            or tuple(member.all_predecessor_plan_ids) != decision.predecessor_plan_ids
+        ):
+            raise DomainError(
+                ErrorCode.AGGREGATE_CAPABILITY_INVALID,
+                "Bundle dependencies changed before dispatch",
+            )
+        self._verify_predecessors(plan, bundle, decision.predecessor_plan_ids)
+        self._verify_approval(plan, expected_bundle_digest=bundle.bundle_digest)
+
+    @staticmethod
+    def _verify_predecessors(
+        plan: Plan, bundle: BundleCommit, predecessor_ids: tuple[str, ...]
+    ) -> None:
         for predecessor_id in predecessor_ids:
             predecessor = next(
                 (item for item in bundle.members if item.plan_id == predecessor_id), None
@@ -236,19 +301,6 @@ class ExecutionAdmission:
                         "predecessor_plan_id": predecessor_id,
                     },
                 )
-        expected_bundle_digest = bundle.bundle_digest if member is not None else None
-        self._verify_execution(
-            plan,
-            operation=operation,
-            expected_bundle_digest=expected_bundle_digest,
-        )
-        assert aggregate_capability is not None
-        self._issued_capabilities.pop(aggregate_capability.nonce, None)
-        return AdmissionDecision(
-            plan_id=plan.id,
-            bundle_id=bundle.id,
-            predecessor_plan_ids=predecessor_ids,
-        )
 
     def _valid_aggregate_capability(
         self,

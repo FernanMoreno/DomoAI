@@ -34,10 +34,12 @@ class Zigbee2MqttAdapter:
         self,
         transport: MqttTransport,
         *,
+        adapter_id: str = "zigbee2mqtt",
         base_topic: str = "zigbee2mqtt",
         discovery_timeout: float = 5.0,
         clock: Clock | None = None,
     ) -> None:
+        self.adapter_id = adapter_id
         self.transport = transport
         self.base_topic = base_topic.strip("/")
         self.discovery_timeout = discovery_timeout

@@ -30,6 +30,8 @@ from domoai.domain.energy import (
 from domoai.domain.models import StateSnapshot, StateStatus, StrictModel
 from domoai.domain.provider import Measurement, MeasurementQuality
 from domoai.optimizer.energy import (
+    BaseLoadPoint,
+    BaseLoadSource,
     EnergyContext,
     EVState,
     ExteriorTemperaturePoint,
@@ -42,7 +44,10 @@ from domoai.runtime.ports import StateStorePort
 
 
 def _validate_slots(
-    points: list[TariffPoint] | list[SolarForecastPoint] | list[ExteriorTemperaturePoint],
+    points: list[TariffPoint]
+    | list[SolarForecastPoint]
+    | list[ExteriorTemperaturePoint]
+    | list[BaseLoadPoint],
     horizon: Horizon,
     series_name: str,
 ) -> None:
@@ -82,6 +87,8 @@ class TariffSeries(ProviderMetadata):
     @model_validator(mode="after")
     def validate_points(self) -> TariffSeries:
         _validate_slots(self.points, self.horizon, "tariff points")
+        if len({point.currency for point in self.points}) != 1:
+            raise ValueError("tariff series currency must be homogeneous")
         return self
 
 
@@ -104,6 +111,20 @@ class ExteriorTemperatureSeries(ProviderMetadata):
     @model_validator(mode="after")
     def validate_points(self) -> ExteriorTemperatureSeries:
         _validate_slots(self.points, self.horizon, "exterior temperature points")
+        return self
+
+
+class BaseLoadForecastSeries(ProviderMetadata, BaseLoadSource):
+    """Residual demand only; controlled loads, storage flows and PV are excluded."""
+
+    points: list[BaseLoadPoint]
+
+    @model_validator(mode="after")
+    def validate_points(self) -> BaseLoadForecastSeries:
+        _validate_slots(self.points, self.horizon, "base load forecast points")
+        if len({point.confidence is not None for point in self.points}) > 1:
+            raise ValueError("base load confidence bounds require every slot or none")
+        self.validate_horizon(self.horizon)
         return self
 
 
@@ -402,6 +423,14 @@ class SolarForecastProvider(Protocol):
     def get_forecast(self, horizon: Horizon) -> SolarForecastSeries: ...
 
 
+class BaseLoadForecastProvider(Protocol):
+    """Read-only producer of already-residual, explicitly sourced demand."""
+
+    provider_id: str
+
+    def get_forecast(self, horizon: Horizon) -> BaseLoadForecastSeries: ...
+
+
 class BatteryProvider(Protocol):
     """Read-only source of canonical battery state."""
 
@@ -482,6 +511,7 @@ class ComposedEnergyContextProvider:
         ev_providers: tuple[EVProvider, ...] = (),
         exterior_temperature: ExteriorTemperatureProvider | None = None,
         *,
+        base_load: BaseLoadForecastProvider | None = None,
         max_age_seconds: float | None = 900,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -493,6 +523,7 @@ class ComposedEnergyContextProvider:
         self.export_tariffs = export_tariffs
         self.ev_providers = ev_providers
         self.exterior_temperature = exterior_temperature
+        self.base_load = base_load
         self.max_age_seconds = max_age_seconds
         self._now = now or SystemClock().now
 
@@ -510,6 +541,9 @@ class ComposedEnergyContextProvider:
             else None
         )
 
+        base_load_result = self._get_base_load(horizon) if self.base_load is not None else None
+        if base_load_result is not None:
+            self._validate_result_horizon(base_load_result, horizon, "base_load")
         self._validate_result_horizon(tariff_result, horizon, "tariff")
         self._validate_result_horizon(solar_result, horizon, "solar")
         if battery_result is not None:
@@ -521,7 +555,9 @@ class ComposedEnergyContextProvider:
                 exterior_temperature_result, horizon, "exterior_temperature"
             )
 
-        results = [tariff_result, solar_result]
+        results: list[ProviderMetadata] = [tariff_result, solar_result]
+        if base_load_result is not None:
+            results.append(base_load_result)
         if battery_result is not None:
             results.append(battery_result)
         if export_tariff_result is not None:
@@ -562,27 +598,48 @@ class ComposedEnergyContextProvider:
                 f"exterior_temperature:{exterior_temperature_result.source_id}"
                 f"@{exterior_temperature_result.source_revision}"
             )
+        if base_load_result is not None:
+            revision_parts.append(
+                f"base_load:{base_load_result.source_id}@{base_load_result.source_revision}"
+            )
         source_revision = "|".join(revision_parts)
         observed_at_candidates = [result.observed_at for result in results] + [
             ev_state.observed_at for ev_state, _ in ev_results
         ]
-        return EnergyContext(
-            horizon=horizon,
-            tariffs=tariff_result.points,
-            solar_forecast=solar_result.points,
-            battery=battery_result.battery if battery_result is not None else None,
-            export_tariffs=(
-                export_tariff_result.points if export_tariff_result is not None else None
-            ),
-            ev_states=[ev_state for ev_state, _ in ev_results],
-            exterior_temperature_forecast=(
-                exterior_temperature_result.points
-                if exterior_temperature_result is not None
-                else None
-            ),
-            source_revision=source_revision,
-            observed_at=min(observed_at_candidates),
-        )
+        try:
+            return EnergyContext(
+                horizon=horizon,
+                tariffs=tariff_result.points,
+                solar_forecast=solar_result.points,
+                base_load_forecast=base_load_result.points
+                if base_load_result is not None
+                else None,
+                base_load_source=(
+                    BaseLoadSource.model_validate(
+                        base_load_result.model_dump(include=set(BaseLoadSource.model_fields))
+                    )
+                    if base_load_result is not None
+                    else None
+                ),
+                battery=battery_result.battery if battery_result is not None else None,
+                export_tariffs=(
+                    export_tariff_result.points if export_tariff_result is not None else None
+                ),
+                ev_states=[ev_state for ev_state, _ in ev_results],
+                exterior_temperature_forecast=(
+                    exterior_temperature_result.points
+                    if exterior_temperature_result is not None
+                    else None
+                ),
+                source_revision=source_revision,
+                observed_at=min(observed_at_candidates),
+            )
+        except ValueError as error:
+            raise _provider_error(
+                "composed",
+                code="provider_invalid",
+                message="Composed energy context is inconsistent",
+            ) from error
 
     def _get_ev(self, provider: EVProvider, horizon: Horizon) -> tuple[EVState, str]:
         provider_id = _safe_provider_id(provider, "ev")
@@ -662,6 +719,33 @@ class ComposedEnergyContextProvider:
             )
         return result
 
+    def _get_base_load(self, horizon: Horizon) -> BaseLoadForecastSeries:
+        assert self.base_load is not None
+        provider_id = _safe_provider_id(self.base_load, "base_load")
+        try:
+            result = self.base_load.get_forecast(horizon)
+            if not isinstance(result, BaseLoadForecastSeries):
+                raise _provider_error(
+                    provider_id,
+                    code="provider_invalid",
+                    message="base load provider returned an invalid result",
+                )
+            # Mutable models and model_copy can bypass nested validation.
+            # Rebuild from plain data inside the sanitized boundary, owning
+            # a detached snapshot before freshness, revision and publication.
+            return BaseLoadForecastSeries.model_validate(result.model_dump(warnings=False))
+        except EnergyProviderError:
+            raise
+        except Exception as error:
+            raise _provider_error(
+                provider_id,
+                code="provider_unavailable"
+                if _is_retryable_exception(error)
+                else "provider_invalid",
+                message="base load provider failed",
+                retryable=_is_retryable_exception(error),
+            ) from error
+
     def _get_battery(self, horizon: Horizon) -> BatteryState:
         assert self.battery is not None
         provider_id = _safe_provider_id(self.battery, "battery")
@@ -721,6 +805,24 @@ class ComposedEnergyContextProvider:
             )
 
     def _validate_freshness(self, result: ProviderMetadata) -> None:
+        if isinstance(result, BaseLoadForecastSeries) and result.kind == "declared_reserve":
+            current = self._now()
+            if current.tzinfo is None:
+                raise ValueError("provider freshness clock must be timezone-aware")
+            if result.observed_at > current:
+                raise _provider_error(
+                    result.source_id,
+                    code="invalid_observed_at",
+                    message="base reserve declaration is in the future",
+                )
+            assert result.valid_from is not None and result.valid_until is not None
+            if not result.valid_from <= current < result.valid_until:
+                raise _provider_error(
+                    result.source_id,
+                    code="base_reserve_not_valid",
+                    message="base reserve is outside its validity interval",
+                )
+            return
         self._validate_observed_at(result.source_id, result.observed_at)
 
     def _validate_observation_freshness(self, source_id: str, observed_at: datetime) -> None:

@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "SetupFieldDescriptor": {
+      "additionalProperties": false,
+      "description": "Secret-free metadata used to render one setup input.",
+      "properties": {
+        "key": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "input_type": {
+          "$ref": "#/$defs/SetupFieldType"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "secret": {
+          "default": false,
+          "title": "Secret",
+          "type": "boolean"
+        },
+        "help_text": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Help Text",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "input_type"
+      ],
+      "title": "SetupFieldDescriptor",
+      "type": "object"
+    },
+    "SetupFieldType": {
+      "description": "Small, renderer-independent vocabulary for provider setup inputs.",
+      "enum": [
+        "text",
+        "url",
+        "password",
+        "number",
+        "select"
+      ],
+      "title": "SetupFieldType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One onboarding step described by input names, never input values.",
+  "properties": {
+    "step_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Step Id",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "maxLength": 256,
+      "title": "Description",
+      "type": "string"
+    },
+    "input_keys": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Input Keys",
+      "type": "array"
+    },
+    "secret_input_keys": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Secret Input Keys",
+      "type": "array"
+    },
+    "fields": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SetupFieldDescriptor"
+      },
+      "title": "Fields",
+      "type": "array"
+    }
+  },
+  "required": [
+    "step_id",
+    "title"
+  ],
+  "title": "SetupStep",
+  "type": "object"
+}

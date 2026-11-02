@@ -6,14 +6,37 @@ import json
 import math
 import re
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
-from domoai.domain.coordination import PhysicalIntent, PhysicalIntentStatus
+from domoai.domain.coordination import (
+    PhysicalIntent,
+    PhysicalIntentClaim,
+    PhysicalIntentClaimDecision,
+    PhysicalIntentStatus,
+)
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock, SystemClock
 
 _SAFE_METRIC = re.compile(r"^[A-Za-z][A-Za-z0-9_:]{0,127}$")
 _FORBIDDEN_LABEL_WORDS = ("token", "bearer", "secret", "payload", "claim")
+_SETTLEMENT_TRANSITIONS = {
+    PhysicalIntentStatus.DISPATCHING: frozenset(
+        {
+            PhysicalIntentStatus.ACKNOWLEDGED,
+            PhysicalIntentStatus.CONFIRMED,
+            PhysicalIntentStatus.REJECTED,
+            PhysicalIntentStatus.UNKNOWN,
+        }
+    ),
+    PhysicalIntentStatus.ACKNOWLEDGED: frozenset(
+        {
+            PhysicalIntentStatus.CONFIRMED,
+            PhysicalIntentStatus.REJECTED,
+            PhysicalIntentStatus.UNKNOWN,
+        }
+    ),
+}
 
 
 class PhysicalIntentRepository:
@@ -23,98 +46,285 @@ class PhysicalIntentRepository:
         self.database = database
         self.clock = clock or SystemClock()
 
-    async def claim(self, intent: PhysicalIntent) -> PhysicalIntent:
+    async def claim_for_dispatch(self, intent: PhysicalIntent) -> PhysicalIntentClaim:
         connection = self.database.connection
-        payload = json.dumps(intent.model_dump(mode="json"), sort_keys=True)
-        connection.execute(
-            """INSERT INTO physical_intents
-               (household_id, idempotency_key, payload, status, fencing_epoch,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(household_id, idempotency_key) DO NOTHING""",
-            (
-                intent.household_id,
-                intent.idempotency_key,
-                payload,
-                intent.status.value,
-                intent.fencing_epoch,
-                intent.created_at.isoformat(),
-                intent.updated_at.isoformat(),
-            ),
+        # Preserve the public wrapper's pre-BEGIN validation boundary.
+        dispatching = PhysicalIntent.model_validate(
+            intent.model_dump(mode="python") | {"status": PhysicalIntentStatus.DISPATCHING}
         )
-        connection.commit()
-        return await self.get(
-            household_id=intent.household_id, idempotency_key=intent.idempotency_key
-        ) or intent
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            result = self.claim_for_dispatch_sync(connection, dispatching)
+            connection.commit()
+            return result
+        except BaseException:
+            connection.rollback()
+            raise
+
+    @classmethod
+    def claim_for_dispatch_sync(
+        cls, connection: Any, intent: PhysicalIntent
+    ) -> PhysicalIntentClaim:
+        """SQL-only claim; the caller owns connection, serialization and transaction closure."""
+        dispatching = PhysicalIntent.model_validate(
+            intent.model_dump(mode="python") | {"status": PhysicalIntentStatus.DISPATCHING}
+        )
+        payload = json.dumps(dispatching.model_dump(mode="json"), sort_keys=True)
+        row = connection.execute(
+            """SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch,
+                          created_at, updated_at FROM physical_intents
+                   WHERE household_id = ? AND idempotency_key = ?""",
+            (intent.household_id, intent.idempotency_key),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """INSERT INTO physical_intents
+                       (household_id, idempotency_key, payload, status, fencing_epoch,
+                        owner_id, execution_attempt_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    dispatching.household_id,
+                    dispatching.idempotency_key,
+                    payload,
+                    dispatching.status.value,
+                    dispatching.fencing_epoch,
+                    dispatching.owner_id,
+                    dispatching.execution_attempt_id,
+                    dispatching.created_at.isoformat(),
+                    dispatching.updated_at.isoformat(),
+                ),
+            )
+            return PhysicalIntentClaim(
+                decision=PhysicalIntentClaimDecision.ACQUIRED,
+                intent=dispatching,
+            )
+
+        stored = cls._read_consistent(
+            row, household_id=intent.household_id, idempotency_key=intent.idempotency_key
+        )
+        if not cls._same_logical_identity(stored, intent):
+            decision = PhysicalIntentClaimDecision.CONFLICT
+        elif stored.status in {
+            PhysicalIntentStatus.ACKNOWLEDGED,
+            PhysicalIntentStatus.CONFIRMED,
+            PhysicalIntentStatus.REJECTED,
+        }:
+            decision = PhysicalIntentClaimDecision.REPLAY
+        else:
+            decision = PhysicalIntentClaimDecision.IN_FLIGHT
+        return PhysicalIntentClaim(decision=decision, intent=stored)
+
+    @staticmethod
+    def _read_consistent(row: Any, *, household_id: str, idempotency_key: str) -> PhysicalIntent:
+        current = PhysicalIntent.model_validate(json.loads(row[0]))
+        if (
+            tuple(row[1:5])
+            != (
+                current.status.value,
+                current.owner_id,
+                current.execution_attempt_id,
+                current.fencing_epoch,
+            )
+            or datetime.fromisoformat(row[5]) != current.created_at
+            or datetime.fromisoformat(row[6]) != current.updated_at
+            or current.household_id != household_id
+            or current.idempotency_key != idempotency_key
+        ):
+            raise ValueError("physical intent projection is inconsistent with payload")
+        return current
+
+    @staticmethod
+    def _same_logical_identity(left: PhysicalIntent, right: PhysicalIntent) -> bool:
+        return (
+            left.tenant_id,
+            left.household_id,
+            left.deployment_id,
+            left.idempotency_key,
+            left.plan_id,
+            left.command_id,
+        ) == (
+            right.tenant_id,
+            right.household_id,
+            right.deployment_id,
+            right.idempotency_key,
+            right.plan_id,
+            right.command_id,
+        )
 
     async def get(self, *, household_id: str, idempotency_key: str) -> PhysicalIntent | None:
         row = self.database.connection.execute(
-            """SELECT payload FROM physical_intents
+            """SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch,
+                          created_at, updated_at FROM physical_intents
                WHERE household_id = ? AND idempotency_key = ?""",
             (household_id, idempotency_key),
         ).fetchone()
-        return PhysicalIntent.model_validate(json.loads(row[0])) if row is not None else None
+        return (
+            self._read_consistent(row, household_id=household_id, idempotency_key=idempotency_key)
+            if row is not None
+            else None
+        )
 
     async def settle(
         self,
         *,
-        household_id: str,
-        idempotency_key: str,
+        intent: PhysicalIntent,
         status: PhysicalIntentStatus,
     ) -> PhysicalIntent:
-        current = await self.get(household_id=household_id, idempotency_key=idempotency_key)
-        if current is None:
-            raise KeyError("physical intent not found")
-        if current.status not in {
-            PhysicalIntentStatus.PREPARED,
-            PhysicalIntentStatus.ACKNOWLEDGED,
-        }:
-            return current
-        updated = current.model_copy(update={"status": status, "updated_at": self.clock.now()})
-        self.database.connection.execute(
-            """UPDATE physical_intents SET payload = ?, status = ?, updated_at = ?
-               WHERE household_id = ? AND idempotency_key = ?
-                 AND status IN ('prepared', 'acknowledged')""",
-            (
-                json.dumps(updated.model_dump(mode="json"), sort_keys=True),
-                updated.status.value,
-                updated.updated_at.isoformat(),
-                household_id,
-                idempotency_key,
-            ),
-        )
-        self.database.connection.commit()
-        return await self.get(household_id=household_id, idempotency_key=idempotency_key) or updated
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            attempted_states: set[PhysicalIntentStatus] = set()
+            while True:
+                row = connection.execute(
+                    """SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch,
+                              created_at, updated_at
+                       FROM physical_intents
+                       WHERE household_id = ? AND idempotency_key = ?""",
+                    (intent.household_id, intent.idempotency_key),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("physical intent not found")
+                current = PhysicalIntent.model_validate(json.loads(row[0]))
+                if (
+                    tuple(row[1:5])
+                    != (
+                        current.status.value,
+                        current.owner_id,
+                        current.execution_attempt_id,
+                        current.fencing_epoch,
+                    )
+                    or datetime.fromisoformat(row[5]) != current.created_at
+                    or datetime.fromisoformat(row[6]) != current.updated_at
+                    or current.household_id != intent.household_id
+                    or current.idempotency_key != intent.idempotency_key
+                ):
+                    raise ValueError("physical intent projection is inconsistent with payload")
+                if (
+                    status not in _SETTLEMENT_TRANSITIONS.get(current.status, frozenset())
+                    or not self._same_logical_identity(current, intent)
+                    or current.owner_id != intent.owner_id
+                    or current.execution_attempt_id != intent.execution_attempt_id
+                    or current.fencing_epoch != intent.fencing_epoch
+                    or current.lease_id != intent.lease_id
+                ):
+                    connection.commit()
+                    return current
+                # A lost CAS can only retry after monotonic progress, bounding retries
+                # to DISPATCHING -> ACKNOWLEDGED before the next read is terminal.
+                if current.status in attempted_states:
+                    raise ValueError("physical intent changed without settlement progress")
+                attempted_states.add(current.status)
+                updated = current.model_copy(
+                    update={"status": status, "updated_at": self.clock.now()}
+                )
+                result = connection.execute(
+                    """UPDATE physical_intents SET payload = ?, status = ?, updated_at = ?
+                       WHERE household_id = ? AND idempotency_key = ?
+                         AND payload = ? AND status = ? AND owner_id = ?
+                         AND execution_attempt_id = ? AND fencing_epoch = ?
+                         AND created_at = ? AND updated_at = ?""",
+                    (
+                        json.dumps(updated.model_dump(mode="json"), sort_keys=True),
+                        updated.status.value,
+                        updated.updated_at.isoformat(),
+                        intent.household_id,
+                        intent.idempotency_key,
+                        *row,
+                    ),
+                )
+                if result.rowcount == 1:
+                    connection.commit()
+                    return updated
+        except BaseException:
+            connection.rollback()
+            raise
 
-    async def recover_inflight(self) -> int:
-        rows = self.database.connection.execute(
-            """SELECT household_id, idempotency_key, payload FROM physical_intents
-               WHERE status IN ('prepared', 'acknowledged')"""
-        ).fetchall()
-        recovered = 0
-        for household_id, idempotency_key, payload in rows:
-            intent = PhysicalIntent.model_validate(json.loads(payload)).model_copy(
-                update={"status": PhysicalIntentStatus.UNKNOWN, "updated_at": self.clock.now()}
+    async def recover_inflight(
+        self,
+        *,
+        deployment_id: str | None = None,
+        fencing_epoch: int | None = None,
+    ) -> int:
+        if fencing_epoch is not None and fencing_epoch <= 0:
+            raise ValueError("fencing_epoch must be positive")
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            clauses = ["status IN ('prepared', 'dispatching', 'acknowledged')"]
+            params: list[object] = []
+            valid_json = (
+                "payload IS JSON OBJECT"
+                if hasattr(connection, "pgconn") else "json_valid(payload)"
             )
-            self.database.connection.execute(
-                """UPDATE physical_intents SET payload = ?, status = 'unknown', updated_at = ?
-                   WHERE household_id = ? AND idempotency_key = ?
-                     AND status IN ('prepared', 'acknowledged')""",
-                (
-                    json.dumps(intent.model_dump(mode="json"), sort_keys=True),
-                    intent.updated_at.isoformat(),
+            deployment_filter = (
+                f"CASE WHEN {valid_json} THEN json_extract(payload, '$.deployment_id') "
+                "ELSE NULL END = ?"
+            )
+            if deployment_id is not None:
+                clauses.append(deployment_filter)
+                params.append(deployment_id)
+            if fencing_epoch is not None:
+                clauses.append("fencing_epoch < ?")
+                params.append(fencing_epoch)
+            rows = connection.execute(
+                """SELECT household_id, idempotency_key, payload, status, owner_id,
+                          execution_attempt_id, fencing_epoch, created_at, updated_at
+                   FROM physical_intents
+                   WHERE """
+                + " AND ".join(clauses),
+                params,
+            ).fetchall()
+            recovered = 0
+            for household_id, idempotency_key, *stored_row in rows:
+                try:
+                    current = self._read_consistent(
+                        stored_row, household_id=household_id, idempotency_key=idempotency_key
+                    )
+                except (ValueError, TypeError):
+                    # An incompatible row is evidence, not a recoverable dispatch.
+                    # Keep its original payload/projections and continue other work.
+                    continue
+                stored_epoch = current.fencing_epoch
+                intent = current.model_copy(
+                    update={"status": PhysicalIntentStatus.UNKNOWN, "updated_at": self.clock.now()}
+                )
+                update_clauses = [
+                    "household_id = ?",
+                    "idempotency_key = ?",
+                    "status IN ('prepared', 'dispatching', 'acknowledged')",
+                    "fencing_epoch = ?",
+                ]
+                update_params: list[object] = [
                     household_id,
                     idempotency_key,
-                ),
-            )
-            recovered += 1
-        self.database.connection.commit()
-        return recovered
+                    stored_epoch,
+                ]
+                if deployment_id is not None:
+                    update_clauses.append(deployment_filter)
+                    update_params.append(deployment_id)
+                if fencing_epoch is not None:
+                    update_clauses.append("fencing_epoch < ?")
+                    update_params.append(fencing_epoch)
+                result = connection.execute(
+                    """UPDATE physical_intents
+                       SET payload = ?, status = 'unknown', updated_at = ?
+                       WHERE """
+                    + " AND ".join(update_clauses),
+                    (
+                        json.dumps(intent.model_dump(mode="json"), sort_keys=True),
+                        intent.updated_at.isoformat(),
+                        *update_params,
+                    ),
+                )
+                recovered += int(result.rowcount == 1)
+            connection.commit()
+            return recovered
+        except BaseException:
+            connection.rollback()
+            raise
 
     async def count(self) -> int:
-        row = self.database.connection.execute(
-            "SELECT COUNT(*) FROM physical_intents"
-        ).fetchone()
+        row = self.database.connection.execute("SELECT COUNT(*) FROM physical_intents").fetchone()
         return int(row[0]) if row is not None else 0
 
 

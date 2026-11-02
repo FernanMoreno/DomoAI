@@ -1,0 +1,142 @@
+{
+  "$defs": {
+    "ComparisonAccounting": {
+      "additionalProperties": false,
+      "description": "Units and omissions for one identified variation minus baseline.",
+      "properties": {
+        "baseline_scenario_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Baseline Scenario Id",
+          "type": "string"
+        },
+        "baseline_definition_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Definition Digest"
+        },
+        "diff_units": {
+          "additionalProperties": {
+            "pattern": "^(kWh|kW|slot|1|[A-Z]{3})$",
+            "type": "string"
+          },
+          "maxProperties": 32,
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "title": "Diff Units",
+          "type": "object"
+        },
+        "omitted_objectives": {
+          "additionalProperties": {
+            "enum": [
+              "currency_mismatch",
+              "currency_unknown",
+              "unit_mismatch",
+              "unit_unknown",
+              "not_applicable",
+              "accounting_version_mismatch"
+            ],
+            "type": "string"
+          },
+          "maxProperties": 32,
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "title": "Omitted Objectives",
+          "type": "object"
+        }
+      },
+      "required": [
+        "baseline_scenario_id"
+      ],
+      "title": "ComparisonAccounting",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned accounting metadata inside existing result dictionaries.",
+  "properties": {
+    "version": {
+      "const": 1,
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "currency": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Currency"
+    },
+    "source_revision_digest": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Revision Digest"
+    },
+    "objective_units": {
+      "additionalProperties": {
+        "pattern": "^(kWh|kW|slot|1|[A-Z]{3})$",
+        "type": "string"
+      },
+      "maxProperties": 32,
+      "propertyNames": {
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "title": "Objective Units",
+      "type": "object"
+    },
+    "degradation_currency_source": {
+      "default": "not_configured",
+      "enum": [
+        "context_inherited",
+        "not_configured"
+      ],
+      "title": "Degradation Currency Source",
+      "type": "string"
+    },
+    "terminal_value_applied": {
+      "default": false,
+      "title": "Terminal Value Applied",
+      "type": "boolean"
+    },
+    "comparison": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ComparisonAccounting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "title": "AccountingEvidence",
+  "type": "object"
+}

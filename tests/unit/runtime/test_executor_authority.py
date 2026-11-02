@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -103,14 +104,19 @@ async def _build_plan_executor(
         )
     )
     await plan_repository.save_validation(plan)
-    return PlanExecutor(
-        adapter,
-        plan_service,
+    return (
+        PlanExecutor(
+            adapter,
+            plan_service,
+            audit,
+            plan_repository=plan_repository,
+            control_takeover=controller,
+            operational_metrics=operational_metrics,
+        ),
+        plan,
+        plan_repository,
         audit,
-        plan_repository=plan_repository,
-        control_takeover=controller,
-        operational_metrics=operational_metrics,
-    ), plan, plan_repository, audit
+    )
 
 
 @pytest.mark.asyncio
@@ -157,3 +163,60 @@ async def test_unconfirmed_release_marks_successful_physical_attempt_unknown(tmp
     assert any(event.event_type == "unknown_authority" for event in audit.events)
     assert metrics.snapshot()["leases"]["release_failed_total"] == 1
     assert metrics.snapshot()["leases"]["unknown_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_takeover_does_not_acquire_physical_control(tmp_path, monkeypatch):
+    class RecordingController(_LeaseController):
+        acquire_calls = 0
+
+        async def acquire_for_plan(self, *, plan_id, commands):
+            self.acquire_calls += 1
+            return await super().acquire_for_plan(plan_id=plan_id, commands=commands)
+
+    controller = RecordingController()
+    adapter = SimulatedHomeAdapter()
+    executor, plan, repository, _ = await _build_plan_executor(tmp_path, adapter, controller)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_claim = repository.claim_for_execution
+
+    async def held_claim(plan, *, allowed_statuses):
+        result = await original_claim(plan, allowed_statuses=allowed_statuses)
+        entered.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(repository, "claim_for_execution", held_claim)
+    task = asyncio.create_task(executor.execute(plan))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert controller.acquire_calls == 0
+    assert controller.release_calls == 0
+    assert adapter.calls == []
+    assert (await repository.get(plan.id)).status.value == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_fenced_claim_cannot_promote_protected_legacy_definition(tmp_path) -> None:
+    from domoai.application.coordination import DeterministicLeaseCoordinator, FencingGuard
+    from domoai.domain.coordination import LeaseScope
+    from domoai.domain.errors import DomainError
+
+    executor, plan, repository, _ = await _build_plan_executor(
+        tmp_path, SimulatedHomeAdapter(), _LeaseController()
+    )
+    coordinator = DeterministicLeaseCoordinator()
+    token = await coordinator.acquire(
+        LeaseScope(tenant_id="default", household_id="default", deployment_id="deployment"),
+        owner_id="owner",
+        ttl_seconds=60,
+    )
+    executor.fencing_guard = FencingGuard(coordinator, token)
+    with pytest.raises(DomainError, match="revalidation"):
+        await executor.execute(plan)
+    assert (await repository.get(plan.id)).schema_version == "v1"
+    assert executor.adapter.calls == []

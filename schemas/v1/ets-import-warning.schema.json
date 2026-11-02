@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "message": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "address": {
+      "anyOf": [
+        {
+          "maxLength": 16,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Address"
+    }
+  },
+  "required": [
+    "code",
+    "message"
+  ],
+  "title": "EtsImportWarning",
+  "type": "object"
+}

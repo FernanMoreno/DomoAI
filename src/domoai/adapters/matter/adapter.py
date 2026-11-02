@@ -45,10 +45,14 @@ class MatterServerAdapter:
         self,
         transport: MatterTransport,
         *,
+        adapter_id: str = "matter",
         discovery_timeout: float = 5.0,
         clock: Clock | None = None,
     ) -> None:
         self.transport = transport
+        if not adapter_id or len(adapter_id) > 64:
+            raise ValueError("Matter adapter_id must be a non-empty bounded value")
+        self.adapter_id = adapter_id
         self.discovery_timeout = discovery_timeout
         self._clock = clock or SystemClock()
         self.mapper = MatterMapper()

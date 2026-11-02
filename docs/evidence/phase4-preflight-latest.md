@@ -2,10 +2,10 @@
 
 - Status: `blocked_external_dependency`
 - Environment: `local_preflight`
-- Run: `phase4-preflight-187-20260906T011853Z`
+- Run: `phase4-preflight-187-20260908T221918Z`
 - Seed: `187`
-- Started: `2026-09-06T01:18:53.548600+00:00`
-- Completed: `2026-09-06T01:19:15.214381+00:00`
+- Started: `2026-09-08T22:19:18.017195+00:00`
+- Completed: `2026-09-08T22:19:47.223620+00:00`
 
 ## Software gates
 

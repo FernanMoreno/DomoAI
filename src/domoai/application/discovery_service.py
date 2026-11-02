@@ -363,9 +363,19 @@ class DiscoveryService:
             device_id = self.registry.canonical_id_for_source(source_adapter_id, external_id)
             if device_id is None:
                 continue
-            status = (
-                StateStatus.CURRENT if raw_state.get("available", True) else StateStatus.UNAVAILABLE
-            )
+            raw_status = raw_state.get("status")
+            try:
+                status = (
+                    StateStatus(str(raw_status))
+                    if raw_status is not None
+                    else (
+                        StateStatus.CURRENT
+                        if raw_state.get("available", True)
+                        else StateStatus.UNAVAILABLE
+                    )
+                )
+            except ValueError:
+                status = StateStatus.INVALID
             observed_at = _source_timestamp(raw_state.get("observed_at"), received_at)
             source_received_at = _source_timestamp(raw_state.get("received_at"), received_at)
             effective_received_at = max(source_received_at, observed_at)

@@ -181,10 +181,13 @@ def test_lab_compose_references_only_local_secret_free_profiles() -> None:
         "matter-server:",
     ):
         assert service in compose
-    assert "allow_anonymous true" in (LAB / "mqtt" / "mosquitto.conf").read_text(encoding="utf-8")
+    mqtt_config = (LAB / "mqtt" / "mosquitto.conf").read_text(encoding="utf-8")
+    assert "allow_anonymous false" in mqtt_config
+    assert "password_file /mosquitto/auth/passwd" in mqtt_config
     assert "<secret>" not in compose
     assert "<token>" not in compose
-    assert "\nDOMOAI_MQTT_PASSWORD=" not in example
+    assert "DOMOAI_MQTT_USERNAME=" in example
+    assert "DOMOAI_MQTT_PASSWORD=" in example
 
 
 def test_experimental_knx_docker_gateway_cannot_autostart_alongside_wsl_gateway() -> None:

@@ -1,0 +1,22 @@
+{
+  "origin": "accepted schema253 freeze3; unchanged cesion P01 snapshot",
+  "scope": "three exact reader modules, not a complete historical binary",
+  "files": {
+    "sqlite.py.txt": {
+      "source": "src/domoai/persistence/sqlite.py",
+      "sha256": "58e82387eb50ed356e8271d604cad043dad96e623eeee51d7172680878110280",
+      "previously_absent": true
+    },
+    "postgres.py.txt": {
+      "source": "src/domoai/persistence/postgres.py",
+      "sha256": "ca451aac54681de5f5c2cdea116c3b72e74c99eb0500b500387bcd60954480ce",
+      "previously_absent": true
+    },
+    "contract_compatibility.py.txt": {
+      "source": "src/domoai/persistence/contract_compatibility.py",
+      "sha256": "bc33a6690b411b34a8eb78f38f9160fcd278aedc9a86e42bcb4c74ccd71d05b4",
+      "previously_absent": true
+    }
+  },
+  "accepted_freeze": "schema253 freeze3 2026-09-11; three module hashes matched final accepted manifest"
+}

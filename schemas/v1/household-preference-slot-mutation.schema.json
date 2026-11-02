@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "PreferenceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "title": "Generation",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision"
+      ],
+      "title": "PreferenceVersion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "expected_version": {
+      "$ref": "#/$defs/PreferenceVersion"
+    },
+    "idempotency_key": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "preference_id": {
+      "format": "uuid",
+      "title": "Preference Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "expected_version",
+    "idempotency_key",
+    "preference_id"
+  ],
+  "title": "PreferenceSlotMutation",
+  "type": "object"
+}

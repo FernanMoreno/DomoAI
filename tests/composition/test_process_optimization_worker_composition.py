@@ -279,3 +279,107 @@ async def test_pool_serves_a_second_call_after_a_timeout_kill() -> None:
         assert normal.solver == "fast"
     finally:
         worker.close()
+
+
+def _versioned_result_solve(scenario: OptimizationScenario) -> OptimizationResult:
+    from tests.fixtures.runtime_schema_compatibility import plan
+
+    current = plan(deployment_id="worker-deployment")
+    result = OptimizationResult(
+        scenario_id=scenario.id,
+        status="feasible",
+        solver="fixture",
+        plan=current,
+        plans=[plan(), current],
+    )
+    if scenario.id == "mutated-contract":
+        return result.model_copy(update={"schema_version": "v1"})
+    return result
+
+
+@pytest.mark.composition
+@pytest.mark.asyncio
+async def test_spawned_worker_preserves_mixed_versions_and_rejects_mutated_contract() -> None:
+    worker = ProcessOptimizationWorker(
+        DeviceRegistry(), WorkerBudget(max_solver_time_seconds=10), solve_fn=_versioned_result_solve
+    )
+    try:
+        result = await worker.optimize(
+            OptimizationScenario(id="valid-contract", horizon=_horizon())
+        )
+        assert result.schema_version == "v2"
+        assert result.plan.schema_version == "v2"
+        assert [plan.schema_version for plan in result.plans] == ["v1", "v2"]
+        invalid = await worker.optimize(
+            OptimizationScenario(id="mutated-contract", horizon=_horizon())
+        )
+        assert invalid.status == OptimizationStatus.UNKNOWN
+        assert invalid.diagnostics[0].code == "worker_invalid_result"
+    finally:
+        worker.close()
+
+
+@pytest.mark.asyncio
+async def test_a12_accounting_survives_actual_process_pickle_and_independent_json():
+    import hashlib
+
+    from domoai.mcp.ortools_server import explain_result
+    from domoai.optimizer.energy import (
+        BaseLoadPoint,
+        EnergyContext,
+        SolarForecastPoint,
+        TariffPoint,
+    )
+    from domoai.optimizer.product import build_product_summary
+
+    horizon = _horizon()
+    context = EnergyContext(
+        horizon=horizon,
+        tariffs=[TariffPoint(slot=0, price_per_kwh=0.2, currency="USD")],
+        solar_forecast=[SolarForecastPoint(slot=0, power=0)],
+        base_load_forecast=[BaseLoadPoint(slot=0, power=1.0)],
+        source_revision="rev-é-" + "x" * 400,
+        observed_at=horizon.start,
+    )
+    scenario = OptimizationScenario(id="a12-process", horizon=horizon, energy_context=context)
+    worker = ProcessOptimizationWorker(DeviceRegistry(), WorkerBudget(max_solver_time_seconds=10.0))
+    try:
+        result = await worker.optimize(scenario)
+        assert result.status is OptimizationStatus.NO_ACTION_REQUIRED
+        assert result.objective_values["energy_cost"] == pytest.approx(0.05)
+        block = result.constraint_summary["accounting"]
+        assert (
+            block["source_revision_digest"]
+            == hashlib.sha256(context.source_revision.encode("utf-8")).hexdigest()
+        )
+        restored = OptimizationResult.model_validate_json(result.model_dump_json())
+        assert restored.constraint_summary["accounting"] == block
+        assert explain_result(restored).constraint_summary["accounting"] == block
+        assert build_product_summary(restored).constraint_summary["accounting"] == block
+        assert "currency" not in context.model_dump()
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("value", [0.0, 0.2])
+async def test_a12_terminal_currency_rejection_does_not_spawn(value):
+    from tests.fixtures.energy import energy_context_for
+
+    context = energy_context_for()
+    for point in [*context.tariffs, *(context.export_tariffs or [])]:
+        point.currency = "USD"
+    scenario = OptimizationScenario(
+        id="a12-terminal-reject",
+        horizon=context.horizon,
+        energy_context=context,
+        terminal_soc_policy={"value_eur_per_kwh": value},
+    )
+    worker = ProcessOptimizationWorker(DeviceRegistry(), WorkerBudget(max_solver_time_seconds=10))
+    try:
+        before = set(multiprocessing.active_children())
+        result = await worker.optimize(scenario)
+        assert result.status is OptimizationStatus.INVALID
+        assert "terminal_soc_currency_mismatch" in {error.code for error in result.diagnostics}
+        assert set(multiprocessing.active_children()) == before
+    finally:
+        worker.close()

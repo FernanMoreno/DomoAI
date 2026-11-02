@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "description": "Read Device Identification result with no raw credential-bearing data.",
+  "properties": {
+    "host_ref": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Host Ref",
+      "type": "string"
+    },
+    "unit_id": {
+      "maximum": 247,
+      "minimum": 1,
+      "title": "Unit Id",
+      "type": "integer"
+    },
+    "vendor_name": {
+      "default": "",
+      "maxLength": 128,
+      "title": "Vendor Name",
+      "type": "string"
+    },
+    "product_code": {
+      "default": "",
+      "maxLength": 128,
+      "title": "Product Code",
+      "type": "string"
+    },
+    "revision": {
+      "default": "",
+      "maxLength": 128,
+      "title": "Revision",
+      "type": "string"
+    },
+    "read_device_id_code": {
+      "anyOf": [
+        {
+          "maximum": 4,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Read Device Id Code"
+    },
+    "complete": {
+      "default": false,
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "host_ref",
+    "unit_id"
+  ],
+  "title": "ModbusDeviceIdentity",
+  "type": "object"
+}

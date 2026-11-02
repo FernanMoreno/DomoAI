@@ -78,8 +78,15 @@ def test_preflight_accepts_a_trusted_tls_directive() -> None:
     root = Path(__file__).parents[2]
     caddy = (root / "deploy/reverse-proxy/Caddyfile").read_text(encoding="utf-8")
 
-    assert _validate_proxy(
-        caddy.replace("tls internal", "tls /etc/caddy/cert.pem /etc/caddy/key.pem"),
+    assert _validate_proxy(caddy, {"DOMOAI_CADDY_HOSTNAME": "mcp.example.test"})
+
+
+def test_preflight_rejects_the_lab_internal_ca_configuration() -> None:
+    root = Path(__file__).parents[2]
+    caddy = (root / "deploy/reverse-proxy/Caddyfile.internal").read_text(encoding="utf-8")
+
+    assert not _validate_proxy(
+        caddy,
         {"DOMOAI_CADDY_HOSTNAME": "mcp.example.test"},
     )
 

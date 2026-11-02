@@ -1,0 +1,10 @@
+{
+  "src/domoai/application/optimization_worker.py": "f4b5fcd6424b77fe46851df14b9392beade3974299bd2390c8a4f4e8fd952db7",
+  "src/domoai/application/process_optimization_worker.py": "8472642f8d8dbee771379b41dd14515a4a4b54ddaf619008196b8a9c65626176",
+  "src/domoai/persistence/backup.py": "7d5de699028ee1001eb1bd84d7ccb2aed9d8f84f8026f14af3d3d0b95c13318d",
+  "src/domoai/admin/cli.py": "7f03846526cb7f454ea79230656b8ade3204a2a8ac8c4a649d0d4daee0a57fdb",
+  "src/domoai/domain/privacy.py": "000494308cddab40aa25a45866b89bfecc459a9cea96c77b2e01e1ed2e7ab8b6",
+  "src/domoai/application/privacy.py": "42f5d2dd3b7856da69115e0b3fbe178bdc1b9d2c230478b476cc226db3fffc94",
+  "src/domoai/config/settings.py": "b131f3cd4e44cf8033e83ce2c1d540c803244ba6900c7e70bb1896b672a27247",
+  "src/domoai/mcp/gateway.py": "e93830b6f2eff74d0a3d03b17a939c7d49b6bacfa26e29fd839811a1ea116e16"
+}

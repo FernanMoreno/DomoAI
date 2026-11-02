@@ -141,7 +141,12 @@ class ThermalLabServer:
 
         host = os.getenv("MQTT_HOST", "mqtt")
         port = int(os.getenv("MQTT_PORT", "1883"))
+        username = os.getenv("MQTT_USERNAME", "").strip()
+        password = os.getenv("MQTT_PASSWORD")
+        if not username or password is None or not password.strip():
+            raise RuntimeError("MQTT_USERNAME and MQTT_PASSWORD are required")
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="domoai-lab-thermal")
+        client.username_pw_set(username, password)
 
         def on_message(_client: Any, _userdata: Any, message: Any) -> None:
             raw = message.payload.decode("utf-8")

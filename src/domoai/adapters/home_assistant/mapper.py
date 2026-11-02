@@ -113,7 +113,12 @@ class HomeAssistantMapper:
     def _capabilities(self, entity: dict[str, Any]) -> list[Capability]:
         domain = entity["domain"]
         attributes = entity.get("attributes", {})
-        supported = set(entity.get("supported_features", []))
+        supported_features = entity.get("supported_features", [])
+        supported = (
+            {str(item) for item in supported_features}
+            if isinstance(supported_features, (list, tuple, set))
+            else set()
+        )
         if domain == "light":
             capabilities: list[Capability] = []
             if "power" in entity.get("state", {}):
@@ -201,6 +206,7 @@ class HomeAssistantMapper:
         self, entity: dict[str, Any], capabilities: list[Capability]
     ) -> list[dict[str, Any]]:
         state = entity.get("state", {})
+        statuses = entity.get("state_status", {})
         return [
             {
                 "entity_id": entity["entity_id"],
@@ -208,6 +214,11 @@ class HomeAssistantMapper:
                 "value": state.get(capability.name),
                 "unit": capability.unit,
                 "available": entity.get("available", True),
+                "status": (
+                    statuses.get(capability.name)
+                    if isinstance(statuses, dict) and statuses.get(capability.name) is not None
+                    else ("current" if entity.get("available", True) else "unavailable")
+                ),
                 "observed_at": entity.get("last_updated") or entity.get("last_changed"),
                 "received_at": entity.get("received_at"),
             }

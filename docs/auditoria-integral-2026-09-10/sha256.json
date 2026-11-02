@@ -1,0 +1,11 @@
+{
+  "README.md": "800b0451a138dee69e54cf03c771689fa254517154e6a67e9c97c1ed948b1abd",
+  "junit-docker-composition.xml": "9da991ceda72fccfbd863e65588c708e7af11c672950c022953f11680eaffd18",
+  "reproducciones/cancelacion.py": "f462913292fb27a71ffab3ae19ac7bd0c4ba2780e64e5f2d90745ad89384a530",
+  "reproducciones/ejecucion.py": "08d7203f55e0d8e4507e6c13b3c1aeefa186f81a079771a33e38c93cc1d4d109",
+  "reproducciones/energia.py": "16bbc8c4a6fa89ab208431e11d2f9190ab2cd4ff0257f57e44aa46b24f644615",
+  "reproducciones/readiness.py": "2660ab3bc63ace4eca4a75d8a7476d480c61940f657c15fe299fbe80631abd0a",
+  "reproducciones/superficie.py": "d9a4621e1e51311294faf0fd08d1b70460f8e01b7c383b5a18065120824c3ea4",
+  "reproducciones-resultados.txt": "023750d58e22fe6d9ef696492820eee008a7ceef22ae09c1ab37751b01bcd360",
+  "verificacion.md": "9e91bec4bc319d4ed968f4f2ac3cdbe704575392878137789f03eec15b06fcf5"
+}

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Sequence
 from typing import cast
 
-from domoai.adapters.mqtt.codec import decode_json_value, validate_scalar_value
+from domoai.adapters.mqtt.codec import decode_mqtt_value, encode_mqtt_value, validate_scalar_value
 from domoai.adapters.mqtt.config import MqttAdapterMapping
 from domoai.adapters.mqtt.mapper import MqttMapper
 from domoai.domain.models import (
@@ -113,14 +112,19 @@ class GenericMqttAdapter:
                 if command.command in commands and capability.command_topic is not None:
                     if command.unit is not None and command.unit != capability.unit:
                         raise ValueError("MQTT command unit does not match mapping")
-                    validate_scalar_value(
+                    validated_value = validate_scalar_value(
                         command.value,
                         kind=capability.kind,
                         minimum=capability.minimum,
                         maximum=capability.maximum,
                         enum_values=capability.enum_values,
                     )
-                    payload = json.dumps(command.value, separators=(",", ":")).encode("utf-8")
+                    payload = encode_mqtt_value(
+                        validated_value,
+                        kind=capability.kind,
+                        payload_on=capability.payload_on,
+                        payload_off=capability.payload_off,
+                    )
                     await self.transport.publish(
                         capability.command_topic, payload, execution_context=execution_context
                     )
@@ -179,12 +183,14 @@ class GenericMqttAdapter:
                 ):
                     continue
                 try:
-                    value = decode_json_value(
+                    value = decode_mqtt_value(
                         message.payload,
                         kind=capability.kind,
                         minimum=capability.minimum,
                         maximum=capability.maximum,
                         enum_values=capability.enum_values,
+                        payload_on=capability.payload_on,
+                        payload_off=capability.payload_off,
                     )
                 except ValueError:
                     return None

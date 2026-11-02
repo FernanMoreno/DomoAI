@@ -248,7 +248,9 @@ def _validate_proxy(caddy: str, values: dict[str, str]) -> bool:
     )
     if any(item not in caddy for item in required):
         return False
-    if not re.search(r"(?m)^\s*tls(?:\s|$)", caddy):
+    if "tls internal" in caddy:
+        return False
+    if not re.search(r"(?m)^\s*tls\s+\S+\s+\S+\s*$", caddy):
         return False
     if caddy.count("reverse_proxy gateway:8124") != 2:
         return False

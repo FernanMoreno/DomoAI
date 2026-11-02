@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
 from domoai.application.discovery_service import DiscoveryService
@@ -13,6 +14,7 @@ from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
 from domoai.application.state_service import StateService
 from domoai.domain.automation import (
+    AutomationEvent,
     AutomationRule,
     AutomationTrigger,
     automation_rule_digest,
@@ -137,3 +139,17 @@ async def test_create_and_list_local_rule_require_standing_approval(tmp_path) ->
         event.event_type == "automation_rule_updated"
         for event in audit.events
     )
+
+
+def test_time_event_contract_requires_an_explicit_rule_target() -> None:
+    occurred_at = datetime(2026, 9, 4, 12, tzinfo=UTC)
+    event = AutomationEvent(
+        event_id="caller-id",
+        event_type="time",
+        target_rule_id="rule-clock",
+        occurred_at=occurred_at,
+    )
+
+    assert event.target_rule_id == "rule-clock"
+    with pytest.raises(ValidationError, match="target_rule_id"):
+        AutomationEvent(event_id="caller-id", event_type="time", occurred_at=occurred_at)

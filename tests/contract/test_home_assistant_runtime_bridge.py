@@ -9,6 +9,7 @@ from domoai.adapters.home_assistant.provider import HomeAssistantProvider
 from domoai.adapters.home_assistant.provider_adapter import HomeAssistantProviderAdapter
 from domoai.domain.energy import EVActuator, EVChargingBinding
 from domoai.domain.models import (
+    AdapterDiagnosticEvent,
     AdapterSnapshot,
     Command,
     ControlLeaseStatus,
@@ -50,6 +51,133 @@ async def test_bridge_preserves_entity_routes_and_projects_provider_snapshot() -
         ("brightness", 0),
     ]
     assert all(state.status is StateStatus.CURRENT for state in states)
+
+
+@pytest.mark.asyncio
+async def test_bridge_preserves_per_capability_invalid_and_unavailable_status() -> None:
+    bridge = HomeAssistantProviderAdapter(
+        HomeAssistantProvider(
+            FakeHomeAssistantProviderClient(
+                [
+                    {
+                        "entity_id": "light.partial",
+                        "state": "off",
+                        "supported_features": ["brightness"],
+                        "attributes": {"brightness": None},
+                        "device_id": "ha-partial",
+                    },
+                    {
+                        "entity_id": "light.invalid",
+                        "state": "on",
+                        "supported_features": ["brightness"],
+                        "attributes": {"brightness": True},
+                        "device_id": "ha-invalid",
+                    },
+                ]
+            )
+        )
+    )
+    await bridge.connect()
+    await bridge.discover()
+
+    states = await bridge.read_state(
+        [
+            SourceRef(adapter_id="home_assistant", external_id="light.partial"),
+            SourceRef(adapter_id="home_assistant", external_id="light.invalid"),
+        ]
+    )
+
+    by_source_capability = {
+        (state.source_ref.external_id, state.capability): state for state in states
+    }
+    assert by_source_capability[("light.partial", "power")].value is False
+    assert by_source_capability[("light.partial", "brightness")].status is StateStatus.UNAVAILABLE
+    assert by_source_capability[("light.partial", "brightness")].value is None
+    assert by_source_capability[("light.invalid", "brightness")].status is StateStatus.INVALID
+    assert by_source_capability[("light.invalid", "brightness")].value is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_event_embeds_normalized_invalid_then_valid_state() -> None:
+    client = FakeHomeAssistantProviderClient(
+        [
+            {
+                "entity_id": "light.event",
+                "state": "off",
+                "supported_features": ["brightness"],
+                "attributes": {},
+                "device_id": "ha-event",
+            }
+        ],
+        events=[
+            {
+                "event": {
+                    "data": {
+                        "entity_id": "light.event",
+                        "new_state": {"state": "on", "attributes": {"brightness": True}},
+                    }
+                }
+            },
+            {
+                "event": {
+                    "data": {
+                        "entity_id": "light.event",
+                        "new_state": {"state": "on", "attributes": {"brightness": 128}},
+                    }
+                }
+            },
+        ],
+    )
+    bridge = HomeAssistantProviderAdapter(HomeAssistantProvider(client))
+    await bridge.connect()
+    await bridge.discover()
+
+    events = [event async for event in bridge.subscribe_events()]
+
+    state_events = [event for event in events if event.kind == "state_changed"]
+    assert len(state_events) == 2
+    first = state_events[0].payload["states"]
+    assert any(item["status"] == "invalid" and item["value"] is None for item in first)
+    assert all(item["source_ref"]["adapter_id"] == "home_assistant" for item in first)
+    assert any(isinstance(event, AdapterDiagnosticEvent) for event in events)
+    assert any(
+        item["status"] == "current" and item["value"] == 50
+        for item in state_events[1].payload["states"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bridge_event_recovers_unavailable_brightness_on_valid_update() -> None:
+    client = FakeHomeAssistantProviderClient(
+        [
+            {
+                "entity_id": "light.recovery",
+                "state": "unavailable",
+                "supported_features": ["brightness"],
+                "attributes": {"brightness": 10},
+            }
+        ],
+        events=[
+            {
+                "event": {
+                    "data": {
+                        "entity_id": "light.recovery",
+                        "new_state": {"state": "on", "attributes": {"brightness": 128}},
+                    }
+                }
+            }
+        ],
+    )
+    bridge = HomeAssistantProviderAdapter(HomeAssistantProvider(client))
+    await bridge.connect()
+    initial = await bridge.read_state(
+        [SourceRef(adapter_id="home_assistant", external_id="light.recovery")]
+    )
+    assert all(state.status is StateStatus.UNAVAILABLE and state.value is None for state in initial)
+    event = await anext(bridge.subscribe_events())
+    assert any(
+        item["status"] == "current" and item["value"] == 50 for item in event.payload["states"]
+    )
 
 
 @pytest.mark.asyncio
@@ -290,9 +418,7 @@ async def test_bridge_projects_bound_ev_to_canonical_device_and_service() -> Non
     await bridge.connect()
     snapshot = await bridge.discover()
     command_entity = next(
-        entity
-        for entity in snapshot.source_entities
-        if entity["entity_id"] == "number.ev_command"
+        entity for entity in snapshot.source_entities if entity["entity_id"] == "number.ev_command"
     )
     assert command_entity["canonical_id"] == "lab.ev_charger"
     assert any(
@@ -359,9 +485,7 @@ async def test_bridge_rejects_bound_ev_before_exposing_an_unavailable_route() ->
     provider, _client = _ev_provider(
         _ev_states(**{"binary_sensor.ev_connected": {"available": False}})
     )
-    bridge = HomeAssistantProviderAdapter(
-        provider, ev_charging_bindings=(_runtime_ev_binding(),)
-    )
+    bridge = HomeAssistantProviderAdapter(provider, ev_charging_bindings=(_runtime_ev_binding(),))
 
     await bridge.connect()
     with pytest.raises(HomeAssistantMappingConfigurationError, match="connected"):

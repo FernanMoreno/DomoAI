@@ -20,6 +20,7 @@ def test_gateway_deployment_is_available_outside_the_lab_tree() -> None:
         "deploy/wsl/run-gateway.sh",
         "deploy/windows/run-gateway.ps1",
         "deploy/reverse-proxy/Caddyfile",
+        "deploy/reverse-proxy/Caddyfile.internal",
         ".dockerignore",
         "docs/unified-mcp.md",
     }
@@ -58,8 +59,8 @@ def test_default_compose_has_one_edge_and_no_gateway_host_bypass() -> None:
 
     assert proxy["image"].startswith("caddy:")
     assert proxy["ports"] == [
-        "${DOMOAI_PROXY_HTTP_BIND:-0.0.0.0}:80:80",
-        "${DOMOAI_PROXY_HTTPS_BIND:-0.0.0.0}:443:443",
+        "${DOMOAI_PROXY_HTTP_BIND:-127.0.0.1}:80:80",
+        "${DOMOAI_PROXY_HTTPS_BIND:-127.0.0.1}:443:443",
     ]
     assert gateway.get("ports") is None
     assert gateway["expose"] == ["8124"]
@@ -78,7 +79,8 @@ def test_caddy_route_contract_is_allowlisted() -> None:
 
     assert "{$DOMOAI_CADDY_HOSTNAME}" in caddyfile
     assert "${DOMOAI_CADDY_HOSTNAME}" not in caddyfile
-    assert "tls internal" in caddyfile
+    assert "tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem" in caddyfile
+    assert "tls internal" not in caddyfile
     assert "path /mcp /mcp/*" in caddyfile
     assert "path /healthz /readyz" in caddyfile
     assert caddyfile.count("reverse_proxy gateway:8124") == 2

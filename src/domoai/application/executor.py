@@ -7,15 +7,19 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from functools import partial
 from uuid import uuid4
 
 from domoai.application.coordination import FencingGuard
 from domoai.application.dynamic_safety import DynamicSafetyGuard
 from domoai.application.execution_admission import ExecutionAdmission
-from domoai.application.household_queue import HouseholdWorkQueues
+from domoai.application.household_queue import HouseholdWorkQueues, QueueClosed
 from domoai.application.plan_service import PlanService
-from domoai.domain.coordination import FencingViolation, PhysicalIntent, PhysicalIntentStatus
+from domoai.domain.coordination import (
+    FencingViolation,
+    PhysicalIntent,
+    PhysicalIntentClaimDecision,
+    PhysicalIntentStatus,
+)
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import (
     AdapterExecutionAck,
@@ -27,6 +31,7 @@ from domoai.domain.models import (
     ExecutionStatus,
     ExecutionSummary,
     Plan,
+    PlanExecutionLease,
     PlanStatus,
     PolicyDecision,
     Precondition,
@@ -73,6 +78,11 @@ class _ExecutionAttempt:
     """Track whether this invocation, rather than a concurrent peer, claimed the plan."""
 
     claimed: bool = False
+    execution_lease: PlanExecutionLease | None = None
+    cancel_requested: bool = False
+    dispatching: bool = False
+    sent_any: bool = False
+    pending: asyncio.Task[AdapterExecutionAck] | None = None
 
 
 class _ReadbackPersistenceError(Exception):
@@ -85,6 +95,10 @@ class _ControlLeaseExpired(Exception):
 
 class _PhysicalIntentUnknown(Exception):
     """A previous host left a physical intent uncertain."""
+
+
+class _PhysicalIntentConflict(Exception):
+    """An idempotency key is already bound to another logical command."""
 
 
 class PlanExecutor:
@@ -127,6 +141,8 @@ class PlanExecutor:
         self.fencing_guard = fencing_guard or getattr(execution_admission, "fencing_guard", None)
         self.physical_intent_repository = physical_intent_repository
         self.household_work_queues = household_work_queues
+        self._active_executions: dict[asyncio.Task[ExecutionSummary], _ExecutionAttempt] = {}
+        self._closed = False
 
     _NON_CLAIMABLE_STATUSES = {
         PlanStatus.EXECUTING,
@@ -148,7 +164,69 @@ class PlanExecutor:
     ) -> ExecutionSummary:
         """Execute a plan and close any acquired physical authority on failure."""
 
+        if self._closed:
+            raise QueueClosed("executor is shutting down")
         attempt = _ExecutionAttempt()
+        task = asyncio.create_task(
+            self._execute_owned(
+                plan,
+                state_version_overrides=state_version_overrides,
+                aggregate_capability=aggregate_capability,
+                attempt=attempt,
+            )
+        )
+        self._active_executions[task] = attempt
+        try:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                self._request_cancellation(attempt)
+                # The runtime owns reconciliation even after repeated caller cancellation.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                if not task.cancelled():
+                    task.exception()
+                raise
+        finally:
+            self._active_executions.pop(task, None)
+
+    @staticmethod
+    def _request_cancellation(attempt: _ExecutionAttempt) -> None:
+        attempt.cancel_requested = True
+        if not attempt.dispatching and attempt.pending is not None:
+            attempt.pending.cancel()
+
+    async def close(self) -> None:
+        """Stop pending sends and drain reconciliation before dependencies close."""
+        self._closed = True
+        active = tuple(self._active_executions.items())
+        for _, attempt in active:
+            self._request_cancellation(attempt)
+        if active:
+            drain = asyncio.gather(*(task for task, _ in active), return_exceptions=True)
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                while not drain.done():
+                    try:
+                        await asyncio.shield(drain)
+                    except asyncio.CancelledError:
+                        continue
+                raise
+
+    async def _execute_owned(
+        self,
+        plan: Plan,
+        *,
+        state_version_overrides: dict[str, int] | None,
+        aggregate_capability: AggregateExecutionCapability | None,
+        attempt: _ExecutionAttempt,
+    ) -> ExecutionSummary:
         try:
             return await self._execute_impl(
                 plan,
@@ -157,10 +235,10 @@ class PlanExecutor:
                 attempt=attempt,
             )
         except BaseException:
-            # A concurrent caller that lost the durable claim must not mark
-            # the winner's executing plan UNKNOWN or release its authority.
             if attempt.claimed:
-                await self._mark_unknown_after_exception(plan.id)
+                await self._mark_unknown_after_exception(
+                    plan.id, expected_execution_lease=attempt.execution_lease
+                )
                 await self._release_after_exception(plan.id)
             raise
 
@@ -172,8 +250,10 @@ class PlanExecutor:
         aggregate_capability: AggregateExecutionCapability | None = None,
         attempt: _ExecutionAttempt | None = None,
     ) -> ExecutionSummary:
+        assert attempt is not None
+        admission = None
         if self.execution_admission is not None:
-            await self.execution_admission.admit(
+            admission = await self.execution_admission.admit(
                 plan,
                 aggregate_capability=aggregate_capability,
             )
@@ -189,12 +269,38 @@ class PlanExecutor:
                     ErrorCode.INVALID_TRANSITION,
                     "Plan is already executing or has reached a terminal status",
                 )
-        self.plan_service.assert_executable(
-            plan, state_version_overrides=state_version_overrides
-        )
+        self.plan_service.assert_executable(plan, state_version_overrides=state_version_overrides)
+        execution_lease = None
+        if self.fencing_guard is not None:
+            token = self.fencing_guard.token
+            if self.plan_repository is not None and (
+                plan.schema_version != "v2" or plan.deployment_id != token.scope.deployment_id
+            ):
+                raise DomainError(
+                    ErrorCode.PLAN_IDENTITY_CONFLICT,
+                    "Plan requires revalidation before a fenced execution claim",
+                    details={"reason": "revalidation_required", "plan_id": plan.id},
+                )
+            execution_lease = PlanExecutionLease(
+                deployment_id=token.scope.deployment_id,
+                owner_id=token.owner_id,
+                lease_id=token.lease_id,
+                fencing_epoch=token.epoch,
+                expires_at=token.expires_at,
+            )
         if self.plan_repository is not None:
             claimed = await self.plan_repository.claim_for_execution(
-                plan.model_copy(update={"status": PlanStatus.EXECUTING}),
+                plan.model_copy(
+                    update={
+                        "status": PlanStatus.EXECUTING,
+                        "deployment_id": (
+                            execution_lease.deployment_id
+                            if execution_lease is not None
+                            else plan.deployment_id
+                        ),
+                        "execution_lease": execution_lease,
+                    }
+                ),
                 allowed_statuses=self._CLAIMABLE_STATUSES,
             )
             if not claimed:
@@ -204,6 +310,7 @@ class PlanExecutor:
                 )
             if attempt is not None:
                 attempt.claimed = True
+                attempt.execution_lease = execution_lease
         elif attempt is not None:
             # Without a durable plan repository this invocation is the sole
             # execution owner, so failure cleanup still has to release any
@@ -276,7 +383,7 @@ class PlanExecutor:
             )
             return summary
         takeover_first_command_id: str | None = None
-        if self.control_takeover is not None:
+        if self.control_takeover is not None and not attempt.cancel_requested:
             takeover = await self.control_takeover.acquire_for_plan(
                 plan_id=plan.id, commands=plan.commands
             )
@@ -343,8 +450,26 @@ class PlanExecutor:
                     return summary
                 takeover_first_command_id = takeover.first_command_id
         outcomes: list[ExecutionOutcome] = []
+        dispatch_state_versions = dict(state_version_overrides or {})
         seen_keys: set[str] = set()
         for command_index, command in enumerate(plan.commands):
+            if attempt.cancel_requested:
+                outcome = ExecutionOutcome(
+                    authority=plan.authority,
+                    plan_id=plan.id,
+                    command_id=command.id,
+                    execution_attempt_id=execution_attempt_id,
+                    status=ExecutionStatus.REJECTED,
+                    completed_at=self.clock.now(),
+                    error=ErrorDetail(
+                        code=ErrorCode.INVALID_TRANSITION,
+                        message="Execution cancelled before dispatch",
+                    ),
+                )
+                outcomes.append(outcome)
+                if self.outcome_repository is not None:
+                    await self.outcome_repository.save(outcome)
+                continue
             semantic = self.plan_service.validate_command_semantics(command)
             command = semantic.command
             capability = semantic.capability
@@ -413,9 +538,7 @@ class PlanExecutor:
                         message=f"{len(failed_preconditions)} precondition(s) not satisfied",
                         retryable=True,
                         details={
-                            "preconditions": [
-                                item.as_payload() for item in failed_preconditions
-                            ]
+                            "preconditions": [item.as_payload() for item in failed_preconditions]
                         },
                     ),
                 )
@@ -450,86 +573,153 @@ class PlanExecutor:
                 dispatch_started: float | None = None
                 dispatch_attempted = False
                 physical_intent: PhysicalIntent | None = None
+                replay_intent: PhysicalIntent | None = None
                 try:
-                    fencing_token = None
-                    if self.fencing_guard is not None:
-                        fencing_token = await self.fencing_guard.assert_writable_for_authority(
-                            plan.authority
-                        )
-                    execution_context = ExecutionContext(
-                        agent_request_id=plan.agent_request_id,
-                        plan_id=plan.id,
-                        execution_attempt_id=execution_attempt_id,
-                        adapter_request_id=adapter_request_id,
-                        client_principal_id=current_execution_principal(),
-                        fencing_scope=fencing_token.scope if fencing_token is not None else None,
-                        fencing_epoch=fencing_token.epoch if fencing_token is not None else None,
-                        lease_id=fencing_token.lease_id if fencing_token is not None else None,
-                    )
-                    if self.physical_intent_repository is not None:
-                        if fencing_token is None:
-                            raise FencingViolation(
-                                "physical intent ledger requires a current fencing token"
+
+                    async def dispatch(
+                        command: Command = command,
+                        capability: Capability | None = capability,
+                        command_index: int = command_index,
+                        adapter_request_id: str = adapter_request_id,
+                    ) -> AdapterExecutionAck:
+                        nonlocal physical_intent, replay_intent
+                        nonlocal dispatch_started, dispatch_attempted
+                        if attempt.cancel_requested:
+                            raise DomainError(
+                                ErrorCode.INVALID_TRANSITION, "Execution cancelled before dispatch"
                             )
-                        physical_intent = await self.physical_intent_repository.claim(
-                            PhysicalIntent(
-                                tenant_id=plan.authority.tenant_id,
-                                household_id=plan.authority.household_id,
-                                deployment_id=fencing_token.scope.deployment_id,
-                                idempotency_key=command.idempotency_key,
-                                plan_id=plan.id,
-                                command_id=command.id,
-                                fencing_epoch=fencing_token.epoch,
-                                created_at=self.clock.now(),
-                                updated_at=self.clock.now(),
+                        self.plan_service.assert_executable(
+                            plan, state_version_overrides=dispatch_state_versions
+                        )
+                        if self.execution_admission is not None and admission is not None:
+                            await self.execution_admission.revalidate(plan, admission)
+                        failures = await self._failed_preconditions(
+                            command,
+                            policy_decision=(
+                                plan.policy_decisions[command_index]
+                                if command_index < len(plan.policy_decisions)
+                                else None
+                            ),
+                        )
+                        if failures:
+                            raise DomainError(
+                                ErrorCode.PRECONDITION_FAILED,
+                                "Preconditions changed while awaiting dispatch",
                             )
+                        safety_error = self._safety_violation(command, capability)
+                        if safety_error is None and self.dynamic_safety_guard is not None:
+                            safety_error = await self.dynamic_safety_guard.check(command)
+                        if safety_error is not None:
+                            raise DomainError(ErrorCode(safety_error.code), safety_error.message)
+                        fencing_token = None
+                        if self.fencing_guard is not None:
+                            fencing_token = await self.fencing_guard.assert_writable_for_authority(
+                                plan.authority
+                            )
+                        execution_context = ExecutionContext(
+                            agent_request_id=plan.agent_request_id,
+                            plan_id=plan.id,
+                            execution_attempt_id=execution_attempt_id,
+                            adapter_request_id=adapter_request_id,
+                            client_principal_id=current_execution_principal(),
+                            fencing_scope=fencing_token.scope
+                            if fencing_token is not None
+                            else None,
+                            fencing_epoch=fencing_token.epoch
+                            if fencing_token is not None
+                            else None,
+                            lease_id=fencing_token.lease_id if fencing_token is not None else None,
                         )
-                        if physical_intent.status is PhysicalIntentStatus.UNKNOWN:
-                            raise _PhysicalIntentUnknown
-                    assert_ownership = getattr(self.control_takeover, "assert_still_owned", None)
-                    if (
-                        takeover_first_command_id is not None
-                        and callable(assert_ownership)
-                        and not await assert_ownership(plan_id=plan.id)
-                    ):
-                        raise _ControlLeaseExpired
-                    dispatch_started = time.perf_counter()
-                    dispatch_attempted = True
-                    if physical_intent is not None and physical_intent.status in {
-                        PhysicalIntentStatus.ACKNOWLEDGED,
-                        PhysicalIntentStatus.CONFIRMED,
-                    }:
-                        acknowledgement = AdapterExecutionAck(
-                            accepted=True,
-                            message="physical intent replay served from durable ledger",
+                        if self.physical_intent_repository is not None:
+                            if fencing_token is None:
+                                raise FencingViolation(
+                                    "physical intent ledger requires a current fencing token"
+                                )
+                            claim = await self.physical_intent_repository.claim_for_dispatch(
+                                PhysicalIntent(
+                                    tenant_id=plan.authority.tenant_id,
+                                    household_id=plan.authority.household_id,
+                                    deployment_id=fencing_token.scope.deployment_id,
+                                    idempotency_key=command.idempotency_key,
+                                    plan_id=plan.id,
+                                    command_id=command.id,
+                                    fencing_epoch=fencing_token.epoch,
+                                    owner_id=fencing_token.owner_id,
+                                    execution_attempt_id=execution_attempt_id,
+                                    lease_id=fencing_token.lease_id,
+                                    created_at=self.clock.now(),
+                                    updated_at=self.clock.now(),
+                                )
+                            )
+                            if claim.decision is PhysicalIntentClaimDecision.CONFLICT:
+                                raise _PhysicalIntentConflict
+                            if claim.decision is PhysicalIntentClaimDecision.IN_FLIGHT:
+                                raise _PhysicalIntentUnknown
+                            if claim.decision is PhysicalIntentClaimDecision.REPLAY:
+                                replay_intent = claim.intent
+                            else:
+                                physical_intent = claim.intent
+                        assert_ownership = getattr(
+                            self.control_takeover, "assert_still_owned", None
                         )
-                    elif (
-                        physical_intent is not None
-                        and physical_intent.status is PhysicalIntentStatus.REJECTED
-                    ):
-                        acknowledgement = AdapterExecutionAck(
-                            accepted=False,
-                            message="physical intent was already rejected",
-                        )
-                    else:
-                        if self.household_work_queues is not None:
-                            acknowledgement = await self.household_work_queues.submit(
-                                plan.authority.household_id,
-                                partial(self.adapter.execute, command, execution_context),
+                        if (
+                            takeover_first_command_id is not None
+                            and callable(assert_ownership)
+                            and not await assert_ownership(plan_id=plan.id)
+                        ):
+                            raise _ControlLeaseExpired
+                        if replay_intent is not None and replay_intent.status in {
+                            PhysicalIntentStatus.ACKNOWLEDGED,
+                            PhysicalIntentStatus.CONFIRMED,
+                        }:
+                            # This write already happened in an earlier invocation.
+                            # Cancellation cannot turn its reconciliation into a
+                            # wholly cancelled plan or a pre-dispatch rejection.
+                            attempt.sent_any = True
+                            attempt.dispatching = True
+                            acknowledgement = AdapterExecutionAck(
+                                accepted=True,
+                                message="physical intent replay served from durable ledger",
+                            )
+                        elif (
+                            replay_intent is not None
+                            and replay_intent.status is PhysicalIntentStatus.REJECTED
+                        ):
+                            acknowledgement = AdapterExecutionAck(
+                                accepted=False,
+                                message="physical intent was already rejected",
                             )
                         else:
+                            if attempt.cancel_requested:
+                                raise DomainError(
+                                    ErrorCode.INVALID_TRANSITION,
+                                    "Execution cancelled before dispatch",
+                                )
+                            attempt.dispatching = True
+                            attempt.sent_any = True
+                            dispatch_started = time.perf_counter()
+                            dispatch_attempted = True
                             acknowledgement = await self.adapter.execute(command, execution_context)
-                        if physical_intent is not None:
-                            assert self.physical_intent_repository is not None
-                            await self.physical_intent_repository.settle(
-                                household_id=physical_intent.household_id,
-                                idempotency_key=physical_intent.idempotency_key,
-                                status=(
-                                    PhysicalIntentStatus.ACKNOWLEDGED
-                                    if acknowledgement.accepted
-                                    else PhysicalIntentStatus.REJECTED
-                                ),
-                            )
+                        return acknowledgement
+
+                    if self.household_work_queues is not None:
+                        attempt.pending = asyncio.create_task(
+                            self.household_work_queues.submit(plan.authority.household_id, dispatch)
+                        )
+                        acknowledgement = await attempt.pending
+                    else:
+                        acknowledgement = await dispatch()
+                    attempt.pending = None
+                    if physical_intent is not None:
+                        assert self.physical_intent_repository is not None
+                        await self.physical_intent_repository.settle(
+                            intent=physical_intent,
+                            status=(
+                                PhysicalIntentStatus.ACKNOWLEDGED
+                                if acknowledgement.accepted
+                                else PhysicalIntentStatus.REJECTED
+                            ),
+                        )
                     after_state = None
                     status = ExecutionStatus.REJECTED
                     error: ErrorDetail | None = None
@@ -538,6 +728,7 @@ class PlanExecutor:
                             command,
                             capability.name if capability else None,
                             before_state=before_state,
+                            state_version_overrides=dispatch_state_versions,
                         )
                         if readback_error is not None:
                             status = ExecutionStatus.UNKNOWN
@@ -552,7 +743,9 @@ class PlanExecutor:
                                         "capability": (
                                             command.postconditions[0].capability
                                             if command.postconditions
-                                            else capability.name if capability else None
+                                            else capability.name
+                                            if capability
+                                            else None
                                         ),
                                         "error_code": ErrorCode.POST_WRITE_RECONCILIATION_FAILED,
                                         "reason": "persistence_failed",
@@ -564,7 +757,9 @@ class PlanExecutor:
                                     capability=(
                                         command.postconditions[0].capability
                                         if command.postconditions
-                                        else capability.name if capability else None
+                                        else capability.name
+                                        if capability
+                                        else None
                                     ),
                                     retryable=True,
                                     details={"reason": "persistence_failed"},
@@ -581,7 +776,9 @@ class PlanExecutor:
                             after_state,
                             before_state=before_state,
                         ):
-                            reconciliation_error = await self._reconcile_post_write(command)
+                            reconciliation_error = await self._reconcile_post_write(
+                                command, state_version_overrides=dispatch_state_versions
+                            )
                             if reconciliation_error is not None:
                                 status = ExecutionStatus.UNKNOWN
                                 error = reconciliation_error
@@ -622,6 +819,30 @@ class PlanExecutor:
                         completed_at=self.clock.now(),
                         error=error,
                     )
+                except (DomainError, asyncio.CancelledError, QueueClosed) as rejection:
+                    if attempt.dispatching:
+                        raise
+                    outcome = ExecutionOutcome(
+                        authority=plan.authority,
+                        plan_id=plan.id,
+                        command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        status=ExecutionStatus.REJECTED,
+                        before_state=before_state,
+                        completed_at=self.clock.now(),
+                        error=ErrorDetail(
+                            code=(
+                                rejection.code
+                                if isinstance(rejection, DomainError)
+                                else ErrorCode.INVALID_TRANSITION
+                            ),
+                            message=(
+                                str(rejection)
+                                if isinstance(rejection, DomainError)
+                                else "Execution cancelled before dispatch"
+                            ),
+                        ),
+                    )
                 except _PhysicalIntentUnknown:
                     outcome = ExecutionOutcome(
                         authority=plan.authority,
@@ -636,6 +857,25 @@ class PlanExecutor:
                             code=ErrorCode.EXECUTION_FAILED,
                             message=(
                                 "Physical intent has an unknown outcome and needs reconciliation"
+                            ),
+                            retryable=False,
+                        ),
+                    )
+                except _PhysicalIntentConflict:
+                    outcome = ExecutionOutcome(
+                        authority=plan.authority,
+                        plan_id=plan.id,
+                        command_id=command.id,
+                        execution_attempt_id=execution_attempt_id,
+                        adapter_request_id=adapter_request_id,
+                        status=ExecutionStatus.REJECTED,
+                        before_state=before_state,
+                        completed_at=self.clock.now(),
+                        error=ErrorDetail(
+                            code=ErrorCode.DUPLICATE_COMMAND,
+                            message=(
+                                "Physical idempotency key is already bound to "
+                                "another plan or command"
                             ),
                             retryable=False,
                         ),
@@ -717,8 +957,7 @@ class PlanExecutor:
                         ExecutionStatus.FAILED: PhysicalIntentStatus.REJECTED,
                     }.get(outcome.status, PhysicalIntentStatus.UNKNOWN)
                     await self.physical_intent_repository.settle(
-                        household_id=physical_intent.household_id,
-                        idempotency_key=physical_intent.idempotency_key,
+                        intent=physical_intent,
                         status=final_status,
                     )
                 if (
@@ -737,6 +976,8 @@ class PlanExecutor:
                         (time.perf_counter() - dispatch_started) * 1000,
                         outcome.status.value,
                     )
+            attempt.pending = None
+            attempt.dispatching = False
             outcomes.append(outcome)
             if self.outcome_repository is not None:
                 await self.outcome_repository.save(outcome)
@@ -794,11 +1035,19 @@ class PlanExecutor:
             )
         summary = ExecutionSummary(outcomes=outcomes)
         terminal_status = self._terminal_plan_status(outcomes)
+        if attempt.cancel_requested and not attempt.sent_any:
+            terminal_status = PlanStatus.CANCELLED
         if self.plan_repository is not None:
             if not release_confirmed:
                 terminal_status = PlanStatus.UNKNOWN
             await self.plan_repository.settle_execution(
-                plan.model_copy(update={"status": terminal_status, "execution": summary})
+                plan.model_copy(
+                    update={
+                        "status": terminal_status,
+                        "execution": summary,
+                        "execution_lease": execution_lease,
+                    }
+                )
             )
         if not release_confirmed:
             self.audit.append(
@@ -856,11 +1105,19 @@ class PlanExecutor:
             self.operational_metrics.record_lease("unknown")
         return release_confirmed
 
-    async def _mark_unknown_after_exception(self, plan_id: str) -> None:
+    async def _mark_unknown_after_exception(
+        self,
+        plan_id: str,
+        *,
+        expected_execution_lease: PlanExecutionLease | None = None,
+    ) -> None:
         if self.plan_repository is None:
             return
         try:
-            marked = await self.plan_repository.mark_unknown_if_executing(plan_id)
+            marked = await self.plan_repository.mark_unknown_if_executing(
+                plan_id,
+                expected_execution_lease=expected_execution_lease,
+            )
         except BaseException as error:
             self.audit.append(
                 event_type="unknown_authority_persistence_failed",
@@ -906,9 +1163,7 @@ class PlanExecutor:
             device_type=device.type, capability=capability.name, value=command.value
         )
         return (
-            error.model_copy(update={"device_id": command.device_id})
-            if error is not None
-            else None
+            error.model_copy(update={"device_id": command.device_id}) if error is not None else None
         )
 
     async def _preflight(self, plan: Plan) -> list[_PreflightResult] | None:
@@ -951,9 +1206,7 @@ class PlanExecutor:
                     retryable=True,
                     details={
                         "phase": "plan_preflight",
-                        "preconditions": [
-                            item.as_payload() for item in failed_preconditions
-                        ],
+                        "preconditions": [item.as_payload() for item in failed_preconditions],
                     },
                 )
             else:
@@ -1075,12 +1328,14 @@ class PlanExecutor:
         return None
 
     async def _readback(
-        self, command: Command, capability_name: str | None
+        self,
+        command: Command,
+        capability_name: str | None,
+        *,
+        state_version_overrides: dict[str, int] | None = None,
     ) -> StateSnapshot | None:
         feedback_capability = (
-            command.postconditions[0].capability
-            if command.postconditions
-            else capability_name
+            command.postconditions[0].capability if command.postconditions else capability_name
         )
         if feedback_capability is None:
             return None
@@ -1116,12 +1371,20 @@ class PlanExecutor:
         if snapshot is None:
             return None
         normalized = snapshot.model_copy(update={"device_id": command.device_id})
-        await self._persist_snapshot(normalized)
+        await self._persist_snapshot(normalized, state_version_overrides=state_version_overrides)
         return normalized
 
-    async def _persist_snapshot(self, snapshot: StateSnapshot) -> None:
+    async def _persist_snapshot(
+        self, snapshot: StateSnapshot, *, state_version_overrides: dict[str, int] | None = None
+    ) -> None:
         try:
             await self.plan_service.state_store.save(snapshot)
+            if state_version_overrides is not None:
+                state_version_overrides[f"{snapshot.device_id}::{snapshot.capability}"] = (
+                    self.plan_service.state_store.state_version(
+                        snapshot.device_id, snapshot.capability
+                    )
+                )
             # RuntimeComposition binds StateStore to the single durable
             # RuntimeStatePersistencePort. Keep the legacy sink only for
             # standalone executor fixtures that intentionally do not bind a
@@ -1132,11 +1395,11 @@ class PlanExecutor:
             ):
                 await self.state_snapshot_repository.save(snapshot)
         except Exception as error:
-            raise _ReadbackPersistenceError(
-                "state snapshot persistence failed"
-            ) from error
+            raise _ReadbackPersistenceError("state snapshot persistence failed") from error
 
-    async def _reconcile_post_write(self, command: Command) -> ErrorDetail | None:
+    async def _reconcile_post_write(
+        self, command: Command, *, state_version_overrides: dict[str, int] | None = None
+    ) -> ErrorDetail | None:
         postcondition = command.postconditions[0] if command.postconditions else None
         if postcondition is None or not postcondition.reconcile_capabilities:
             return None
@@ -1166,8 +1429,7 @@ class PlanExecutor:
                             for item in snapshots
                             if item.capability == capability_name
                             and item.source_ref.adapter_id == routes[0].source_ref.adapter_id
-                            and item.source_ref.external_id
-                            == routes[0].source_ref.external_id
+                            and item.source_ref.external_id == routes[0].source_ref.external_id
                         ),
                         None,
                     )
@@ -1182,7 +1444,9 @@ class PlanExecutor:
                         )
                     else:
                         normalized = snapshot.model_copy(update={"device_id": command.device_id})
-                        await self._persist_snapshot(normalized)
+                        await self._persist_snapshot(
+                            normalized, state_version_overrides=state_version_overrides
+                        )
                         if normalized.status is not StateStatus.CURRENT:
                             error = ErrorDetail(
                                 code=ErrorCode.POST_WRITE_RECONCILIATION_FAILED,
@@ -1244,6 +1508,7 @@ class PlanExecutor:
         capability_name: str | None,
         *,
         before_state: StateSnapshot | None = None,
+        state_version_overrides: dict[str, int] | None = None,
     ) -> tuple[StateSnapshot | None, Exception | None]:
         postcondition = command.postconditions[0] if command.postconditions else None
         timeout = postcondition.settle_timeout_seconds if postcondition is not None else None
@@ -1254,7 +1519,9 @@ class PlanExecutor:
 
         while True:
             try:
-                current = await self._readback(command, capability_name)
+                current = await self._readback(
+                    command, capability_name, state_version_overrides=state_version_overrides
+                )
             except (
                 ConnectionError,
                 OSError,
@@ -1313,10 +1580,7 @@ class PlanExecutor:
                     or isinstance(postcondition_expected, bool)
                 ):
                     return False
-                return (
-                    abs(float(actual) - float(postcondition_expected))
-                    <= postcondition.tolerance
-                )
+                return abs(float(actual) - float(postcondition_expected)) <= postcondition.tolerance
             return after_state.value == postcondition.expected
         expected: object
         if command.command == "turn_on":

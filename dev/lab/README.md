@@ -4,6 +4,19 @@ Este laboratorio simula las fronteras de protocolo que consume DomoAI. No
 simula radios Zigbee ni sustituye el commissioning Matter, ETS/KNX o la
 validación con hardware.
 
+El laboratorio MQTT requiere credenciales siempre. Antes de usar el runner o
+un comando Compose directo, crea (si aún no existe) el archivo ignorado y
+rellena localmente `DOMOAI_MQTT_USERNAME` y `DOMOAI_MQTT_PASSWORD`:
+
+```bash
+test -f dev/lab/.env || cp dev/lab/.env.example dev/lab/.env
+# Edita dev/lab/.env y completa las dos variables requeridas.
+```
+
+Los comandos Compose de esta guía usan `--env-file dev/lab/.env` para no
+depender de un `.env` en la raíz del repositorio. No guardes credenciales en
+esta documentación.
+
 ## Runner local reproducible
 
 El runner `domoai-lab` centraliza las operaciones seguras del laboratorio y no
@@ -83,7 +96,7 @@ MQTT/Home Assistant y Modbus TCP. No es hardware ni habilita autoridad de
 producción.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile battery up -d --build battery
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile battery up -d --build battery
 curl http://127.0.0.1:8090/health
 ```
 
@@ -93,7 +106,7 @@ con `configs/modbus-battery.json`. La batería publica descubrimiento MQTT
 retenido bajo `homeassistant/` y estado en `domoai/battery/state`.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile homeassistant --profile battery \
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile homeassistant --profile battery \
   up -d --build mqtt battery homeassistant
 DOMOAI_MODBUS_HOST=127.0.0.1 \
 DOMOAI_MODBUS_PORT=1503 \
@@ -111,7 +124,7 @@ ese puerto, mientras que DomoAI y el bridge nativos usan siempre
 telegramas KNXnet/IP y rompe los ACK de tunneling de KNX Virtual:
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile battery --profile homeassistant \
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile battery --profile homeassistant \
   up -d --build mqtt battery homeassistant
 
 dev/lab/knx-gateway/run-wsl.sh
@@ -156,8 +169,9 @@ El puerto `1503` es solo el Modbus TCP de la batería; no es el puerto KNX.
 Para observar la orden que llega desde ETS:
 
 ```bash
-docker compose -f dev/lab/compose.yaml exec mqtt \
-  mosquitto_sub -h mqtt -t domoai/battery/power/set -v -C 1
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml exec mqtt sh -c \
+  'mosquitto_sub -h mqtt -u "$DOMOAI_MQTT_USERNAME" -P "$DOMOAI_MQTT_PASSWORD" \
+  -t domoai/battery/power/set -v -C 1'
 ```
 
 Esta pasarela es únicamente una multiplexación de laboratorio; no concede
@@ -216,7 +230,7 @@ El cargador EV de laboratorio es, igual que la batería, un único modelo
 dinámico proyectado por HTTP, MQTT/Home Assistant y Modbus TCP.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile ev-charger up -d --build ev-charger
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile ev-charger up -d --build ev-charger
 curl http://127.0.0.1:8091/health
 ```
 
@@ -228,7 +242,7 @@ cargador publica descubrimiento MQTT retenido bajo `homeassistant/` y estado
 en `domoai/ev-charger/state`.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile ev-charger \
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile ev-charger \
   up -d --build mqtt ev-charger
 DOMOAI_MODBUS_HOST=127.0.0.1 \
 DOMOAI_MODBUS_PORT=1504 \
@@ -267,7 +281,7 @@ volumen acumulado) — a diferencia de batería/EV, no tiene ningún comando
 canónico, así que no hay endpoint `/command` ni registro Modbus escribible.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile water-meter up -d --build water-meter
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile water-meter up -d --build water-meter
 curl http://127.0.0.1:8092/health
 ```
 
@@ -290,7 +304,7 @@ diferencia del agua, sí tiene comando canónico (`heat_thermostat`/
 `cool_thermostat`/`stop_thermostat`), igual que batería/EV.
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile thermal up -d --build thermal
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile thermal up -d --build thermal
 curl http://127.0.0.1:8093/health
 ```
 
@@ -312,20 +326,34 @@ están de acuerdo en la física, no son dos implementaciones independientes.
 
 Requisitos: Docker Compose y `uv`.
 
+### Docker Desktop desde WSL
+
+Si la configuración global de Docker Desktop referencia un credential helper
+que no está instalado dentro de WSL, ejecuta las pruebas Docker mediante la
+configuración efímera del repositorio. No modifica credenciales ni el
+`config.json` global:
+
+```bash
+scripts/with_disposable_docker_config.sh uv run pytest -q
+scripts/composition_check.sh
+```
+
+El wrapper conserva un `DOCKER_CONFIG` explícito si ya fue proporcionado.
+
 Si esta distro WSL no expone `docker` en el `PATH` aunque Docker Desktop esté
 integrado, el daemon puede usarse mediante el ejecutable Windows:
 
 ```bash
 export DOMOAI_DOCKER_BIN="/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
-"$DOMOAI_DOCKER_BIN" compose -f dev/lab/compose.yaml up -d --build mqtt zigbee2mqtt modbus
+"$DOMOAI_DOCKER_BIN" compose --env-file dev/lab/.env -f dev/lab/compose.yaml up -d --build mqtt zigbee2mqtt modbus
 ```
 
 En una instalación con integración WSL normal, sustituye
 `"$DOMOAI_DOCKER_BIN" compose` por `docker compose`.
 
 ```bash
-docker compose -f dev/lab/compose.yaml up -d --build mqtt zigbee2mqtt modbus
-docker compose -f dev/lab/compose.yaml ps
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml up -d --build mqtt zigbee2mqtt modbus
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml ps
 ```
 
 Endpoints desde el host:
@@ -339,6 +367,9 @@ Configura DomoAI en la shell, sin guardar secretos:
 ```bash
 export DOMOAI_ZIGBEE2MQTT_URL="mqtt://127.0.0.1:1883"
 export DOMOAI_ZIGBEE2MQTT_BASE_TOPIC="zigbee2mqtt"
+set -a
+source dev/lab/.env
+set +a
 export DOMOAI_MODBUS_HOST="127.0.0.1"
 export DOMOAI_MODBUS_PORT="1502"
 export DOMOAI_MODBUS_CONFIG_PATH="dev/lab/configs/modbus.json"
@@ -349,25 +380,47 @@ uv run pytest -q tests/integration/test_zigbee2mqtt_smoke.py \
 
 El fake Zigbee2MQTT publica `bridge/state`, `bridge/devices`, estados
 retenidos, disponibilidad y acepta únicamente payloads `/set` de los campos
-que cada dispositivo virtual ya expone. El broker de desarrollo no tiene
-autenticación; para probar autenticación, configura el broker fuera del
-default y usa `DOMOAI_MQTT_USERNAME`/`DOMOAI_MQTT_PASSWORD` solo en el entorno.
+que cada dispositivo virtual ya expone. El broker exige autenticación en todo
+momento; si falta cualquiera de las dos variables, Compose falla antes de
+arrancar el servicio.
+
+### Exposición en una red compartida
+
+La composición base mantiene MQTT plaintext en loopback. Para una red
+compartida usa explícitamente el overlay TLS, que conserva ese listener local y
+publica únicamente TLS en 8883 sobre el bind indicado:
+
+```bash
+export DOMOAI_MQTT_TLS_BIND="<IP_REAL_DEL_HOST>"
+export DOMOAI_MQTT_TLS_CERT_FILE="/ruta/local/server.crt"
+export DOMOAI_MQTT_TLS_KEY_FILE="/ruta/local/server.key"
+docker compose --env-file dev/lab/.env \
+  -f dev/lab/compose.yaml -f dev/lab/compose.shared-mqtt-tls.yaml \
+  up -d mqtt
+```
+
+El certificado y la clave deben existir y ser legibles; de lo contrario el
+contenedor termina sin abrir ningún listener. Los clientes externos deben usar
+`mqtts://` en 8883, autenticar con las credenciales del `.env` y verificar la
+CA/certificado mediante `DOMOAI_MQTT_CA_CERT_PATH`. No habilites
+`DOMOAI_MQTT_TLS_INSECURE` en una red compartida.
 
 ## Reproducir estados
 
 Publicar un estado de luz desde el host:
 
 ```bash
-docker compose -f dev/lab/compose.yaml exec mqtt \
-  mosquitto_pub -h mqtt -t zigbee2mqtt/living_room/main_light/set \
-  -m '{"state":"OFF","brightness":80}'
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml exec mqtt sh -c \
+  'mosquitto_pub -h mqtt -u "$DOMOAI_MQTT_USERNAME" -P "$DOMOAI_MQTT_PASSWORD" \
+  -t zigbee2mqtt/living_room/main_light/set -m '\''{"state":"OFF","brightness":80}'\'''
 ```
 
 Consultar los topics retenidos:
 
 ```bash
-docker compose -f dev/lab/compose.yaml exec mqtt \
-  mosquitto_sub -h mqtt -t 'zigbee2mqtt/#' -v -C 8
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml exec mqtt sh -c \
+  'mosquitto_sub -h mqtt -u "$DOMOAI_MQTT_USERNAME" -P "$DOMOAI_MQTT_PASSWORD" \
+  -t "zigbee2mqtt/#" -v -C 8'
 ```
 
 La consola HTTP de PyModbus permite observar y cambiar puntos para escenarios
@@ -380,9 +433,9 @@ Para arrancar Home Assistant junto con MQTT/Zigbee2MQTT y Modbus, usa el
 mismo proyecto Compose y su perfil explícito:
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile homeassistant up -d --build \
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile homeassistant up -d --build \
   mqtt zigbee2mqtt modbus homeassistant
-docker compose -f dev/lab/compose.yaml ps
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml ps
 ```
 
 Todos los servicios comparten la red del proyecto `domoai-lab`. Desde el host,
@@ -440,7 +493,7 @@ laboratorio ya está arrancado, puedes iniciar solo este perfil con
 Matter Server + Matter.js virtual light:
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile matter up -d --build matter-server
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile matter up -d --build matter-server
 export DOMOAI_MATTER_SERVER_URL="ws://127.0.0.1:5580/ws"
 ```
 
@@ -452,7 +505,7 @@ La primera vez, abre `http://127.0.0.1:5580/` y commissiona el dispositivo con
 el pairing code que muestran los logs de `matter-device`:
 
 ```bash
-docker compose -f dev/lab/compose.yaml --profile matter logs matter-device \
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml --profile matter logs matter-device \
   | grep "manual pairing code"
 ```
 
@@ -475,8 +528,8 @@ direcciones del proyecto en `configs/knx-virtual.json` o
 ## Reset y diagnóstico
 
 ```bash
-docker compose -f dev/lab/compose.yaml logs -f zigbee2mqtt modbus
-docker compose -f dev/lab/compose.yaml down
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml logs -f zigbee2mqtt modbus
+docker compose --env-file dev/lab/.env -f dev/lab/compose.yaml down
 ```
 
 Este reset detiene los contenedores y conserva los volúmenes nombrados. Para

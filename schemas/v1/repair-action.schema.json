@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "RepairActionName": {
+      "enum": [
+        "reauthenticate",
+        "retry",
+        "select_interface",
+        "replace_endpoint",
+        "import_mapping",
+        "select_profile",
+        "trust_certificate",
+        "update_credentials"
+      ],
+      "title": "RepairActionName",
+      "type": "string"
+    },
+    "RepairParameters": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "RepairRisk": {
+      "enum": [
+        "safe",
+        "configuration",
+        "security"
+      ],
+      "title": "RepairRisk",
+      "type": "string"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Action Id",
+      "type": "string"
+    },
+    "action": {
+      "$ref": "#/$defs/RepairActionName"
+    },
+    "parameters": {
+      "$ref": "#/$defs/RepairParameters"
+    },
+    "requires_confirmation": {
+      "title": "Requires Confirmation",
+      "type": "boolean"
+    },
+    "risk": {
+      "$ref": "#/$defs/RepairRisk"
+    },
+    "diagnostic_code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Diagnostic Code",
+      "type": "string"
+    },
+    "plan_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action_id",
+    "action",
+    "requires_confirmation",
+    "risk",
+    "diagnostic_code",
+    "plan_digest"
+  ],
+  "title": "RepairAction",
+  "type": "object"
+}

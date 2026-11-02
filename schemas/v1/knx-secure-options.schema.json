@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "KnxSecureMode": {
+      "enum": [
+        "ip_secure",
+        "data_secure",
+        "ip_and_data_secure"
+      ],
+      "title": "KnxSecureMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "$ref": "#/$defs/KnxSecureMode"
+    },
+    "keyring_path": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Keyring Path"
+    },
+    "interface": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Interface"
+    },
+    "user_id": {
+      "anyOf": [
+        {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User Id"
+    },
+    "credential_ref": {
+      "pattern": "^(?:secret:[0-9a-fA-F-]{16,128}|env:[A-Za-z_][A-Za-z0-9_]*)$",
+      "title": "Credential Ref",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mode",
+    "credential_ref"
+  ],
+  "title": "KnxSecureOptions",
+  "type": "object"
+}

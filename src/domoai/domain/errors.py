@@ -26,6 +26,7 @@ class ErrorCode(StrEnum):
     ROUTE_AMBIGUOUS = "route_ambiguous"
     ROUTE_NOT_FOUND = "route_not_found"
     SOURCE_UNAVAILABLE = "source_unavailable"
+    DELIVERY_FENCE_UNAVAILABLE = "delivery_fence_unavailable"
     EXECUTION_FAILED = "execution_failed"
     VALIDATION_ERROR = "validation_error"
     PRECONDITION_FAILED = "precondition_failed"
@@ -44,6 +45,16 @@ class ErrorCode(StrEnum):
     INSUFFICIENT_SCOPE = "insufficient_scope"
     AGGREGATE_CAPABILITY_INVALID = "aggregate_capability_invalid"
     FENCING_VIOLATION = "fencing_violation"
+    PREFERENCE_CONFLICT = "preference_conflict"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    RESOLUTION_REQUIRED = "resolution_required"
+    HISTORY_UNAVAILABLE = "history_unavailable"
+    UNSUPPORTED_BINDING = "unsupported_binding"
+    INVALID_PREFERENCE = "invalid_preference"
+    STALE_CURSOR = "stale_cursor"
+    CONSENT_REVOKED = "consent_revoked"
+    CONSENT_CONFLICT = "consent_conflict"
+    HUMAN_CONFIRMATION_UNAVAILABLE = "human_confirmation_unavailable"
 
 
 class DomainError(ValueError):

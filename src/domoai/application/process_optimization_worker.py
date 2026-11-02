@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 
 import pebble
+from pydantic import ValidationError
 
 from domoai.application.optimization_worker import WorkerBudget, WorkerOperationError
 from domoai.domain.models import ErrorDetail
@@ -124,7 +125,11 @@ class ProcessOptimizationWorker:
                     )
                 ],
             )
-        if not isinstance(result, OptimizationResult):
+        try:
+            if not isinstance(result, OptimizationResult):
+                raise ValueError("invalid worker result type")
+            return OptimizationResult.model_validate(result.model_dump(mode="python"))
+        except (ValidationError, ValueError):
             return OptimizationResult(
                 scenario_id=scenario.id,
                 status=OptimizationStatus.UNKNOWN,
@@ -136,7 +141,6 @@ class ProcessOptimizationWorker:
                     )
                 ],
             )
-        return result
 
     async def _run_blocking(
         self, scenario: OptimizationScenario, *, timeout: float

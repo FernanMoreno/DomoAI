@@ -1,0 +1,338 @@
+[
+  {
+    "feature": "A-01",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/228-time-rule-isolation",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-02",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/229-queued-dispatch-cancellation",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-03",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/230-intent-terminal-transitions",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-04",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/231-named-runtime-readiness",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-05",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/232-scoped-connection-administration",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-06",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/233-ha-partial-state-normalization",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-07",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/234-scoped-area-inventory",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-08",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/235-effective-route-coverage",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-09",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/236-composed-base-demand",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-10",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/237-passive-scenario-comparison",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-11",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/238-solar-flow-provenance",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "A-12",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/239-energy-currency-integrity",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-01",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/240-household-onboarding",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-02",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/241-household-preferences",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-03",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/242-durable-household-tasks",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-04",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/243-household-consent",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-05",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/244-daily-home-status",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-06",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/245-measured-energy-savings",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-07",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/246-adaptive-household-planning",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-08",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/247-manual-priority",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-09",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/248-household-routines",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-10",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/249-agent-client-qualification",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-11",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/250-device-coverage-evidence",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-12",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/251-household-operations",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  }
+]

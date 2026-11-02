@@ -1,0 +1,580 @@
+{
+  "$defs": {
+    "AvailabilityMode": {
+      "description": "Transport mode that may provide a capability observation or command.",
+      "enum": [
+        "local",
+        "remote"
+      ],
+      "title": "AvailabilityMode",
+      "type": "string"
+    },
+    "AvailabilityReason": {
+      "enum": [
+        "source_unavailable",
+        "provider_inactive"
+      ],
+      "type": "string"
+    },
+    "CapabilityGuarantees": {
+      "additionalProperties": false,
+      "description": "Operational guarantees attached to a canonical capability.\n\nDefaults are intentionally legacy-safe.  They describe no additional\nevidence requirement; they do not claim that a physical device was\ncommissioned.",
+      "properties": {
+        "resolution": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "gt": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        },
+        "tolerance": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "ge": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance"
+        },
+        "expected_latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Latency Ms"
+        },
+        "readback_required": {
+          "default": false,
+          "title": "Readback Required",
+          "type": "boolean"
+        },
+        "reversible": {
+          "default": true,
+          "title": "Reversible",
+          "type": "boolean"
+        },
+        "confirmation_required": {
+          "default": false,
+          "title": "Confirmation Required",
+          "type": "boolean"
+        },
+        "availability_modes": {
+          "items": {
+            "$ref": "#/$defs/AvailabilityMode"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Availability Modes",
+          "type": "array"
+        },
+        "commissioning_required": {
+          "$ref": "#/$defs/CommissioningRequirement",
+          "default": "not_required"
+        }
+      },
+      "title": "CapabilityGuarantees",
+      "type": "object"
+    },
+    "CommissioningRequirement": {
+      "description": "Trust level required before a capability can be bound for production.",
+      "enum": [
+        "not_required",
+        "recommended",
+        "required"
+      ],
+      "title": "CommissioningRequirement",
+      "type": "string"
+    },
+    "CoverageEvidenceRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "route_key": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Route Key",
+          "type": "string"
+        },
+        "provider_id": {
+          "minLength": 1,
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "source_available": {
+          "title": "Source Available",
+          "type": "boolean"
+        },
+        "provider_active": {
+          "title": "Provider Active",
+          "type": "boolean"
+        },
+        "effective_available": {
+          "title": "Effective Available",
+          "type": "boolean"
+        },
+        "availability_reasons": {
+          "items": {
+            "$ref": "#/$defs/AvailabilityReason"
+          },
+          "title": "Availability Reasons",
+          "type": "array"
+        },
+        "declared_operations": {
+          "$ref": "#/$defs/CoverageOperations"
+        },
+        "evidence": {
+          "$ref": "#/$defs/UnknownCoverageEvidence"
+        }
+      },
+      "required": [
+        "route_key",
+        "provider_id",
+        "source_available",
+        "provider_active",
+        "effective_available",
+        "availability_reasons",
+        "declared_operations"
+      ],
+      "title": "CoverageEvidenceRoute",
+      "type": "object"
+    },
+    "CoverageEvidenceRow": {
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "device_type": {
+          "$ref": "#/$defs/DeviceType"
+        },
+        "canonical_protocol_label": {
+          "title": "Canonical Protocol Label",
+          "type": "string"
+        },
+        "declared_operations": {
+          "$ref": "#/$defs/CoverageOperations"
+        },
+        "declared_guarantees": {
+          "$ref": "#/$defs/CapabilityGuarantees"
+        },
+        "limits": {
+          "$ref": "#/$defs/CoverageLimits"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "const": "route_missing",
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "evidence_level": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Evidence Level",
+          "type": "string"
+        },
+        "evidence_status": {
+          "const": "not_verified",
+          "default": "not_verified",
+          "title": "Evidence Status",
+          "type": "string"
+        },
+        "physical_identity_status": {
+          "const": "unverified",
+          "default": "unverified",
+          "title": "Physical Identity Status",
+          "type": "string"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/CoverageEvidenceRoute"
+          },
+          "title": "Routes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "device_type",
+        "canonical_protocol_label",
+        "declared_operations",
+        "declared_guarantees",
+        "limits",
+        "status",
+        "reasons",
+        "routes"
+      ],
+      "title": "CoverageEvidenceRow",
+      "type": "object"
+    },
+    "CoverageFamily": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/CoverageFamilyName"
+        },
+        "priority": {
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "candidate_device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Candidate Device Ids",
+          "type": "array"
+        },
+        "row_refs": {
+          "items": {
+            "$ref": "#/$defs/CoverageRowRef"
+          },
+          "title": "Row Refs",
+          "type": "array"
+        },
+        "status": {
+          "const": "not_qualified",
+          "default": "not_qualified",
+          "title": "Status",
+          "type": "string"
+        },
+        "missing_requirements": {
+          "items": {
+            "$ref": "#/$defs/MissingRequirement"
+          },
+          "minItems": 1,
+          "title": "Missing Requirements",
+          "type": "array"
+        },
+        "hardware_verified": {
+          "const": false,
+          "default": false,
+          "title": "Hardware Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "family",
+        "priority",
+        "candidate_device_ids",
+        "row_refs",
+        "missing_requirements"
+      ],
+      "title": "CoverageFamily",
+      "type": "object"
+    },
+    "CoverageFamilyName": {
+      "enum": [
+        "lighting",
+        "metered_plugs",
+        "covers",
+        "hvac",
+        "schedulable_loads"
+      ],
+      "type": "string"
+    },
+    "CoverageLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unit"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Maximum"
+        },
+        "enum_values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "unit",
+        "minimum",
+        "maximum",
+        "enum_values"
+      ],
+      "title": "CoverageLimits",
+      "type": "object"
+    },
+    "CoverageOperations": {
+      "additionalProperties": false,
+      "properties": {
+        "read": {
+          "title": "Read",
+          "type": "boolean"
+        },
+        "write": {
+          "title": "Write",
+          "type": "boolean"
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        }
+      },
+      "required": [
+        "read",
+        "write",
+        "commands"
+      ],
+      "title": "CoverageOperations",
+      "type": "object"
+    },
+    "CoverageRowRef": {
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability"
+      ],
+      "title": "CoverageRowRef",
+      "type": "object"
+    },
+    "DeviceType": {
+      "enum": [
+        "light",
+        "switch",
+        "cover",
+        "climate",
+        "sensor",
+        "energy",
+        "ev_charger",
+        "unsupported"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "evidence_not_bound",
+        "protocol_unverified",
+        "profile_unverified",
+        "firmware_unverified",
+        "identity_unverified",
+        "tested_at_unverified",
+        "expiry_unverified"
+      ],
+      "type": "string"
+    },
+    "MissingRequirement": {
+      "enum": [
+        "hardware_evidence_missing",
+        "not_present_in_visible_inventory",
+        "requested_functions_unspecified",
+        "plug_identity_unverified",
+        "metering_missing",
+        "position_feedback_missing",
+        "control_missing",
+        "temperature_feedback_missing",
+        "setpoint_control_missing",
+        "programmability_unverified",
+        "resume_behavior_unverified"
+      ],
+      "type": "string"
+    },
+    "UnknownCoverageEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Level",
+          "type": "string"
+        },
+        "status": {
+          "const": "not_verified",
+          "default": "not_verified",
+          "title": "Status",
+          "type": "string"
+        },
+        "protocol": {
+          "default": null,
+          "title": "Protocol",
+          "type": "null"
+        },
+        "profile": {
+          "default": null,
+          "title": "Profile",
+          "type": "null"
+        },
+        "firmware": {
+          "default": null,
+          "title": "Firmware",
+          "type": "null"
+        },
+        "hardware_identity": {
+          "default": null,
+          "title": "Hardware Identity",
+          "type": "null"
+        },
+        "tested_at": {
+          "default": null,
+          "title": "Tested At",
+          "type": "null"
+        },
+        "expires_at": {
+          "default": null,
+          "title": "Expires At",
+          "type": "null"
+        },
+        "verified_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Verified Capabilities",
+          "type": "array"
+        },
+        "verified_operations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Verified Operations",
+          "type": "array"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReason"
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "title": "UnknownCoverageEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "runtime_revision": {
+      "title": "Runtime Revision",
+      "type": "string"
+    },
+    "rows": {
+      "items": {
+        "$ref": "#/$defs/CoverageEvidenceRow"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "families": {
+      "items": {
+        "$ref": "#/$defs/CoverageFamily"
+      },
+      "title": "Families",
+      "type": "array"
+    }
+  },
+  "required": [
+    "runtime_revision",
+    "rows",
+    "families"
+  ],
+  "title": "CoverageEvidenceSnapshot",
+  "type": "object"
+}

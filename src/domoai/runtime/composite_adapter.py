@@ -66,8 +66,9 @@ class CompositeAdapter:
         reconnect_initial_delay: float = 1.0,
         reconnect_max_delay: float = 60.0,
         reconnect_on_stream_end: bool = False,
+        allow_empty: bool = False,
     ) -> None:
-        if not adapters:
+        if not adapters and not allow_empty:
             raise ValueError("CompositeAdapter requires at least one adapter")
         if event_queue_max_size <= 0:
             raise ValueError("CompositeAdapter event_queue_max_size must be positive")
@@ -96,6 +97,7 @@ class CompositeAdapter:
         self._reconnect_initial_delay = reconnect_initial_delay
         self._reconnect_max_delay = reconnect_max_delay
         self._reconnect_on_stream_end = reconnect_on_stream_end
+        self._allow_empty = allow_empty
 
     @property
     def dropped_events_total(self) -> int:
@@ -161,6 +163,10 @@ class CompositeAdapter:
         return list(self._diagnostics)
 
     async def connect(self) -> None:
+        if not self.adapters:
+            self._connected.clear()
+            self._diagnostics.clear()
+            return
         results = await asyncio.gather(
             *(adapter.connect() for adapter in self.adapters), return_exceptions=True
         )
@@ -224,7 +230,7 @@ class CompositeAdapter:
                 if area_id:
                     areas.setdefault(area_id, dict(area))
             unsupported.extend(self._annotate_items(result.unsupported_sources, adapter.adapter_id))
-        if successful == 0:
+        if successful == 0 and not self._allow_empty:
             raise ConnectionError("All configured source adapters failed discovery")
         return AdapterSnapshot(
             source_entities=source_entities,

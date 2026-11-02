@@ -1,0 +1,914 @@
+{
+  "$defs": {
+    "AuthScheme": {
+      "enum": [
+        "none",
+        "username_password",
+        "token",
+        "api_key",
+        "tls_certificate",
+        "oauth2",
+        "commissioning_code"
+      ],
+      "title": "AuthScheme",
+      "type": "string"
+    },
+    "CapabilityBinding": {
+      "additionalProperties": false,
+      "description": "One normalized DomoAI capability and its optional write mapping.",
+      "properties": {
+        "capability_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "enum_values": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "state_topic": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Topic"
+        },
+        "state_path": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Path"
+        },
+        "read_path": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read Path"
+        },
+        "read_json_path": {
+          "default": "$",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Read Json Path",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommandBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "capability_id",
+        "kind"
+      ],
+      "title": "CapabilityBinding",
+      "type": "object"
+    },
+    "CapabilityKind": {
+      "enum": [
+        "boolean",
+        "integer",
+        "number",
+        "enum",
+        "text",
+        "timestamp"
+      ],
+      "title": "CapabilityKind",
+      "type": "string"
+    },
+    "CommandBinding": {
+      "additionalProperties": false,
+      "description": "One explicitly allow-listed writable operation.",
+      "properties": {
+        "name": {
+          "maxLength": 96,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "method": {
+          "default": "PUBLISH",
+          "maxLength": 16,
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        },
+        "command_topic": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Topic"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "payload_template": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Payload Template",
+          "type": "string"
+        },
+        "readback_topic": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Readback Topic"
+        },
+        "readback_path": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Readback Path"
+        },
+        "readback_json_path": {
+          "default": "$",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Readback Json Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "payload_template"
+      ],
+      "title": "CommandBinding",
+      "type": "object"
+    },
+    "DeviceType": {
+      "enum": [
+        "light",
+        "switch",
+        "cover",
+        "climate",
+        "sensor",
+        "energy",
+        "ev_charger",
+        "unsupported"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "DiscoveryStrategy": {
+      "enum": [
+        "manual",
+        "mdns",
+        "ssdp",
+        "dhcp",
+        "mqtt_discovery",
+        "matter_commissioning"
+      ],
+      "title": "DiscoveryStrategy",
+      "type": "string"
+    },
+    "KnxRecipeBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "dpt": {
+          "maxLength": 16,
+          "minLength": 5,
+          "title": "Dpt",
+          "type": "string"
+        },
+        "state_group_address": {
+          "maxLength": 16,
+          "minLength": 3,
+          "title": "State Group Address",
+          "type": "string"
+        },
+        "command_group_address": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "minLength": 3,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Group Address"
+        },
+        "readback_group_address": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "minLength": 3,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Readback Group Address"
+        }
+      },
+      "required": [
+        "name",
+        "dpt",
+        "state_group_address"
+      ],
+      "title": "KnxRecipeBinding",
+      "type": "object"
+    },
+    "KnxRecipeEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "semantic_type": {
+          "enum": [
+            "light",
+            "switch",
+            "sensor",
+            "energy"
+          ],
+          "title": "Semantic Type",
+          "type": "string"
+        },
+        "area_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Id"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/KnxRecipeBinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "name",
+        "semantic_type",
+        "capabilities"
+      ],
+      "title": "KnxRecipeEntity",
+      "type": "object"
+    },
+    "KnxRecipeProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "knx",
+          "default": "knx",
+          "title": "Transport",
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/KnxRecipeEntity"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Entities",
+          "type": "array"
+        },
+        "secure_mode": {
+          "default": "none",
+          "enum": [
+            "none",
+            "tunnel",
+            "router"
+          ],
+          "title": "Secure Mode",
+          "type": "string"
+        },
+        "group_dpts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "maxProperties": 512,
+          "title": "Group Dpts",
+          "type": "object"
+        }
+      },
+      "required": [
+        "entities"
+      ],
+      "title": "KnxRecipeProfile",
+      "type": "object"
+    },
+    "MatterRecipeBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "cluster_id": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Cluster Id",
+          "type": "integer"
+        },
+        "attribute_id": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Attribute Id",
+          "type": "integer"
+        },
+        "command_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Command Names",
+          "type": "array"
+        },
+        "readback": {
+          "default": false,
+          "title": "Readback",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "cluster_id",
+        "attribute_id"
+      ],
+      "title": "MatterRecipeBinding",
+      "type": "object"
+    },
+    "MatterRecipeEndpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_id": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Endpoint Id",
+          "type": "integer"
+        },
+        "device_type_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 32,
+          "title": "Device Type Ids",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/MatterRecipeBinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "capabilities"
+      ],
+      "title": "MatterRecipeEndpoint",
+      "type": "object"
+    },
+    "MatterRecipeProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "matter",
+          "default": "matter",
+          "title": "Transport",
+          "type": "string"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/MatterRecipeEndpoint"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Endpoints",
+          "type": "array"
+        },
+        "node_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 10000,
+          "title": "Node Ids",
+          "type": "array"
+        },
+        "commissioning_required": {
+          "default": true,
+          "title": "Commissioning Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "endpoints"
+      ],
+      "title": "MatterRecipeProfile",
+      "type": "object"
+    },
+    "ModbusRecipeBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ModbusRecipePoint"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModbusRecipePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "readback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModbusRecipePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "title": "ModbusRecipeBinding",
+      "type": "object"
+    },
+    "ModbusRecipeEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "semantic_type": {
+          "enum": [
+            "light",
+            "switch",
+            "sensor",
+            "energy"
+          ],
+          "title": "Semantic Type",
+          "type": "string"
+        },
+        "area_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Id"
+        },
+        "unit_id": {
+          "maximum": 247,
+          "minimum": 1,
+          "title": "Unit Id",
+          "type": "integer"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/ModbusRecipeBinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "name",
+        "semantic_type",
+        "unit_id",
+        "capabilities"
+      ],
+      "title": "ModbusRecipeEntity",
+      "type": "object"
+    },
+    "ModbusRecipePoint": {
+      "additionalProperties": false,
+      "description": "One explicit Modbus address in a public recipe.",
+      "properties": {
+        "area": {
+          "enum": [
+            "coil",
+            "discrete_input",
+            "input_register",
+            "holding_register"
+          ],
+          "title": "Area",
+          "type": "string"
+        },
+        "address": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "data_type": {
+          "enum": [
+            "bool",
+            "uint16",
+            "int16",
+            "float32"
+          ],
+          "title": "Data Type",
+          "type": "string"
+        },
+        "byte_order": {
+          "default": "big",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Byte Order",
+          "type": "string"
+        },
+        "word_order": {
+          "default": "big",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Word Order",
+          "type": "string"
+        },
+        "scale": {
+          "default": 1.0,
+          "title": "Scale",
+          "type": "number"
+        },
+        "offset": {
+          "default": 0.0,
+          "title": "Offset",
+          "type": "number"
+        }
+      },
+      "required": [
+        "area",
+        "address",
+        "data_type"
+      ],
+      "title": "ModbusRecipePoint",
+      "type": "object"
+    },
+    "ModbusRecipeProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "modbus",
+          "default": "modbus",
+          "title": "Transport",
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/ModbusRecipeEntity"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Entities",
+          "type": "array"
+        },
+        "unit_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 247,
+          "title": "Unit Ids",
+          "type": "array"
+        },
+        "poll_interval_seconds": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Poll Interval Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "entities"
+      ],
+      "title": "ModbusRecipeProfile",
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TransportFamily": {
+      "enum": [
+        "mqtt",
+        "rest",
+        "websocket",
+        "modbus",
+        "knx",
+        "matter",
+        "serial",
+        "custom"
+      ],
+      "title": "TransportFamily",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Public recipe that can be used by a bounded generic connector engine.",
+  "properties": {
+    "schema_version": {
+      "const": "v1",
+      "default": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "connector_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "display_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "device_type": {
+      "$ref": "#/$defs/DeviceType",
+      "default": "unsupported"
+    },
+    "transport_family": {
+      "$ref": "#/$defs/TransportFamily"
+    },
+    "discovery_strategies": {
+      "default": [
+        "manual"
+      ],
+      "items": {
+        "$ref": "#/$defs/DiscoveryStrategy"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Discovery Strategies",
+      "type": "array"
+    },
+    "auth_schemes": {
+      "default": [
+        "none"
+      ],
+      "items": {
+        "$ref": "#/$defs/AuthScheme"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Auth Schemes",
+      "type": "array"
+    },
+    "discovery_options": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "title": "Discovery Options",
+      "type": "object"
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/CapabilityBinding"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "protocol_profile": {
+      "anyOf": [
+        {
+          "discriminator": {
+            "mapping": {
+              "knx": "#/$defs/KnxRecipeProfile",
+              "matter": "#/$defs/MatterRecipeProfile",
+              "modbus": "#/$defs/ModbusRecipeProfile"
+            },
+            "propertyName": "transport"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ModbusRecipeProfile"
+            },
+            {
+              "$ref": "#/$defs/KnxRecipeProfile"
+            },
+            {
+              "$ref": "#/$defs/MatterRecipeProfile"
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Protocol Profile"
+    }
+  },
+  "required": [
+    "connector_id",
+    "display_name",
+    "transport_family",
+    "capabilities"
+  ],
+  "title": "ConnectorRecipe",
+  "type": "object"
+}

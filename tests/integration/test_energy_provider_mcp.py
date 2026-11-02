@@ -311,3 +311,25 @@ async def test_mcp_keeps_provider_errors_in_safe_error_envelopes() -> None:
 
     assert result["error"]["code"] == "provider_unavailable"
     assert "traceback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_a12_mcp_rejects_composed_currency_mismatch_without_leaking_payload():
+    context = await build_context()
+    provider = composed_provider()
+    requested = energy_context_for().horizon
+    tariffs = provider.tariffs.get_tariffs(requested)
+    export = tariffs.model_copy(
+        update={
+            "points": [point.model_copy(update={"currency": "USD"}) for point in tariffs.points]
+        }
+    )
+    provider.export_tariffs = StaticTariffProvider(export)
+    context.energy_context_provider = provider
+    response = structured(
+        await create_domotics_server(context).call_tool(
+            "get_energy_context", {"horizon": requested.model_dump(mode="json")}
+        )
+    )
+    assert response["error"]["code"] == "provider_invalid"
+    assert "input_value" not in str(response)

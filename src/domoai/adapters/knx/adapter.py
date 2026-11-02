@@ -56,10 +56,13 @@ class KnxAdapter:
         transport: KnxTransport,
         mapping: KnxMappingDocument | Path,
         *,
+        adapter_id: str | None = None,
         discovery_timeout: float = 5.0,
         clock: Clock | None = None,
     ) -> None:
         self.transport = transport
+        if adapter_id is not None:
+            self.adapter_id = adapter_id
         self.mapping = load_mapping(mapping) if isinstance(mapping, Path) else mapping
         self.discovery_timeout = discovery_timeout
         self._clock = clock or SystemClock()

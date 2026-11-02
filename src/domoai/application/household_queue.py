@@ -6,6 +6,7 @@ import asyncio
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -24,6 +25,7 @@ class QueueClosed(RuntimeError):
 class _WorkItem:
     work: Callable[[], Any] | Awaitable[Any]
     future: asyncio.Future[Any]
+    context: Context
 
 
 class HouseholdWorkQueues:
@@ -59,12 +61,34 @@ class HouseholdWorkQueues:
             if count >= self.max_per_household or self._total >= self.max_total:
                 raise QueueOverloaded(f"household work queue is full for {household_id}")
             queue = self._queues.setdefault(household_id, deque())
-            queue.append(_WorkItem(work=work, future=future))
+            item = _WorkItem(work=work, future=future, context=copy_context())
+            queue.append(item)
             self._counts[household_id] = count + 1
             self._total += 1
             if household_id not in self._workers:
                 self._workers[household_id] = asyncio.create_task(self._run(household_id))
-        return await future
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            async with self._lock:
+                pending_queue = self._queues.get(household_id)
+                if pending_queue is not None and item in pending_queue:
+                    pending_queue.remove(item)
+                    self._release_capacity(household_id)
+                    self._discard(item)
+                    future.cancel()
+            # Once extracted, the callable owns its physical cancellation
+            # boundary. Do not abandon it while it may still be acting.
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not future.cancelled():
+                future.exception()
+            raise
 
     def depths(self) -> dict[str, int]:
         return {household_id: count for household_id, count in self._counts.items() if count}
@@ -72,19 +96,29 @@ class HouseholdWorkQueues:
     async def close(self) -> None:
         async with self._lock:
             self._closed = True
-            for queue in self._queues.values():
+            for household_id, queue in self._queues.items():
                 while queue:
                     item = queue.popleft()
+                    self._release_capacity(household_id)
+                    self._discard(item)
                     if not item.future.done():
                         item.future.set_exception(QueueClosed("household work queues are closed"))
             workers = tuple(self._workers.values())
+        cancelled = False
         if workers:
-            await asyncio.gather(*workers, return_exceptions=True)
+            drain = asyncio.gather(*workers, return_exceptions=True)
+            while not drain.done():
+                try:
+                    await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    cancelled = True
         async with self._lock:
             self._queues.clear()
             self._workers.clear()
             self._counts.clear()
             self._total = 0
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _run(self, household_id: str) -> None:
         while True:
@@ -96,9 +130,7 @@ class HouseholdWorkQueues:
                     return
                 item = queue.popleft()
             try:
-                result = item.work() if callable(item.work) else item.work
-                if inspect.isawaitable(result):
-                    result = await result
+                result = await asyncio.create_task(self._invoke(item), context=item.context)
                 if not item.future.done():
                     item.future.set_result(result)
             except BaseException as error:
@@ -106,7 +138,20 @@ class HouseholdWorkQueues:
                     item.future.set_exception(error)
             finally:
                 async with self._lock:
-                    self._counts[household_id] = self._counts.get(household_id, 1) - 1
-                    self._total -= 1
-                    if self._counts[household_id] <= 0:
-                        self._counts.pop(household_id, None)
+                    self._release_capacity(household_id)
+
+    @staticmethod
+    async def _invoke(item: _WorkItem) -> Any:
+        result = item.work() if callable(item.work) else item.work
+        return await result if inspect.isawaitable(result) else result
+
+    @staticmethod
+    def _discard(item: _WorkItem) -> None:
+        if inspect.iscoroutine(item.work):
+            item.work.close()
+
+    def _release_capacity(self, household_id: str) -> None:
+        self._counts[household_id] -= 1
+        self._total -= 1
+        if self._counts[household_id] == 0:
+            self._counts.pop(household_id)

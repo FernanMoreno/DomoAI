@@ -1,0 +1,242 @@
+{
+  "$defs": {
+    "BatteryOriginEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "enum": [
+            "horizon_solar",
+            "horizon_grid",
+            "initial_unknown"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "initial_kwh": {
+          "minimum": 0,
+          "title": "Initial Kwh",
+          "type": "number"
+        },
+        "charged_kwh": {
+          "minimum": 0,
+          "title": "Charged Kwh",
+          "type": "number"
+        },
+        "local_delivered_kwh": {
+          "minimum": 0,
+          "title": "Local Delivered Kwh",
+          "type": "number"
+        },
+        "exported_kwh": {
+          "minimum": 0,
+          "title": "Exported Kwh",
+          "type": "number"
+        },
+        "charge_loss_kwh": {
+          "minimum": 0,
+          "title": "Charge Loss Kwh",
+          "type": "number"
+        },
+        "discharge_loss_kwh": {
+          "minimum": 0,
+          "title": "Discharge Loss Kwh",
+          "type": "number"
+        },
+        "terminal_stored_kwh": {
+          "minimum": 0,
+          "title": "Terminal Stored Kwh",
+          "type": "number"
+        }
+      },
+      "required": [
+        "origin",
+        "initial_kwh",
+        "charged_kwh",
+        "local_delivered_kwh",
+        "exported_kwh",
+        "charge_loss_kwh",
+        "discharge_loss_kwh",
+        "terminal_stored_kwh"
+      ],
+      "title": "BatteryOriginEvidence",
+      "type": "object"
+    },
+    "SolarAccountingConvention": {
+      "additionalProperties": false,
+      "properties": {
+        "accounting_version": {
+          "const": "direct_solar_first_destination_conservative_v1",
+          "default": "direct_solar_first_destination_conservative_v1",
+          "title": "Accounting Version",
+          "type": "string"
+        },
+        "evidence_kind": {
+          "const": "modeled_attribution",
+          "default": "modeled_attribution",
+          "title": "Evidence Kind",
+          "type": "string"
+        },
+        "horizon_scope": {
+          "const": "current_horizon_only",
+          "default": "current_horizon_only",
+          "title": "Horizon Scope",
+          "type": "string"
+        },
+        "unit": {
+          "const": "kWh",
+          "default": "kWh",
+          "title": "Unit",
+          "type": "string"
+        },
+        "initial_origin": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Initial Origin",
+          "type": "string"
+        },
+        "objective_basis": {
+          "const": "native_power_floor",
+          "default": "native_power_floor",
+          "title": "Objective Basis",
+          "type": "string"
+        },
+        "power_scale": {
+          "exclusiveMinimum": 0,
+          "title": "Power Scale",
+          "type": "integer"
+        },
+        "soc_scale": {
+          "exclusiveMinimum": 0,
+          "title": "Soc Scale",
+          "type": "integer"
+        },
+        "efficiency_scale": {
+          "exclusiveMinimum": 0,
+          "title": "Efficiency Scale",
+          "type": "integer"
+        },
+        "resolution_minutes": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution Minutes",
+          "type": "integer"
+        },
+        "charge_gain": {
+          "minimum": 0,
+          "title": "Charge Gain",
+          "type": "integer"
+        },
+        "discharge_cost": {
+          "exclusiveMinimum": 0,
+          "title": "Discharge Cost",
+          "type": "integer"
+        },
+        "quantization_bound_kwh": {
+          "minimum": 0,
+          "title": "Quantization Bound Kwh",
+          "type": "number"
+        }
+      },
+      "required": [
+        "power_scale",
+        "soc_scale",
+        "efficiency_scale",
+        "resolution_minutes",
+        "charge_gain",
+        "discharge_cost",
+        "quantization_bound_kwh"
+      ],
+      "title": "SolarAccountingConvention",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "scope": {
+      "enum": [
+        "horizon",
+        "slot"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "convention": {
+      "$ref": "#/$defs/SolarAccountingConvention"
+    },
+    "generated_kwh": {
+      "minimum": 0,
+      "title": "Generated Kwh",
+      "type": "number"
+    },
+    "direct_local_kwh": {
+      "minimum": 0,
+      "title": "Direct Local Kwh",
+      "type": "number"
+    },
+    "battery_local_kwh": {
+      "minimum": 0,
+      "title": "Battery Local Kwh",
+      "type": "number"
+    },
+    "self_consumption_kwh": {
+      "minimum": 0,
+      "title": "Self Consumption Kwh",
+      "type": "number"
+    },
+    "exported_kwh": {
+      "minimum": 0,
+      "title": "Exported Kwh",
+      "type": "number"
+    },
+    "charge_loss_kwh": {
+      "minimum": 0,
+      "title": "Charge Loss Kwh",
+      "type": "number"
+    },
+    "discharge_loss_kwh": {
+      "minimum": 0,
+      "title": "Discharge Loss Kwh",
+      "type": "number"
+    },
+    "terminal_stored_kwh": {
+      "minimum": 0,
+      "title": "Terminal Stored Kwh",
+      "type": "number"
+    },
+    "objective_credit_kwh": {
+      "minimum": 0,
+      "title": "Objective Credit Kwh",
+      "type": "number"
+    },
+    "local_quantization_remainder_kwh": {
+      "minimum": 0,
+      "title": "Local Quantization Remainder Kwh",
+      "type": "number"
+    },
+    "battery_origins": {
+      "items": {
+        "$ref": "#/$defs/BatteryOriginEvidence"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "title": "Battery Origins",
+      "type": "array"
+    }
+  },
+  "required": [
+    "scope",
+    "convention",
+    "generated_kwh",
+    "direct_local_kwh",
+    "battery_local_kwh",
+    "self_consumption_kwh",
+    "exported_kwh",
+    "charge_loss_kwh",
+    "discharge_loss_kwh",
+    "terminal_stored_kwh",
+    "objective_credit_kwh",
+    "local_quantization_remainder_kwh",
+    "battery_origins"
+  ],
+  "title": "SolarAccountingEvidence",
+  "type": "object"
+}

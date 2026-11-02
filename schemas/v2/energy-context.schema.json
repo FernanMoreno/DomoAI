@@ -1,0 +1,1136 @@
+{
+  "$defs": {
+    "BaseLoadPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "power": {
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Unit",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfidenceBand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "slot",
+        "power"
+      ],
+      "title": "BaseLoadPoint",
+      "type": "object"
+    },
+    "BaseLoadSource": {
+      "additionalProperties": false,
+      "description": "Origin of residual demand, including declared assumptions rather than measurements.\n\nFor a reserve, observed_at is the original declaration time and validity is\ninterval-based. Other forecasts retain the observation freshness policy.",
+      "properties": {
+        "source_id": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_revision": {
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "declared_reserve",
+            "forecast",
+            "fixture"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "scope": {
+          "const": "uncontrolled_demand",
+          "title": "Scope",
+          "type": "string"
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid From"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_revision",
+        "observed_at",
+        "kind",
+        "scope"
+      ],
+      "title": "BaseLoadSource",
+      "type": "object"
+    },
+    "BatteryActuator": {
+      "additionalProperties": false,
+      "description": "Explicit canonical binding for physical battery dispatch.",
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "charge_command": {
+          "minLength": 1,
+          "title": "Charge Command",
+          "type": "string"
+        },
+        "discharge_command": {
+          "minLength": 1,
+          "title": "Discharge Command",
+          "type": "string"
+        },
+        "stop_command": {
+          "minLength": 1,
+          "title": "Stop Command",
+          "type": "string"
+        },
+        "power_feedback_capability": {
+          "minLength": 1,
+          "title": "Power Feedback Capability",
+          "type": "string"
+        },
+        "power_feedback_convention": {
+          "default": "charge_positive",
+          "enum": [
+            "charge_positive",
+            "discharge_positive"
+          ],
+          "title": "Power Feedback Convention",
+          "type": "string"
+        },
+        "power_feedback_tolerance_kw": {
+          "exclusiveMinimum": 0,
+          "title": "Power Feedback Tolerance Kw",
+          "type": "number"
+        },
+        "power_feedback_settle_timeout_seconds": {
+          "default": 0,
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Power Feedback Settle Timeout Seconds",
+          "type": "number"
+        },
+        "power_feedback_poll_interval_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Power Feedback Poll Interval Seconds",
+          "type": "number"
+        },
+        "soc_reconciliation_capability": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Soc Reconciliation Capability"
+        },
+        "power_unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Power Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "charge_command",
+        "discharge_command",
+        "stop_command",
+        "power_feedback_capability",
+        "power_feedback_tolerance_kw"
+      ],
+      "title": "BatteryActuator",
+      "type": "object"
+    },
+    "BatteryCapacityEvidence": {
+      "additionalProperties": false,
+      "description": "Explicit provider/device-bound capacity used for SOC conversion.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "provider_id": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "capacity_source": {
+          "default": "provider_config",
+          "enum": [
+            "provider_config",
+            "provider_measurement"
+          ],
+          "title": "Capacity Source",
+          "type": "string"
+        },
+        "quality": {
+          "$ref": "#/$defs/MeasurementQuality",
+          "default": "good"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed At"
+        },
+        "received_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Received At"
+        },
+        "nominal_capacity_attestation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NominalCapacityAttestation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider_id",
+        "device_id",
+        "capacity_kwh"
+      ],
+      "title": "BatteryCapacityEvidence",
+      "type": "object"
+    },
+    "BatteryProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "initial_soc_kwh": {
+          "minimum": 0,
+          "title": "Initial Soc Kwh",
+          "type": "number"
+        },
+        "min_soc_kwh": {
+          "minimum": 0,
+          "title": "Min Soc Kwh",
+          "type": "number"
+        },
+        "max_soc_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Max Soc Kwh",
+          "type": "number"
+        },
+        "max_charge_kw": {
+          "minimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "max_discharge_kw": {
+          "minimum": 0,
+          "title": "Max Discharge Kw",
+          "type": "number"
+        },
+        "charge_efficiency": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Charge Efficiency",
+          "type": "number"
+        },
+        "discharge_efficiency": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Discharge Efficiency",
+          "type": "number"
+        },
+        "degradation_cost_per_kwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degradation Cost Per Kwh"
+        },
+        "actuator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatteryActuator"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "initial_soc_observation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatterySocObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "capacity_kwh",
+        "initial_soc_kwh",
+        "min_soc_kwh",
+        "max_soc_kwh",
+        "max_charge_kw",
+        "max_discharge_kw",
+        "charge_efficiency",
+        "discharge_efficiency"
+      ],
+      "title": "BatteryProfile",
+      "type": "object"
+    },
+    "BatterySocConversionEvidence": {
+      "additionalProperties": false,
+      "description": "Non-secret evidence for converting percentage SOC to canonical energy.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_value_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Source Value Percent",
+          "type": "number"
+        },
+        "capacity": {
+          "$ref": "#/$defs/BatteryCapacityEvidence"
+        },
+        "method": {
+          "const": "percentage_of_declared_capacity",
+          "default": "percentage_of_declared_capacity",
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_value_percent",
+        "capacity"
+      ],
+      "title": "BatterySocConversionEvidence",
+      "type": "object"
+    },
+    "BatterySocObservation": {
+      "additionalProperties": false,
+      "description": "Canonical, provenance-rich SOC evidence used to initialize planning.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "provider_id": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "metric": {
+          "const": "battery.soc",
+          "default": "battery.soc",
+          "title": "Metric",
+          "type": "string"
+        },
+        "value_kwh": {
+          "minimum": 0,
+          "title": "Value Kwh",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kWh",
+          "default": "kWh",
+          "title": "Unit",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "quality": {
+          "$ref": "#/$defs/MeasurementQuality",
+          "default": "good"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "conversion_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatterySocConversionEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider_id",
+        "device_id",
+        "value_kwh",
+        "observed_at",
+        "received_at",
+        "source_ref"
+      ],
+      "title": "BatterySocObservation",
+      "type": "object"
+    },
+    "ConfidenceBand": {
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "minimum": 0,
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "minimum": 0,
+          "title": "High",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "title": "ConfidenceBand",
+      "type": "object"
+    },
+    "EVState": {
+      "additionalProperties": false,
+      "description": "Canonical provider-observed EV state used for executable planning.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "connected": {
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "soc_kwh": {
+          "minimum": 0,
+          "title": "Soc Kwh",
+          "type": "number"
+        },
+        "capacity_kwh": {
+          "exclusiveMinimum": 0,
+          "title": "Capacity Kwh",
+          "type": "number"
+        },
+        "max_charge_kw": {
+          "minimum": 0,
+          "title": "Max Charge Kw",
+          "type": "number"
+        },
+        "departure_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Departure At"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "source_revision": {
+          "minLength": 1,
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "quality": {
+          "$ref": "#/$defs/MeasurementQuality",
+          "default": "good"
+        }
+      },
+      "required": [
+        "device_id",
+        "connected",
+        "soc_kwh",
+        "capacity_kwh",
+        "max_charge_kw",
+        "observed_at",
+        "received_at",
+        "source_revision",
+        "source_ref"
+      ],
+      "title": "EVState",
+      "type": "object"
+    },
+    "ExteriorTemperaturePoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "temperature_c": {
+          "title": "Temperature C",
+          "type": "number"
+        },
+        "unit": {
+          "const": "degC",
+          "default": "degC",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "temperature_c"
+      ],
+      "title": "ExteriorTemperaturePoint",
+      "type": "object"
+    },
+    "HVACActuator": {
+      "additionalProperties": false,
+      "description": "Explicit canonical binding for physical HVAC dispatch.\n\nMirrors ``BatteryActuator``'s shape (power-feedback postcondition\nverification), not ``EVActuator``'s -- HVAC commands are verified\nagainst reported power the same way battery dispatch already is.",
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "heat_command": {
+          "minLength": 1,
+          "title": "Heat Command",
+          "type": "string"
+        },
+        "cool_command": {
+          "minLength": 1,
+          "title": "Cool Command",
+          "type": "string"
+        },
+        "stop_command": {
+          "minLength": 1,
+          "title": "Stop Command",
+          "type": "string"
+        },
+        "power_feedback_capability": {
+          "minLength": 1,
+          "title": "Power Feedback Capability",
+          "type": "string"
+        },
+        "power_feedback_convention": {
+          "default": "heat_positive",
+          "enum": [
+            "heat_positive",
+            "cool_positive"
+          ],
+          "title": "Power Feedback Convention",
+          "type": "string"
+        },
+        "power_feedback_tolerance_kw": {
+          "exclusiveMinimum": 0,
+          "title": "Power Feedback Tolerance Kw",
+          "type": "number"
+        },
+        "power_feedback_settle_timeout_seconds": {
+          "default": 0,
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Power Feedback Settle Timeout Seconds",
+          "type": "number"
+        },
+        "power_feedback_poll_interval_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Power Feedback Poll Interval Seconds",
+          "type": "number"
+        },
+        "power_unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Power Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "capability",
+        "heat_command",
+        "cool_command",
+        "stop_command",
+        "power_feedback_capability",
+        "power_feedback_tolerance_kw"
+      ],
+      "title": "HVACActuator",
+      "type": "object"
+    },
+    "Horizon": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "format": "date-time",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "format": "date-time",
+          "title": "End",
+          "type": "string"
+        },
+        "resolution_minutes": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution Minutes",
+          "type": "integer"
+        },
+        "timezone": {
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "resolution_minutes",
+        "timezone"
+      ],
+      "title": "Horizon",
+      "type": "object"
+    },
+    "MeasurementQuality": {
+      "enum": [
+        "good",
+        "stale",
+        "unavailable",
+        "invalid"
+      ],
+      "title": "MeasurementQuality",
+      "type": "string"
+    },
+    "NominalCapacityAttestation": {
+      "additionalProperties": false,
+      "description": "Non-secret provenance explaining why a capacity is claimed nominal.",
+      "properties": {
+        "schema_version": {
+          "const": "v1",
+          "default": "v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_type": {
+          "enum": [
+            "vendor_documentation",
+            "installer_attestation"
+          ],
+          "title": "Evidence Type",
+          "type": "string"
+        },
+        "reference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        },
+        "subject_model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Subject Model",
+          "type": "string"
+        },
+        "attested_by": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Attested By",
+          "type": "string"
+        },
+        "attested_at": {
+          "format": "date-time",
+          "title": "Attested At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_type",
+        "reference",
+        "subject_model",
+        "attested_by",
+        "attested_at"
+      ],
+      "title": "NominalCapacityAttestation",
+      "type": "object"
+    },
+    "SolarForecastPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "power": {
+          "minimum": 0,
+          "title": "Power",
+          "type": "number"
+        },
+        "unit": {
+          "const": "kW",
+          "default": "kW",
+          "title": "Unit",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfidenceBand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "slot",
+        "power"
+      ],
+      "title": "SolarForecastPoint",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "minLength": 1,
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        },
+        "source_device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Device Id"
+        },
+        "external_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Type"
+        },
+        "metadata_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata Digest"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "TariffPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "price_per_kwh": {
+          "title": "Price Per Kwh",
+          "type": "number"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "price_per_kwh",
+        "currency"
+      ],
+      "title": "TariffPoint",
+      "type": "object"
+    },
+    "ThermalProfile": {
+      "additionalProperties": false,
+      "description": "Whole-house thermal model consumed by the CP-SAT optimizer.\n\nNo ``DispatchableBatteryBinding``-style attestation wrapper: thermal\ncapacitance is an ordinary scenario-supplied value, not a regulated\nclaim (unlike battery capacity).",
+      "properties": {
+        "capacitance_kwh_per_c": {
+          "exclusiveMinimum": 0,
+          "title": "Capacitance Kwh Per C",
+          "type": "number"
+        },
+        "ua_kw_per_c": {
+          "exclusiveMinimum": 0,
+          "title": "Ua Kw Per C",
+          "type": "number"
+        },
+        "initial_temperature_c": {
+          "title": "Initial Temperature C",
+          "type": "number"
+        },
+        "comfort_min_c": {
+          "title": "Comfort Min C",
+          "type": "number"
+        },
+        "comfort_max_c": {
+          "title": "Comfort Max C",
+          "type": "number"
+        },
+        "max_heat_kw": {
+          "minimum": 0,
+          "title": "Max Heat Kw",
+          "type": "number"
+        },
+        "max_cool_kw": {
+          "minimum": 0,
+          "title": "Max Cool Kw",
+          "type": "number"
+        },
+        "heating_cop": {
+          "exclusiveMinimum": 0,
+          "title": "Heating Cop",
+          "type": "number"
+        },
+        "cooling_cop": {
+          "exclusiveMinimum": 0,
+          "title": "Cooling Cop",
+          "type": "number"
+        },
+        "actuator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HVACActuator"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "capacitance_kwh_per_c",
+        "ua_kw_per_c",
+        "initial_temperature_c",
+        "comfort_min_c",
+        "comfort_max_c",
+        "max_heat_kw",
+        "max_cool_kw",
+        "heating_cop",
+        "cooling_cop"
+      ],
+      "title": "ThermalProfile",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete external energy context for exactly one optimization horizon.",
+  "properties": {
+    "schema_version": {
+      "const": "v2",
+      "default": "v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "horizon": {
+      "$ref": "#/$defs/Horizon"
+    },
+    "tariffs": {
+      "items": {
+        "$ref": "#/$defs/TariffPoint"
+      },
+      "title": "Tariffs",
+      "type": "array"
+    },
+    "solar_forecast": {
+      "items": {
+        "$ref": "#/$defs/SolarForecastPoint"
+      },
+      "title": "Solar Forecast",
+      "type": "array"
+    },
+    "base_load_forecast": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/BaseLoadPoint"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Base Load Forecast"
+    },
+    "base_load_source": {
+      "$ref": "#/$defs/BaseLoadSource"
+    },
+    "export_tariffs": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/TariffPoint"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Export Tariffs"
+    },
+    "battery": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BatteryProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "ev_states": {
+      "items": {
+        "$ref": "#/$defs/EVState"
+      },
+      "title": "Ev States",
+      "type": "array"
+    },
+    "thermal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ThermalProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "exterior_temperature_forecast": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ExteriorTemperaturePoint"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exterior Temperature Forecast"
+    },
+    "source_revision": {
+      "minLength": 1,
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "horizon",
+    "tariffs",
+    "solar_forecast",
+    "base_load_source",
+    "source_revision",
+    "observed_at"
+  ],
+  "title": "EnergyContext",
+  "type": "object"
+}

@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "CommissioningMethod": {
+      "enum": [
+        "qr",
+        "manual"
+      ],
+      "title": "CommissioningMethod",
+      "type": "string"
+    },
+    "CommissioningState": {
+      "enum": [
+        "created",
+        "awaiting_confirmation",
+        "running",
+        "completed",
+        "failed",
+        "expired",
+        "cleaned"
+      ],
+      "title": "CommissioningState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Secret-free state for one bounded commissioning attempt.",
+  "properties": {
+    "session_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "connection_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Connection Id",
+      "type": "string"
+    },
+    "method": {
+      "$ref": "#/$defs/CommissioningMethod"
+    },
+    "state": {
+      "$ref": "#/$defs/CommissioningState",
+      "default": "created"
+    },
+    "deadline": {
+      "format": "date-time",
+      "title": "Deadline",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "confirmation_required": {
+      "default": true,
+      "title": "Confirmation Required",
+      "type": "boolean"
+    },
+    "cleanup_done": {
+      "default": false,
+      "title": "Cleanup Done",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "session_id",
+    "connection_id",
+    "method",
+    "deadline"
+  ],
+  "title": "MatterCommissioningSession",
+  "type": "object"
+}

@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import os
+import re
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from domoai.domain.models import StrictModel
+
+_MCP_PATH_PATTERN = re.compile(r"(?:/[A-Za-z0-9._~-]+)+")
+_RESIDENT_RESERVED_PATHS = frozenset(
+    {
+        "/api/v1/resident/session",
+        "/api/v1/resident/reviews",
+        "/api/v1/resident/decisions",
+    }
+)
 
 
 class Settings(StrictModel):
@@ -22,6 +32,8 @@ class Settings(StrictModel):
     mcp_path: str = Field(default="/mcp", min_length=2)
     mcp_public_url: str = "http://127.0.0.1:8000"
     mcp_client_token_file: Path | None = None
+    resident_token_file: Path | None = None
+    resident_origin: str | None = None
     mcp_metrics_enabled: bool = False
     mcp_metrics_max_bytes: int = Field(default=262144, gt=0)
     mcp_deployment_id: str = Field(default="default", min_length=1)
@@ -50,9 +62,12 @@ class Settings(StrictModel):
     metric_history_max_samples: int = Field(default=1000, gt=0)
     privacy_retention_days: int = Field(default=90, ge=1, le=3650)
     mcp_json_response: bool = True
+    mcp_chat_confirmation: bool = False
+    mcp_chat_confirmation_timeout_seconds: float = Field(default=120, ge=10, le=600)
     mcp_server_sent_events: bool = False
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, gt=0)
     database_path: Path = Path("data/domoai.sqlite3")
+    connection_master_key_path: Path = Path("data/domoai-key/master.key")
     audit_database_path: Path | None = None
     backup_encryption_key_file: Path | None = None
     policy_config_path: Path | None = None
@@ -60,6 +75,12 @@ class Settings(StrictModel):
     safety_limits_path: Path | None = None
     home_assistant_url: str | None = None
     home_assistant_token: SecretStr | None = None
+    home_assistant_oauth_authorization_url: str | None = None
+    home_assistant_oauth_token_url: str | None = None
+    home_assistant_oauth_revoke_url: str | None = None
+    home_assistant_oauth_client_id: str | None = None
+    home_assistant_oauth_redirect_uri: str | None = None
+    home_assistant_oauth_scopes: tuple[str, ...] = ()
     operator_approval_token: SecretStr | None = None
     allow_legacy_operator_token: bool = False
     home_assistant_mapping_path: Path | None = None
@@ -67,6 +88,10 @@ class Settings(StrictModel):
     zigbee2mqtt_base_topic: str = Field(default="zigbee2mqtt", min_length=1)
     generic_mqtt_url: str | None = None
     generic_mqtt_mapping_path: Path | None = None
+    generic_mqtt_discovery_url: str | None = None
+    generic_mqtt_discovery_prefix: str = Field(
+        default="homeassistant", min_length=1, max_length=128
+    )
     matter_server_url: str | None = None
     knx_gateway_host: str | None = None
     knx_gateway_port: int = Field(default=3671, ge=1, le=65535)
@@ -74,9 +99,15 @@ class Settings(StrictModel):
     knx_gateway_route_back: bool = False
     knx_config_path: Path | None = None
     knx_timeout_seconds: float = Field(default=5.0, gt=0)
+    knx_secure_mode: Literal["ip_secure", "data_secure", "ip_and_data_secure"] | None = None
+    knx_secure_keyring_path: Path | None = None
+    knx_secure_interface: str | None = None
+    knx_secure_user_id: int | None = Field(default=None, ge=0, le=65535)
+    knx_secure_credential_ref: str | None = None
     modbus_host: str | None = None
     modbus_port: int = Field(default=502, ge=1, le=65535)
     modbus_config_path: Path | None = None
+    modbus_profile_catalog_path: Path = Path("data/modbus-profiles")
     modbus_timeout_seconds: float = Field(default=5.0, gt=0)
     modbus_poll_interval_seconds: float = Field(default=5.0, gt=0)
     mqtt_username: str | None = None
@@ -93,6 +124,9 @@ class Settings(StrictModel):
     matter_optional_node_ids: tuple[int, ...] = Field(default=(), max_length=64)
     scheduler_poll_interval_seconds: int = Field(default=30, gt=0)
     scheduler_grace_window_seconds: int = Field(default=900, gt=0)
+    audit_outbox_poll_interval_seconds: float = Field(default=1.0, gt=0, le=3600)
+    audit_outbox_lease_seconds: float = Field(default=30.0, gt=1.0, le=86_400)
+    audit_outbox_batch_size: int = Field(default=100, ge=1, le=1000)
     optimization_max_solver_time_seconds: float = Field(default=30.0, gt=0)
     optimization_max_horizon_slots: int = Field(default=10080, gt=0)
     optimization_worker_queue_capacity: int = Field(default=2, ge=0)
@@ -117,6 +151,7 @@ class Settings(StrictModel):
     solar_inverter_ac_max_kw: float | None = Field(default=None, gt=0)
     solar_timezone: str = Field(default="Europe/Madrid", min_length=1)
     solar_profile_path: Path | None = None
+    base_load_profile_path: Path | None = None
     battery_dispatch_profile_path: Path | None = None
     ev_charging_binding_paths: tuple[Path, ...] = ()
     battery_hil_evidence_path: Path | None = None
@@ -131,9 +166,29 @@ class Settings(StrictModel):
 
         return self.ev_charging_binding_paths[0] if self.ev_charging_binding_paths else None
 
+    @field_validator("resident_token_file", mode="before")
+    @classmethod
+    def validate_resident_token_path(cls, value: object) -> object:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("resident token file must not be blank")
+            return Path(value)
+        return value
+
+    @field_validator("resident_origin", mode="before")
+    @classmethod
+    def validate_resident_origin(cls, value: object) -> str | None:
+        return None if value is None else _canonical_resident_origin(value)
+
     @model_validator(mode="after")
     def validate_source_selection(self) -> Settings:
         self._validate_mcp_configuration()
+        if (self.resident_token_file is None) != (self.resident_origin is None):
+            raise ValueError("resident token file and origin must be configured together")
+        if self.resident_origin is not None and self.resident_origin.startswith("http:"):
+            origin_host = urlparse(self.resident_origin).hostname
+            if not _is_loopback_bind(self.mcp_host) or not _is_loopback_bind(origin_host or ""):
+                raise ValueError("resident HTTP origin requires loopback origin and bind")
         self._validate_storage_isolation()
         if self.household_queue_max_per_household > self.household_queue_max_total:
             raise ValueError(
@@ -171,6 +226,19 @@ class Settings(StrictModel):
             )
         if self.mqtt_password is not None and self.mqtt_username is None:
             raise ValueError("DOMOAI_MQTT_USERNAME is required when a password is configured")
+        oauth_values = (
+            self.home_assistant_oauth_authorization_url,
+            self.home_assistant_oauth_token_url,
+            self.home_assistant_oauth_client_id,
+            self.home_assistant_oauth_redirect_uri,
+        )
+        if any(value is not None for value in oauth_values) and not all(
+            value is not None for value in oauth_values
+        ):
+            raise ValueError(
+                "Home Assistant OAuth authorization, token, client and redirect settings "
+                "must be configured together"
+            )
         if len(set(self.matter_optional_node_ids)) != len(self.matter_optional_node_ids):
             raise ValueError("DOMOAI_MATTER_OPTIONAL_NODE_IDS must be unique")
         if any(node_id < 0 for node_id in self.matter_optional_node_ids):
@@ -217,8 +285,19 @@ class Settings(StrictModel):
             )
 
     def _validate_mcp_configuration(self) -> None:
-        if not self.mcp_path.startswith("/") or "?" in self.mcp_path or "#" in self.mcp_path:
-            raise ValueError("MCP path must be an absolute URL path without query or fragment")
+        if self.mcp_chat_confirmation:
+            if "mcp_json_response" in self.model_fields_set and self.mcp_json_response:
+                raise ValueError("chat confirmation requires mcp_json_response=False")
+            self.mcp_json_response = False
+        if not _MCP_PATH_PATTERN.fullmatch(self.mcp_path) or any(
+            segment in {".", ".."} for segment in self.mcp_path.split("/")
+        ):
+            raise ValueError(
+                "MCP path must be a literal absolute URL path of non-empty ASCII segments "
+                "(A-Z a-z 0-9 . _ ~ -) without trailing slash, templates or wildcards"
+            )
+        if self.mcp_path in _RESIDENT_RESERVED_PATHS:
+            raise ValueError("MCP path must not use a reserved resident consent route")
         parsed_url = urlparse(self.mcp_public_url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             raise ValueError("MCP public URL must be an absolute HTTP(S) URL")
@@ -274,6 +353,8 @@ class Settings(StrictModel):
                 if (token_file := os.getenv("DOMOAI_MCP_CLIENT_TOKEN_FILE"))
                 else None
             ),
+            resident_token_file=os.getenv("DOMOAI_RESIDENT_TOKEN_FILE"),  # type: ignore[arg-type]
+            resident_origin=os.getenv("DOMOAI_RESIDENT_ORIGIN"),
             mcp_metrics_enabled=boolean("DOMOAI_MCP_METRICS_ENABLED"),
             mcp_metrics_max_bytes=int(
                 os.getenv("DOMOAI_MCP_METRICS_MAX_BYTES", "262144")
@@ -339,12 +420,24 @@ class Settings(StrictModel):
                 os.getenv("DOMOAI_METRIC_HISTORY_MAX_SAMPLES", "1000")
             ),
             privacy_retention_days=int(os.getenv("DOMOAI_PRIVACY_RETENTION_DAYS", "90")),
-            mcp_json_response=boolean("DOMOAI_MCP_JSON_RESPONSE", True),
+            mcp_json_response=boolean(
+                "DOMOAI_MCP_JSON_RESPONSE", not boolean("DOMOAI_MCP_CHAT_CONFIRMATION")
+            ),
+            mcp_chat_confirmation=boolean("DOMOAI_MCP_CHAT_CONFIRMATION"),
+            mcp_chat_confirmation_timeout_seconds=float(
+                os.getenv("DOMOAI_MCP_CHAT_CONFIRMATION_TIMEOUT_SECONDS", "120")
+            ),
             mcp_server_sent_events=boolean("DOMOAI_MCP_SERVER_SENT_EVENTS", False),
             mcp_max_request_body_size=int(
                 os.getenv("DOMOAI_MCP_MAX_REQUEST_BODY_SIZE", str(4 * 1024 * 1024))
             ),
             database_path=Path(os.getenv("DOMOAI_DATABASE_PATH", "data/domoai.sqlite3")),
+            connection_master_key_path=Path(
+                os.getenv(
+                    "DOMOAI_CONNECTION_MASTER_KEY_PATH",
+                    "data/domoai-key/master.key",
+                )
+            ),
             audit_database_path=(
                 Path(audit_path)
                 if (audit_path := os.getenv("DOMOAI_AUDIT_DATABASE_PATH"))
@@ -372,6 +465,20 @@ class Settings(StrictModel):
             home_assistant_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_HOME_ASSISTANT_TOKEN")) else None
             ),
+            home_assistant_oauth_authorization_url=os.getenv(
+                "DOMOAI_HOME_ASSISTANT_OAUTH_AUTHORIZATION_URL"
+            ),
+            home_assistant_oauth_token_url=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_TOKEN_URL"),
+            home_assistant_oauth_revoke_url=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_REVOKE_URL"),
+            home_assistant_oauth_client_id=os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_CLIENT_ID"),
+            home_assistant_oauth_redirect_uri=os.getenv(
+                "DOMOAI_HOME_ASSISTANT_OAUTH_REDIRECT_URI"
+            ),
+            home_assistant_oauth_scopes=tuple(
+                scope.strip()
+                for scope in os.getenv("DOMOAI_HOME_ASSISTANT_OAUTH_SCOPES", "").split()
+                if scope.strip()
+            ),
             operator_approval_token=(
                 SecretStr(token) if (token := os.getenv("DOMOAI_OPERATOR_APPROVAL_TOKEN")) else None
             ),
@@ -389,6 +496,10 @@ class Settings(StrictModel):
                 if (mapping_path := os.getenv("DOMOAI_GENERIC_MQTT_MAPPING_PATH"))
                 else None
             ),
+            generic_mqtt_discovery_url=os.getenv("DOMOAI_GENERIC_MQTT_DISCOVERY_URL"),
+            generic_mqtt_discovery_prefix=os.getenv(
+                "DOMOAI_GENERIC_MQTT_DISCOVERY_PREFIX", "homeassistant"
+            ),
             matter_server_url=os.getenv("DOMOAI_MATTER_SERVER_URL"),
             knx_gateway_host=os.getenv("DOMOAI_KNX_GATEWAY_HOST"),
             knx_gateway_port=int(os.getenv("DOMOAI_KNX_GATEWAY_PORT", "3671")),
@@ -398,12 +509,27 @@ class Settings(StrictModel):
                 Path(config_path) if (config_path := os.getenv("DOMOAI_KNX_CONFIG_PATH")) else None
             ),
             knx_timeout_seconds=float(os.getenv("DOMOAI_KNX_TIMEOUT_SECONDS", "5")),
+            knx_secure_mode=cast(
+                Literal["ip_secure", "data_secure", "ip_and_data_secure"] | None,
+                os.getenv("DOMOAI_KNX_SECURE_MODE") or None,
+            ),
+            knx_secure_keyring_path=(
+                Path(path) if (path := os.getenv("DOMOAI_KNX_SECURE_KEYRING_PATH")) else None
+            ),
+            knx_secure_interface=os.getenv("DOMOAI_KNX_SECURE_INTERFACE") or None,
+            knx_secure_user_id=(
+                int(user_id) if (user_id := os.getenv("DOMOAI_KNX_SECURE_USER_ID")) else None
+            ),
+            knx_secure_credential_ref=os.getenv("DOMOAI_KNX_SECURE_CREDENTIAL_REF") or None,
             modbus_host=os.getenv("DOMOAI_MODBUS_HOST"),
             modbus_port=int(os.getenv("DOMOAI_MODBUS_PORT", "502")),
             modbus_config_path=(
                 Path(config_path)
                 if (config_path := os.getenv("DOMOAI_MODBUS_CONFIG_PATH"))
                 else None
+            ),
+            modbus_profile_catalog_path=Path(
+                os.getenv("DOMOAI_MODBUS_PROFILE_CATALOG_PATH", "data/modbus-profiles")
             ),
             modbus_timeout_seconds=float(os.getenv("DOMOAI_MODBUS_TIMEOUT_SECONDS", "5")),
             modbus_poll_interval_seconds=float(
@@ -414,6 +540,15 @@ class Settings(StrictModel):
             ),
             scheduler_grace_window_seconds=int(
                 os.getenv("DOMOAI_SCHEDULER_GRACE_WINDOW_SECONDS", "900")
+            ),
+            audit_outbox_poll_interval_seconds=float(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_POLL_INTERVAL_SECONDS", "1")
+            ),
+            audit_outbox_lease_seconds=float(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_LEASE_SECONDS", "30")
+            ),
+            audit_outbox_batch_size=int(
+                os.getenv("DOMOAI_AUDIT_OUTBOX_BATCH_SIZE", "100")
             ),
             optimization_max_solver_time_seconds=float(
                 os.getenv("DOMOAI_OPTIMIZATION_MAX_SOLVER_TIME_SECONDS", "30")
@@ -493,6 +628,11 @@ class Settings(StrictModel):
                 if (profile_path := os.getenv("DOMOAI_SOLAR_PROFILE_PATH"))
                 else None
             ),
+            base_load_profile_path=(
+                Path(base_load_path)
+                if (base_load_path := os.getenv("DOMOAI_BASE_LOAD_PROFILE_PATH"))
+                else None
+            ),
             battery_dispatch_profile_path=(
                 Path(profile_path)
                 if (profile_path := os.getenv("DOMOAI_BATTERY_DISPATCH_PROFILE_PATH"))
@@ -522,6 +662,60 @@ class Settings(StrictModel):
             if os.getenv("DOMOAI_ENERGY_MAX_AGE_SECONDS") is not None
             else 900.0,
         )
+
+
+def _canonical_resident_origin(value: object) -> str:
+    message = "resident origin must be an absolute HTTP(S) origin"
+    if not isinstance(value, str) or not value or not value.isascii():
+        raise ValueError(message)
+    if any(ord(char) <= 32 or ord(char) == 127 or char in "\\%@?#*" for char in value):
+        raise ValueError(message)
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path:
+            raise ValueError(message)
+        host = parsed.hostname
+        if host is None:
+            raise ValueError(message)
+        authority = parsed.netloc
+        if authority.startswith("["):
+            end = authority.index("]")
+            address = ip_address(host)
+            if address.version != 6:
+                raise ValueError(message)
+            normalized_host = f"[{address.compressed}]"
+            suffix = authority[end + 1 :]
+        else:
+            if authority.count(":") > 1 or "[" in authority or "]" in authority:
+                raise ValueError(message)
+            host = host.lower()
+            try:
+                address = ip_address(host)
+            except ValueError:
+                if all(char in "0123456789." for char in host):
+                    raise ValueError(message) from None
+                labels = host.split(".")
+                if len(host) > 253 or any(
+                    re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+                    for label in labels
+                ):
+                    raise ValueError(message) from None
+                normalized_host = host
+            else:
+                normalized_host = str(address)
+            suffix = authority[len(host) :]
+        port = None
+        if suffix:
+            if not suffix.startswith(":") or not suffix[1:].isdigit():
+                raise ValueError(message)
+            port = int(suffix[1:])
+            if not 1 <= port <= 65535:
+                raise ValueError(message)
+        default_port = 80 if parsed.scheme == "http" else 443
+        port_suffix = f":{port}" if port is not None and port != default_port else ""
+        return f"{parsed.scheme}://{normalized_host}{port_suffix}"
+    except (ValueError, IndexError) as error:
+        raise ValueError(message) from error
 
 
 def _is_loopback_bind(host: str) -> bool:

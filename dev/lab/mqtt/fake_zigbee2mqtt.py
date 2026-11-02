@@ -165,12 +165,13 @@ def run() -> None:
 
     host = os.getenv("MQTT_HOST", "127.0.0.1")
     port = int(os.getenv("MQTT_PORT", "1883"))
-    username = os.getenv("MQTT_USERNAME") or None
-    password = os.getenv("MQTT_PASSWORD") or None
+    username = os.getenv("MQTT_USERNAME", "").strip()
+    password = os.getenv("MQTT_PASSWORD")
+    if not username or password is None or not password.strip():
+        raise SystemExit("MQTT_USERNAME and MQTT_PASSWORD are required")
     bridge = VirtualBridge()
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="domoai-lab-z2m")
-    if username:
-        client.username_pw_set(username, password)
+    client.username_pw_set(username, password)
 
     def publish_initial() -> None:
         for topic, payload, retained in bridge.initial_messages():

@@ -7,10 +7,18 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from domoai.admin.connection_adoption import AdoptionManifest, adopt_connections
+from domoai.admin.connector_scaffold import (
+    ConnectorScaffoldRequest,
+    check_connector_scaffold,
+    create_connector_scaffold,
+    load_connector_recipe,
+)
 from domoai.admin.deployment_preflight import DeploymentPreflightRequest, run_preflight
 from domoai.application.etcd_coordination import (
     build_external_etcd_http_client,
@@ -21,8 +29,10 @@ from domoai.application.multihost_qualification import (
     MultiHostQualificationRunner,
     PsycopgPostgresHaProbe,
 )
+from domoai.application.oauth_preflight import OAuthDeploymentPreflight
 from domoai.config.settings import Settings
 from domoai.domain.coordination import LeaseScope
+from domoai.domain.errors import DomainError
 from domoai.hil.multihost import JsonlFencingGatewayBridge
 from domoai.mcp.token_lifecycle import TokenFileManager
 from domoai.persistence.backup import (
@@ -30,6 +40,12 @@ from domoai.persistence.backup import (
     BackupService,
     BackupSource,
     load_backup_encryption_key,
+)
+from domoai.persistence.contract_compatibility import (
+    UnsupportedRuntimeContract,
+    check_runtime_floor,
+    compatibility_diagnostics,
+    inspect_record,
 )
 from domoai.persistence.postgres import PostgresDatabase
 from domoai.persistence.postgres_migration import (
@@ -41,6 +57,7 @@ from domoai.persistence.repositories import (
     RuntimeOwnershipRepository,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
+from domoai.security.secrets import FileSecretStore
 
 
 def _preflight_timeout(value: str) -> float:
@@ -66,6 +83,34 @@ def _positive_hours(value: str) -> float:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="domoai-admin")
     commands = parser.add_subparsers(dest="command", required=True)
+    contracts = commands.add_parser("runtime-contract", help="offline scoped contract evidence")
+    contract_commands = contracts.add_subparsers(dest="contract_command", required=True)
+    preflight = contract_commands.add_parser("preflight")
+    preflight.add_argument("--offset", type=int, default=0)
+    preflight.add_argument("--limit", type=int, default=100)
+    history = contract_commands.add_parser("history")
+    history.add_argument(
+        "--record-kind",
+        required=True,
+        choices=("plan", "scheduled_plan", "automation_rule", "bundle", "physical_intent"),
+    )
+    history.add_argument("--record-id", required=True)
+    adoption = commands.add_parser(
+        "adopt-connections",
+        help="review or explicitly adopt legacy connections offline",
+    )
+    adoption.add_argument("--manifest", type=Path, required=True)
+    source = adoption.add_mutually_exclusive_group(required=True)
+    source.add_argument("--database", type=Path)
+    source.add_argument("--dsn")
+    adoption.add_argument("--master-key", type=Path)
+    adoption.add_argument("--apply", action="store_true")
+    adoption.add_argument("--rollback", action="store_true")
+    adoption.add_argument(
+        "--offline",
+        action="store_true",
+        help="confirm that writers and runtimes using these records are stopped",
+    )
     migrate = commands.add_parser(
         "migrate-postgres",
         help="copy an existing SQLite control plane into an empty PostgreSQL control plane",
@@ -171,6 +216,34 @@ def _parser() -> argparse.ArgumentParser:
     revoke = token_commands.add_parser("revoke")
     revoke.add_argument("--file", type=Path, required=True)
     revoke.add_argument("--client-id", required=True)
+
+    connector = commands.add_parser(
+        "connector", help="create and validate a third-party connection provider"
+    )
+    connector_commands = connector.add_subparsers(dest="connector_command", required=True)
+    connector_create = connector_commands.add_parser(
+        "create", help="generate a provider package with the five SDK entry points"
+    )
+    connector_create.add_argument("--connector-id")
+    connector_create.add_argument("--display-name")
+    connector_create.add_argument("--protocol")
+    connector_create.add_argument(
+        "--recipe", type=Path, help="public YAML recipe used to generate a recipe-backed provider"
+    )
+    connector_create.add_argument("--output", type=Path, required=True)
+    connector_check = connector_commands.add_parser(
+        "check", help="check a generated or existing provider package"
+    )
+    connector_check.add_argument("root", type=Path)
+
+    oauth = commands.add_parser(
+        "oauth", help="validate external OAuth deployment readiness without network I/O"
+    )
+    oauth_commands = oauth.add_subparsers(dest="oauth_command", required=True)
+    oauth_preflight = oauth_commands.add_parser(
+        "preflight", help="validate Home Assistant OAuth variables without exchanging tokens"
+    )
+    oauth_preflight.add_argument("--env-file", type=Path, default=Path("deploy/gateway.env"))
     return parser
 
 
@@ -258,6 +331,38 @@ async def _release_stale_owner(args: argparse.Namespace) -> dict[str, object]:
         if advisory_lock is not None:
             advisory_lock.release()
         await database.close()
+
+
+async def _adopt_connections(args: argparse.Namespace) -> dict[str, object]:
+    if args.apply and not args.offline:
+        raise BackupError("connection_adoption_requires_offline_window")
+    database: SQLiteDatabase | PostgresDatabase = (
+        PostgresDatabase(args.dsn) if args.dsn else SQLiteDatabase(args.database)
+    )
+    lock = None
+    try:
+        manifest = AdoptionManifest.model_validate_json(args.manifest.read_text(encoding="utf-8"))
+        store = None
+        if args.master_key is not None:
+            if args.master_key.is_symlink() or not args.master_key.is_file():
+                raise BackupError("connection_adoption_master_key_unavailable")
+            store = FileSecretStore(args.master_key, scope=manifest.scope, create_key=False)
+        if args.apply:
+            lock = database.advisory_lock()
+            if lock is not None:
+                lock.acquire(blocking=False)
+        await database.open_existing()
+        return adopt_connections(
+            database, manifest, store=store, apply=args.apply, rollback=args.rollback
+        )
+    except BackupError:
+        raise
+    except Exception:
+        raise BackupError("connection_adoption_rejected") from None
+    finally:
+        await database.close()
+        if lock is not None:
+            lock.release()
 
 
 async def _migrate_postgres(args: argparse.Namespace) -> dict[str, object]:
@@ -409,7 +514,111 @@ def _token_command(args: argparse.Namespace) -> dict[str, object]:
     raise ValueError("unknown token command")
 
 
+def _connector_command(args: argparse.Namespace) -> dict[str, object]:
+    try:
+        if args.connector_command == "create":
+            recipe = load_connector_recipe(args.recipe) if args.recipe is not None else None
+            connector_id = args.connector_id or (
+                recipe.connector_id if recipe is not None else None
+            )
+            display_name = args.display_name or (
+                recipe.display_name if recipe is not None else None
+            )
+            protocol = args.protocol or (
+                recipe.transport_family.value if recipe is not None else None
+            )
+            if (
+                not isinstance(connector_id, str)
+                or not connector_id.strip()
+                or not isinstance(display_name, str)
+                or not display_name.strip()
+                or not isinstance(protocol, str)
+                or not protocol.strip()
+            ):
+                raise ValueError(
+                    "connector ID, display name and protocol are required unless --recipe is used"
+                )
+            scaffold_result = create_connector_scaffold(
+                ConnectorScaffoldRequest(
+                    connector_id=connector_id,
+                    display_name=display_name,
+                    protocol=protocol,
+                    output=args.output,
+                    recipe=recipe,
+                )
+            )
+            return asdict(scaffold_result)
+        if args.connector_command == "check":
+            check_result = check_connector_scaffold(args.root)
+            return {
+                "status": check_result.status,
+                "connector_id": check_result.connector_id,
+                "diagnostics": [asdict(item) for item in check_result.diagnostics],
+            }
+        raise ValueError("unknown connector command")
+    except (OSError, ValueError):
+        raise BackupError("connector_scaffold_rejected") from None
+
+
+def _oauth_command(args: argparse.Namespace) -> dict[str, object]:
+    if args.oauth_command != "preflight":
+        raise BackupError("oauth_command_invalid")
+    return OAuthDeploymentPreflight.from_env_file(args.env_file).model_dump(mode="json")
+
+
+async def _runtime_contract(args: argparse.Namespace) -> dict[str, object]:
+    """Use configured administrative DB credentials; never accept a caller SQL/path."""
+    settings = Settings.from_environment()
+    database: SQLiteDatabase
+    if settings.postgres_dsn is not None:
+        database = PostgresDatabase(settings.postgres_dsn.get_secret_value())
+    else:
+        database = SQLiteDatabase(settings.database_path)
+    scope = {
+        "tenant_id": settings.mcp_tenant_id,
+        "household_id": settings.mcp_household_id,
+        "deployment_id": settings.mcp_deployment_id,
+    }
+    try:
+        await database.open_existing()
+        if args.contract_command == "history":
+            return inspect_record(
+                database.connection, record_kind=args.record_kind, record_id=args.record_id, **scope
+            ).as_response()
+        floor = check_runtime_floor(
+            database.connection, postgres=isinstance(database, PostgresDatabase)
+        )
+        pages = {
+            kind: compatibility_diagnostics(
+                database.connection, record_kind=kind, limit=args.limit, offset=args.offset, **scope
+            )
+            for kind in ("plan", "scheduled_plan", "automation_rule")
+        }
+        return {
+            "activation": "blocked_pending_operational_exclusion",
+            "minimum_reader": floor[1] if floor else None,
+            "checkpoint_id": floor[2] if floor else None,
+            "records": [record for page in pages.values() for record in page["records"]],
+            "pages": {
+                kind: {key: value for key, value in page.items() if key != "records"}
+                for kind, page in pages.items()
+            },
+        }
+    except (DomainError, UnsupportedRuntimeContract, ValueError, OSError) as error:
+        raise BackupError("runtime_contract_inspection_rejected") from error
+    finally:
+        await database.close()
+
+
 def _run(args: argparse.Namespace) -> dict[str, object]:
+    if args.command == "runtime-contract":
+        return asyncio.run(_runtime_contract(args))
+    if args.command == "adopt-connections":
+        return asyncio.run(_adopt_connections(args))
+    if args.command == "connector":
+        return _connector_command(args)
+    if args.command == "oauth":
+        return _oauth_command(args)
     if args.command == "tokens":
         return _token_command(args)
     if args.command == "migrate-postgres":
@@ -461,7 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = _run(args)
         print(json.dumps(result, sort_keys=True))
-        return 2 if result.get("status") == "failed" else 0
+        return 2 if result.get("status") in {"failed", "incomplete", "invalid"} else 0
     except BackupError as error:
         print(json.dumps({"error": {"code": error.code}}, sort_keys=True))
         return 2

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -72,6 +73,7 @@ class FencingViolation(RuntimeError):
 
 class PhysicalIntentStatus(StrEnum):
     PREPARED = "prepared"
+    DISPATCHING = "dispatching"
     ACKNOWLEDGED = "acknowledged"
     CONFIRMED = "confirmed"
     REJECTED = "rejected"
@@ -89,6 +91,24 @@ class PhysicalIntent(StrictModel):
     command_id: str = Field(min_length=1, max_length=200)
     fencing_epoch: int = Field(gt=0)
     status: PhysicalIntentStatus = PhysicalIntentStatus.PREPARED
+    owner_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda value: value is None,
+    )
+    execution_attempt_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda value: value is None,
+    )
+    lease_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda value: value is None,
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -98,3 +118,24 @@ class PhysicalIntent(StrictModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("physical intent timestamps must be timezone-aware")
         return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_dispatch_identity(self) -> PhysicalIntent:
+        if self.status is PhysicalIntentStatus.DISPATCHING and (
+            self.owner_id is None or self.execution_attempt_id is None
+        ):
+            raise ValueError("dispatching physical intents require owner and execution attempt")
+        return self
+
+
+class PhysicalIntentClaimDecision(StrEnum):
+    ACQUIRED = "acquired"
+    REPLAY = "replay"
+    IN_FLIGHT = "in_flight"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalIntentClaim:
+    decision: PhysicalIntentClaimDecision
+    intent: PhysicalIntent

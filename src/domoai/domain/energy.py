@@ -248,7 +248,7 @@ class BatteryProfile(StrictModel):
     max_discharge_kw: float = Field(ge=0)
     charge_efficiency: float = Field(gt=0, le=1)
     discharge_efficiency: float = Field(gt=0, le=1)
-    degradation_cost_per_kwh: float | None = Field(default=None, ge=0)
+    degradation_cost_per_kwh: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     actuator: BatteryActuator | None = None
     initial_soc_observation: BatterySocObservation | None = None
 

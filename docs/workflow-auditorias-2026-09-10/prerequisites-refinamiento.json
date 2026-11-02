@@ -1,0 +1,44 @@
+[
+  {
+    "feature": "P-07",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/246-adaptive-household-planning",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-10",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/249-agent-client-qualification",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  },
+  {
+    "feature": "P-12",
+    "exit_code": 0,
+    "result": {
+      "FEATURE_DIR": "/mnt/c/users/ferna/onedrive/escritorio/domoai/specs/251-household-operations",
+      "AVAILABLE_DOCS": [
+        "research.md",
+        "data-model.md",
+        "contracts/",
+        "quickstart.md",
+        "tasks.md"
+      ]
+    }
+  }
+]

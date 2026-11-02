@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "Digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Identifier": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "challenge_id": {
+      "$ref": "#/$defs/Identifier"
+    },
+    "action": {
+      "enum": [
+        "approve",
+        "revoke",
+        "reject"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "expected_review_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "request_id": {
+      "$ref": "#/$defs/Identifier"
+    }
+  },
+  "required": [
+    "challenge_id",
+    "action",
+    "expected_review_digest",
+    "request_id"
+  ],
+  "title": "ConsentDecision",
+  "type": "object"
+}

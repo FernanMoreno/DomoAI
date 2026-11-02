@@ -32,8 +32,11 @@ from domoai.runtime.approval_store import (
 def _adapter_ids(adapter: object) -> tuple[str, ...]:
     """Return concrete adapter identities without exposing provider secrets."""
 
-    children = tuple(getattr(adapter, "adapters", ()))
-    if children:
+    child_attribute = getattr(adapter, "adapters", None)
+    if child_attribute is not None:
+        children = tuple(child_attribute)
+        if not children:
+            return ()
         ids = {child_id for child in children for child_id in _adapter_ids(child)}
     else:
         adapter_id = getattr(adapter, "adapter_id", None)
@@ -49,13 +52,27 @@ async def build_configured_server(
     energy_context_provider: EnergyContextProvider | None = None,
     ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     require_configured_adapter: bool = False,
+    control_plane_mode: bool = False,
+    client_token_verifier: StaticBearerTokenVerifier | None = None,
 ) -> tuple[RuntimeComposition, FastMCP]:
     resolved_settings = settings or Settings.from_environment()
+    if resolved_settings.mcp_chat_confirmation and (
+        operator_principal_provider is not None or operator_approval_assertion_provider is not None
+    ):
+        raise ValueError("chat confirmation cannot be combined with operator providers")
     # Validate deployment credentials before build_runtime opens SQLite,
     # claims ownership or connects a provider. The server builder validates
     # again when it creates the auth middleware; this early check prevents a
     # malformed launcher configuration from leaking a partially-built runtime.
-    if resolved_settings.mcp_client_token_file is not None:
+    if client_token_verifier is not None:
+        # Same early failure for an inconsistent injection; the gateway already
+        # loaded this verifier from the configured file, so it is not re-read.
+        if (
+            type(client_token_verifier) is not StaticBearerTokenVerifier
+            or resolved_settings.mcp_client_token_file is None
+        ):
+            raise ValueError("an injected client token verifier requires a configured token file")
+    elif resolved_settings.mcp_client_token_file is not None:
         StaticBearerTokenVerifier.from_file(resolved_settings.mcp_client_token_file)
     runtime = await build_runtime(
         resolved_settings,
@@ -64,7 +81,11 @@ async def build_configured_server(
         energy_context_provider=energy_context_provider,
         ev_charging_bindings=ev_charging_bindings,
         require_configured_adapter=require_configured_adapter,
+        control_plane_mode=control_plane_mode,
     )
+    if resolved_settings.mcp_chat_confirmation and not runtime.approval_store.durable:
+        await runtime.close()
+        raise ValueError("chat confirmation requires durable approval storage")
     optimization_service = OptimizationService(
         runtime.registry,
         runtime.plan_service,
@@ -108,12 +129,13 @@ async def build_configured_server(
         household_work_queues=runtime.household_work_queues,
     )
     context = DomoticsMcpContext(
+        household_preferences=runtime.household_preferences,
         discovery=runtime.discovery,
         state_service=StateService(runtime.state_store),
         facade=runtime.facade,
         registry=runtime.registry,
         policies=runtime.plan_service.policy_engine.policies,
-        active_provider_ids=_adapter_ids(runtime.adapter),
+        active_provider_ids_supplier=lambda: _adapter_ids(runtime.adapter),
         battery_qualification=runtime.battery_qualification,
         plan_repository=runtime.plan_repository,
         state_history_repository=runtime.state_history_repository,
@@ -126,6 +148,9 @@ async def build_configured_server(
         bundle_commit_service=runtime.bundle_commit_service,
         operator_principal_provider=runtime.operator_principal_provider,
         operator_approval_assertion_provider=runtime.operator_approval_assertion_provider,
+        chat_confirmation=runtime.settings.mcp_chat_confirmation,
+        chat_confirmation_timeout_seconds=runtime.settings.mcp_chat_confirmation_timeout_seconds,
+        chat_confirmation_timezone=runtime.settings.solar_timezone,
         blocking_worker=energy_worker,
         provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
         clock=runtime.clock,
@@ -174,9 +199,14 @@ async def build_configured_server(
         optimization_service=optimization_service,
         optimization_worker=worker,
         max_horizon_slots=runtime.settings.optimization_max_horizon_slots,
+        authority_policy=AuthorityPolicy(
+            tenant_id=runtime.settings.mcp_tenant_id,
+            household_id=runtime.settings.mcp_household_id,
+        ),
     )
     return runtime, create_unified_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context),
         settings=runtime.settings,
         runtime=runtime,
+        client_token_verifier=client_token_verifier,
     )

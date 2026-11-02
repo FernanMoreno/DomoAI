@@ -2,12 +2,15 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from mcp.server.auth.provider import AccessToken
 
 from domoai.adapters.fixtures.simulated_home import SimulatedHomeAdapter
+from domoai.application.authority import AuthorityPolicy
 from domoai.application.discovery_service import DiscoveryService
 from domoai.application.optimization_service import OptimizationService
 from domoai.application.plan_service import PlanService
 from domoai.application.policy_engine import PolicyEngine
+from domoai.domain.models import AuthorityContext, PrincipalRole
 from domoai.mcp.ortools_server import OrtoolsMcpContext, create_ortools_server
 from domoai.optimizer.cp_sat import CpSatOptimizer
 from domoai.optimizer.scenario import (
@@ -239,3 +242,88 @@ async def test_ortools_mcp_returns_safe_error_for_malformed_input() -> None:
 
     assert result["error"]["code"] == "validation_error"
     assert "token" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_ortools_mcp_rejects_cross_tenant_scenario_before_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp.server.auth.middleware.auth_context as auth_context
+
+    context = await build_context()
+    context.authority_policy = AuthorityPolicy()
+    device_id = next(
+        device.id for device in context.registry.devices if device.type.value == "light"
+    )
+    authority = AuthorityContext(
+        tenant_id="other-tenant",
+        household_id="default",
+        household_ids=["default"],
+        principal_id="foreign-viewer",
+        roles=[PrincipalRole.VIEWER],
+        device_ids=[device_id],
+        capabilities=["set_brightness"],
+    )
+    monkeypatch.setattr(
+        auth_context,
+        "get_access_token",
+        lambda: AccessToken(
+            token="opaque",
+            client_id=authority.principal_id,
+            scopes=["read"],
+            claims={"authority": authority.model_dump(mode="json")},
+        ),
+    )
+
+    result = structured(
+        await create_ortools_server(context).call_tool(
+            "validate_scenario",
+            {"scenario": scenario_for(device_id).model_dump(mode="json")},
+        )
+    )
+
+    assert result["error"]["code"] == "insufficient_scope"
+
+
+def test_a12_explanation_fallback_copies_accounting_with_its_objectives():
+    from domoai.mcp.ortools_server import explain_result
+    from tests.contract.test_phase4_product_contract import _a12_accounting
+    from tests.unit.application.test_product_summary import _result
+
+    result = _result()
+    block = {**_a12_accounting(), "objective_units": {"energy_cost": "EUR"}}
+    result.constraint_summary["accounting"] = block
+    result.alternative_evidence = {}
+    explanation = explain_result(result)
+    assert explanation.constraint_summary["accounting"] == block
+    assert all(
+        item["constraint_effects"]["accounting"] == block for item in explanation.alternatives
+    )
+
+
+def test_a12_fallback_bounds_units_and_comparison_keys_together_without_mutation():
+    from domoai.mcp.ortools_server import explain_result
+    from tests.unit.application.test_product_summary import _result
+
+    result = _result()
+    result.alternative_evidence = {}
+    result.objective_values = {f"metric{i}": float(i) for i in range(33)}
+    result.constraint_summary["accounting"] = {
+        "version": 1,
+        "currency": "USD",
+        "objective_units": {"metric0": "kW", "metric32": "kWh"},
+        "comparison": {
+            "baseline_scenario_id": "b",
+            "diff_units": {"metric32": "kWh"},
+            "omitted_objectives": {"metric31": "unit_unknown"},
+        },
+    }
+    original = result.model_dump_json()
+    explanation = explain_result(result)
+    for alternative in explanation.alternatives:
+        assert len(alternative["objective_values"]) == 32
+        block = alternative["constraint_effects"]["accounting"]
+        assert block["objective_units"] == {"metric0": "kW"}
+        assert block["comparison"]["diff_units"] == {}
+        assert block["comparison"]["omitted_objectives"] == {"metric31": "unit_unknown"}
+    assert result.model_dump_json() == original

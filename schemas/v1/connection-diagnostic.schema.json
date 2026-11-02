@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "DiagnosticSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "DiagnosticSeverity",
+      "type": "string"
+    },
+    "ScalarMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "Actionable connection information that cannot contain secret material.",
+  "properties": {
+    "code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "severity": {
+      "$ref": "#/$defs/DiagnosticSeverity"
+    },
+    "retryable": {
+      "title": "Retryable",
+      "type": "boolean"
+    },
+    "user_action": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User Action"
+    },
+    "message": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "technical_details": {
+      "$ref": "#/$defs/ScalarMap"
+    }
+  },
+  "required": [
+    "code",
+    "severity",
+    "retryable",
+    "message"
+  ],
+  "title": "ConnectionDiagnostic",
+  "type": "object"
+}

@@ -1,0 +1,759 @@
+{
+  "$defs": {
+    "AutomationCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capability": {
+          "minLength": 1,
+          "title": "Capability",
+          "type": "string"
+        },
+        "operator": {
+          "default": "equals",
+          "enum": [
+            "equals",
+            "not_equals"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "device_id",
+        "capability"
+      ],
+      "title": "AutomationCondition",
+      "type": "object"
+    },
+    "AutomationTrigger": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "state_changed",
+            "time"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "capability": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "time_of_day": {
+          "anyOf": [
+            {
+              "format": "time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Of Day"
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timezone"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "AutomationTrigger",
+      "type": "object"
+    },
+    "ConsentAction": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "device_name": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Device Name",
+          "type": "string"
+        },
+        "command": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "risk_class": {
+          "enum": [
+            "safe",
+            "confirm",
+            "restricted"
+          ],
+          "title": "Risk Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "device_id",
+        "device_name",
+        "command",
+        "value",
+        "unit",
+        "risk_class"
+      ],
+      "title": "ConsentAction",
+      "type": "object"
+    },
+    "ConsentBindings": {
+      "additionalProperties": false,
+      "properties": {
+        "validation_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "window_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundle_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recurrence_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rule_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schedule_revision": {
+          "minimum": 0,
+          "title": "Schedule Revision",
+          "type": "integer"
+        },
+        "preference_version": {
+          "$ref": "#/$defs/PreferenceVersion"
+        },
+        "preference_observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "preference_next_transition_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preference_horizon": {
+          "$ref": "#/$defs/ConsentHorizon"
+        },
+        "control_version": {
+          "$ref": "#/$defs/ConsentControlVersion"
+        }
+      },
+      "required": [
+        "validation_digest",
+        "window_digest",
+        "bundle_digest",
+        "recurrence_digest",
+        "rule_digest",
+        "schedule_revision",
+        "preference_version",
+        "preference_observed_at",
+        "preference_next_transition_at",
+        "preference_horizon",
+        "control_version"
+      ],
+      "title": "ConsentBindings",
+      "type": "object"
+    },
+    "ConsentConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "trigger": {
+          "$ref": "#/$defs/AutomationTrigger"
+        },
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/AutomationCondition"
+          },
+          "maxItems": 4,
+          "title": "Conditions",
+          "type": "array"
+        },
+        "cooldown_seconds": {
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Cooldown Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "trigger",
+        "conditions",
+        "cooldown_seconds"
+      ],
+      "title": "ConsentConstraints",
+      "type": "object"
+    },
+    "ConsentControlVersion": {
+      "additionalProperties": false,
+      "description": "Consent generation/revision, distinct from preference authority.",
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "title": "Generation",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision"
+      ],
+      "title": "ConsentControlVersion",
+      "type": "object"
+    },
+    "ConsentEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "validation",
+            "rule"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "digest"
+      ],
+      "title": "ConsentEvidence",
+      "type": "object"
+    },
+    "ConsentHorizon": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "end": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "ConsentHorizon",
+      "type": "object"
+    },
+    "ConsentReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "ConsentReference",
+      "type": "object"
+    },
+    "ConsentRisk": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action": {
+          "enum": [
+            "allow",
+            "deny",
+            "confirm"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "allows_stale": {
+          "title": "Allows Stale",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "policy_id",
+        "action",
+        "reason",
+        "allows_stale"
+      ],
+      "title": "ConsentRisk",
+      "type": "object"
+    },
+    "ConsentWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "not_before": {
+          "$ref": "#/$defs/OffsetTimestamp"
+        },
+        "not_after": {
+          "$ref": "#/$defs/OffsetTimestamp"
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "not_before",
+        "not_after",
+        "timezone"
+      ],
+      "title": "ConsentWindow",
+      "type": "object"
+    },
+    "Digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Identifier": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "OffsetTimestamp": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "PreferenceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "title": "Generation",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision"
+      ],
+      "title": "PreferenceVersion",
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TargetKind": {
+      "enum": [
+        "plan",
+        "bundle",
+        "recurrence",
+        "rule"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "$ref": "#/$defs/OffsetTimestamp"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "reference": {
+            "properties": {
+              "kind": {
+                "const": "plan"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bindings": {
+            "properties": {
+              "validation_digest": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reference": {
+            "properties": {
+              "kind": {
+                "const": "bundle"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bindings": {
+            "properties": {
+              "bundle_digest": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reference": {
+            "properties": {
+              "kind": {
+                "const": "recurrence"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bindings": {
+            "properties": {
+              "recurrence_digest": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reference": {
+            "properties": {
+              "kind": {
+                "const": "rule"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bindings": {
+            "properties": {
+              "rule_digest": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reference": {
+            "properties": {
+              "kind": {
+                "const": "rule"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "maxItems": 10
+          },
+          "constraints": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "domoai.household-consent.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "reference": {
+      "$ref": "#/$defs/ConsentReference"
+    },
+    "tenant_id": {
+      "$ref": "#/$defs/Identifier"
+    },
+    "household_id": {
+      "$ref": "#/$defs/Identifier"
+    },
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/ConsentAction"
+      },
+      "maxItems": 50,
+      "minItems": 1,
+      "title": "Actions",
+      "type": "array"
+    },
+    "window": {
+      "$ref": "#/$defs/ConsentWindow"
+    },
+    "duration_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Duration Seconds",
+      "type": "integer"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "constraints": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsentConstraints"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "risks": {
+      "items": {
+        "$ref": "#/$defs/ConsentRisk"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/ConsentEvidence"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "bindings": {
+      "$ref": "#/$defs/ConsentBindings"
+    },
+    "permission_status": {
+      "enum": [
+        "awaiting_review",
+        "active",
+        "expired",
+        "revocation_pending",
+        "revoked",
+        "superseded",
+        "unavailable"
+      ],
+      "title": "Permission Status",
+      "type": "string"
+    },
+    "physical_effect_refs": {
+      "items": {
+        "$ref": "#/$defs/Identifier"
+      },
+      "title": "Physical Effect Refs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "reference",
+    "tenant_id",
+    "household_id",
+    "actions",
+    "window",
+    "duration_seconds",
+    "expires_at",
+    "constraints",
+    "risks",
+    "evidence_refs",
+    "bindings",
+    "permission_status",
+    "physical_effect_refs"
+  ],
+  "title": "ConsentView",
+  "type": "object"
+}

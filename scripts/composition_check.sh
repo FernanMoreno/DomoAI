@@ -18,5 +18,5 @@ if [[ "${1:-}" == "--fast" ]]; then
     uv run pytest tests/unit tests/contract
 else
     echo "== pytest (full suite, including Docker-backed composition tests) =="
-    uv run pytest
+    scripts/with_disposable_docker_config.sh uv run pytest
 fi

@@ -1,0 +1,138 @@
+{
+  "$defs": {
+    "ConnectionCandidate": {
+      "additionalProperties": false,
+      "description": "Secret-safe discovered or manually supplied connection candidate.",
+      "properties": {
+        "connector_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "display_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/ScalarMap"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ScalarMap"
+        }
+      },
+      "required": [
+        "connector_id",
+        "candidate_id",
+        "display_name",
+        "endpoint"
+      ],
+      "title": "ConnectionCandidate",
+      "type": "object"
+    },
+    "ConnectionDraft": {
+      "additionalProperties": false,
+      "description": "Not-yet-validated connection data without raw credentials.",
+      "properties": {
+        "connector_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "unique_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Unique Id",
+          "type": "string"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/ScalarMap"
+        },
+        "options": {
+          "$ref": "#/$defs/ScalarMap"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credential Ref"
+        },
+        "mapping_ref": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mapping Ref"
+        }
+      },
+      "required": [
+        "connector_id",
+        "unique_id",
+        "endpoint",
+        "options"
+      ],
+      "title": "ConnectionDraft",
+      "type": "object"
+    },
+    "ScalarMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScalarValue"
+      },
+      "type": "object"
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "Selected candidate plus secret-safe setup values.",
+  "properties": {
+    "candidate": {
+      "$ref": "#/$defs/ConnectionCandidate"
+    },
+    "draft": {
+      "$ref": "#/$defs/ConnectionDraft"
+    }
+  },
+  "required": [
+    "candidate",
+    "draft"
+  ],
+  "title": "ConnectionSetup",
+  "type": "object"
+}

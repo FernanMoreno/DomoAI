@@ -131,6 +131,25 @@ async def test_an_approved_confirmation_issues_a_grant_that_executes_the_plan() 
     assert adapter.calls, "the approved plan must reach the adapter"  # type: ignore[attr-defined]
 
 
+async def test_the_issued_grant_is_attributed_single_use_and_bounded() -> None:
+    context, server, validated = await setup()
+    async with client(server, Human()) as session:
+        result = structured(await session.call_tool("request_approval", args(validated)))
+        grant = context.approval_store.get_grant(result["approval_id"])
+        assert grant is not None
+        assert grant.approved_by == "chat:client-a"
+        assert grant.authentication_context == "mcp_elicitation"
+        assert grant.plan_id == validated["plan"]["id"]
+        assert grant.expires_at > context.approval_store.now()
+        first = await executed(session, validated, result["approval_id"])
+        assert "error" not in first, first
+        assert context.approval_store.is_consumed(result["approval_id"])
+        calls = len(context.facade.executor.adapter.calls)  # type: ignore[attr-defined]
+        await executed(session, validated, result["approval_id"])
+        # A replay must never reach the adapter a second time.
+        assert len(context.facade.executor.adapter.calls) == calls  # type: ignore[attr-defined]
+
+
 @pytest.mark.parametrize(
     "human,expected",
     [

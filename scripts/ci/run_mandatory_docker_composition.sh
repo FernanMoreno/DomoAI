@@ -30,7 +30,7 @@ PY
 
 tls_dir="$(mktemp -d)"
 cleanup() {
-  rm -f "$tls_dir/fullchain.pem" "$tls_dir/privkey.pem"
+  rm -f "$tls_dir/fullchain.pem" "$tls_dir/privkey.pem" "$tls_dir/compose-ci.yaml"
   rmdir "$tls_dir"
 }
 trap cleanup EXIT
@@ -41,11 +41,18 @@ openssl req -x509 -nodes -newkey rsa:2048 \
   -days 1 -subj '/CN=mcp.example.test' \
   -addext 'subjectAltName=DNS:mcp.example.test' >/dev/null 2>&1
 
-# Validate the Compose model without loading an operator's private gateway.env.
+# Compose 2.38 checks env_file existence even with --no-env-resolution. Remove
+# only that private input in this temporary validation model, never in deployment.
+cat > "$tls_dir/compose-ci.yaml" <<'YAML'
+services:
+  gateway:
+    env_file: !reset []
+YAML
 # Consistency checks and interpolation remain enabled; no service is started here.
 DOMOAI_TLS_CERT_FILE_HOST="$tls_dir/fullchain.pem" \
 DOMOAI_TLS_KEY_FILE_HOST="$tls_dir/privkey.pem" \
-  docker compose -f deploy/compose.yaml config --no-env-resolution >/dev/null
+  docker compose -f deploy/compose.yaml -f "$tls_dir/compose-ci.yaml" \
+    config --no-env-resolution >/dev/null
 
 docker run --rm \
   -e DOMOAI_CADDY_HOSTNAME=mcp.example.test \

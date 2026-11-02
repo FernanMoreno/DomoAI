@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
+from psycopg import AsyncConnection, OperationalError
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
@@ -15,6 +16,21 @@ from starlette.websockets import WebSocketDisconnect
 
 from domoai.config.settings import Settings
 from domoai.mcp.gateway import build_gateway
+
+
+async def _wait_for_postgres_endpoint(dsn: str) -> None:
+    """Probe the published host endpoint, beyond container-internal readiness."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 10
+    while True:
+        try:
+            async with await AsyncConnection.connect(dsn, connect_timeout=1) as connection:
+                await connection.execute("SELECT 1")
+            return
+        except OperationalError:
+            if loop.time() >= deadline:
+                raise
+            await asyncio.sleep(0.1)
 
 
 @asynccontextmanager
@@ -41,6 +57,8 @@ async def connection_databases(tmp_path: Path, backend: str):
         first = SQLiteDatabase(tmp_path / "transfers.sqlite3")
         second = SQLiteDatabase(tmp_path / "transfers.sqlite3")
     try:
+        if container is not None:
+            await _wait_for_postgres_endpoint(container.get_connection_url(driver=None))
         await first.initialize()
         await second.initialize()
         yield first, second

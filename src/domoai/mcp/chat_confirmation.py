@@ -9,6 +9,7 @@ import json
 import secrets
 import time
 import unicodedata
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Device, Plan
+
+_RECENT_CODES = 1000
 
 
 class ChatSummaryUnavailable(ValueError):
@@ -120,7 +123,9 @@ class ChatConfirmationGate:
 
     _locks: dict[tuple[str, str], asyncio.Lock] = field(default_factory=dict)
     _cooldowns: dict[tuple[str, str], float] = field(default_factory=dict)
-    _codes: set[str] = field(default_factory=set)
+    # Only the most recent codes are excluded: unbounded memory would exhaust the 9000-code
+    # space after 9000 dialogues and disable chat confirmation until restart.
+    _codes: deque[str] = field(default_factory=lambda: deque(maxlen=_RECENT_CODES))
 
     @asynccontextmanager
     async def hold(self, scope: tuple[str, str]) -> AsyncIterator[None]:
@@ -146,14 +151,11 @@ class ChatConfirmationGate:
                 raise unavailable()
         except (AttributeError, ValueError) as error:
             raise unavailable() from error
-        # Finite code space: fail closed when exhausted rather than reusing a code.
-        if len(self._codes) >= 9000:
-            raise unavailable()
-        remaining = [
-            f"{value:04d}" for value in range(1000, 10000) if f"{value:04d}" not in self._codes
-        ]
-        code = secrets.choice(remaining)
-        self._codes.add(code)
+        recent = set(self._codes)
+        code = secrets.choice(
+            [f"{value:04d}" for value in range(1000, 10000) if f"{value:04d}" not in recent]
+        )
+        self._codes.append(code)
         try:
             assert ctx is not None
             with anyio.fail_after(timeout):

@@ -251,6 +251,21 @@ async def test_a_forged_meta_approval_is_ignored_and_the_person_is_still_asked()
     assert not context.facade.executor.adapter.calls  # type: ignore[attr-defined]
 
 
+async def test_code_history_is_bounded_so_confirmation_never_exhausts() -> None:
+    from domoai.mcp.chat_confirmation import _RECENT_CODES, ChatConfirmationGate
+
+    context, _, _ = await setup()
+    gate = context.chat_confirmation_gate
+    assert isinstance(gate, ChatConfirmationGate)
+    gate._codes.extend(f"{value:04d}" for value in range(1000, 1000 + 9000))
+    assert len(gate._codes) == _RECENT_CODES
+    _, server, validated = await setup()
+    human = Human()
+    async with client(server, human) as session:
+        result = structured(await session.call_tool("request_approval", args(validated)))
+    assert result.get("approval_id"), result
+
+
 async def test_a_timeout_releases_the_lock_and_is_reported() -> None:
     context, server, validated = await setup()
     context.chat_confirmation_timeout_seconds = 0.2  # type: ignore[attr-defined]

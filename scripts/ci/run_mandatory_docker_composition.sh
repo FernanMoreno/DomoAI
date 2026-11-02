@@ -41,9 +41,11 @@ openssl req -x509 -nodes -newkey rsa:2048 \
   -days 1 -subj '/CN=mcp.example.test' \
   -addext 'subjectAltName=DNS:mcp.example.test' >/dev/null 2>&1
 
+# Validate the Compose model without loading an operator's private gateway.env.
+# Consistency checks and interpolation remain enabled; no service is started here.
 DOMOAI_TLS_CERT_FILE_HOST="$tls_dir/fullchain.pem" \
 DOMOAI_TLS_KEY_FILE_HOST="$tls_dir/privkey.pem" \
-  docker compose -f deploy/compose.yaml config >/dev/null
+  docker compose -f deploy/compose.yaml config --no-env-resolution >/dev/null
 
 docker run --rm \
   -e DOMOAI_CADDY_HOSTNAME=mcp.example.test \

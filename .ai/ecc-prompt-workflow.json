@@ -1,0 +1,15 @@
+{
+  "files": {
+    "ai_workflow_block": "af9ca52585b752cd78f18f5c824e763e4ee027ff0e09550ee577387d13ed3435",
+    "skill": "cbc45c86e759ebdaddda422b58be5b96bce711d648016201df67797ca290408b"
+  },
+  "owner": "ai-dev-stack.ecc-prompt-workflow",
+  "project": "domoai",
+  "schema": 1,
+  "vault_context": {
+    "linux": "/home/felni/Documents/Obsidian/DomoAIVault",
+    "repository": "/mnt/c/Users/ferna/OneDrive/Escritorio/DomoAI",
+    "repository_windows": "C:\\Users\\ferna\\OneDrive\\Escritorio\\DomoAI",
+    "windows": "\\\\wsl.localhost\\Ubuntu\\home\\felni\\Documents\\Obsidian\\DomoAIVault"
+  }
+}

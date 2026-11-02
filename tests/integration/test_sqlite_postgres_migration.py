@@ -346,12 +346,14 @@ _T009_EXPECTED_COUNTS = {
 
 def _t009_rows(database):
     return {
-        table: [
-            tuple(row)
-            for row in database.connection.execute(
-                f"SELECT * FROM {table} ORDER BY 1, 2"
-            ).fetchall()
-        ]
+        # Total order in Python: SQL ORDER BY 1, 2 ties differ between SQLite and PostgreSQL.
+        table: sorted(
+            (
+                tuple(row)
+                for row in database.connection.execute(f"SELECT * FROM {table}").fetchall()
+            ),
+            key=repr,
+        )
         for table in _T009_EXPECTED_COUNTS
     }
 

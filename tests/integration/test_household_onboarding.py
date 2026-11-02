@@ -24,7 +24,7 @@ async def test_secret_transfer_bootstrap_elevates_reader_floor_and_preserves_che
             "SELECT minimum_reader, checkpoint_id, created_at FROM runtime_contract_floor"
         ).fetchone()
         observer.connection.commit()
-        assert row[0] == 3
+        assert row[0] == 4
         assert (
             observer.connection.execute(
                 "SELECT COUNT(*) FROM connection_secret_transfers"
@@ -39,7 +39,7 @@ async def test_secret_transfer_bootstrap_elevates_reader_floor_and_preserves_che
         after = observer.connection.execute(
             "SELECT minimum_reader, checkpoint_id, created_at FROM runtime_contract_floor"
         ).fetchone()
-        assert tuple(after) == (3, row[1], row[2])
+        assert tuple(after) == (4, row[1], row[2])
         observer.connection.commit()
 
 
@@ -84,7 +84,7 @@ async def test_floor_migration_failure_rolls_back_new_table_and_ledger(tmp_path)
         observer.commit()
         await database.initialize()
         assert (
-            observer.execute("SELECT minimum_reader FROM runtime_contract_floor").fetchone()[0] == 3
+            observer.execute("SELECT minimum_reader FROM runtime_contract_floor").fetchone()[0] == 4
         )
     finally:
         observer.close()

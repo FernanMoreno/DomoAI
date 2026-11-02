@@ -47,12 +47,23 @@ def create_unified_server(
     *,
     settings: Settings | None = None,
     runtime: object | None = None,
+    client_token_verifier: StaticBearerTokenVerifier | None = None,
 ) -> FastMCP:
-    """Create the sole public MCP server and register every semantic surface."""
+    """Create the sole public MCP server and register every semantic surface.
+
+    ``client_token_verifier`` lets the gateway share one already-loaded verifier
+    with the other credential surfaces; it requires a configured token file.
+    """
 
     ensure_fastmcp_settings_ready()
     kwargs: dict[str, Any] = {}
     token_verifier: StaticBearerTokenVerifier | None = None
+    if client_token_verifier is not None and (
+        type(client_token_verifier) is not StaticBearerTokenVerifier
+        or settings is None
+        or settings.mcp_client_token_file is None
+    ):
+        raise ValueError("an injected client token verifier requires a configured token file")
     if settings is not None:
         kwargs.update(
             host=settings.mcp_host,
@@ -63,7 +74,9 @@ def create_unified_server(
             transport_security=_transport_security(settings),
         )
         if settings.mcp_client_token_file is not None:
-            token_verifier = StaticBearerTokenVerifier.from_file(settings.mcp_client_token_file)
+            token_verifier = client_token_verifier or StaticBearerTokenVerifier.from_file(
+                settings.mcp_client_token_file
+            )
             kwargs["token_verifier"] = token_verifier
             kwargs["auth"] = _auth_settings(settings)
         if settings.mcp_metrics_enabled and token_verifier is None:

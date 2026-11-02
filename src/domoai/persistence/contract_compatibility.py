@@ -16,7 +16,7 @@ from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import Plan
 from domoai.runtime.events import redact_payload
 
-SUPPORTED_RUNTIME_READER = 3
+SUPPORTED_RUNTIME_READER = 4
 
 
 class UnsupportedRuntimeContract(RuntimeError):

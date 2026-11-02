@@ -23,6 +23,7 @@ _READ_OPERATIONS = frozenset(
 _PLAN_OPERATIONS = frozenset(
     {"prepare_command", "prepare_plan", "validate_command", "validate_plan"}
 )
+_RESIDENT_CONSENT_OPERATIONS = frozenset({"review_consent", "approve_consent", "revoke_consent"})
 _OPERATOR_OPERATIONS = frozenset(
     {
         "request_approval",
@@ -146,7 +147,12 @@ class AuthorityPolicy:
             self._deny(operation, "capability is not authorized")
 
         roles = set(authority.roles)
-        if operation in _READ_OPERATIONS:
+        if operation in _RESIDENT_CONSENT_OPERATIONS:
+            allowed = (
+                bool(roles & {PrincipalRole.OPERATOR, PrincipalRole.OWNER})
+                and operation in authority.operations
+            )
+        elif operation in _READ_OPERATIONS:
             allowed = bool(
                 roles
                 & {

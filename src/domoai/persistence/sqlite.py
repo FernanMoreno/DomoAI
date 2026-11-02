@@ -201,10 +201,10 @@ class SQLiteDatabase:
                 self._connection.execute("COMMIT")
                 self._connection.execute("BEGIN IMMEDIATE")
                 floor = check_runtime_floor(self._connection)
-                if floor is not None and floor[1] < 3:
+                if floor is not None and floor[1] < 4:
                     self._connection.execute(
-                        "UPDATE runtime_contract_floor SET minimum_reader = 3 "
-                        "WHERE minimum_reader < 3"
+                        "UPDATE runtime_contract_floor SET minimum_reader = 4 "
+                        "WHERE minimum_reader < 4"
                     )
                 self._connection.commit()
             except BaseException:

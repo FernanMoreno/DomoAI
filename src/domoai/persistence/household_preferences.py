@@ -51,25 +51,31 @@ class HouseholdPreferenceRepository:
         return PreferenceVersion(generation=row[0], revision=row[1])
 
     async def snapshot(self) -> tuple[PreferenceVersion, list[HouseholdPreference]]:
-        # One statement gives one consistent snapshot on PostgreSQL READ
-        # COMMITTED too; separate head and slot SELECTs would permit tearing.
         connection = self.database.connection
         try:
-            rows = connection.execute(
-                "SELECT h.generation, h.revision, p.payload FROM household_preference_heads h "
-                "LEFT JOIN household_preferences p ON h.tenant_id=p.tenant_id "
-                "AND h.household_id=p.household_id WHERE h.tenant_id=? AND h.household_id=? "
-                "ORDER BY p.preference_id",
-                self.scope,
-            ).fetchall()
-            if not rows:
-                raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Preference profile is unavailable")
-            return (
-                PreferenceVersion(generation=rows[0][0], revision=rows[0][1]),
-                [HouseholdPreference.model_validate_json(row[2]) for row in rows if row[2]],
-            )
+            return self.snapshot_in_transaction(connection)
         finally:
             connection.rollback()  # close read transaction without writing anything
+
+    def snapshot_in_transaction(
+        self, connection: Any
+    ) -> tuple[PreferenceVersion, list[HouseholdPreference]]:
+        """Read the complete scope; the caller owns the connection, locks and transaction."""
+        # One statement gives one consistent snapshot on PostgreSQL READ
+        # COMMITTED too; separate head and slot SELECTs would permit tearing.
+        rows = connection.execute(
+            "SELECT h.generation, h.revision, p.payload FROM household_preference_heads h "
+            "LEFT JOIN household_preferences p ON h.tenant_id=p.tenant_id "
+            "AND h.household_id=p.household_id WHERE h.tenant_id=? AND h.household_id=? "
+            "ORDER BY p.preference_id",
+            self.scope,
+        ).fetchall()
+        if not rows:
+            raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Preference profile is unavailable")
+        return (
+            PreferenceVersion(generation=rows[0][0], revision=rows[0][1]),
+            [HouseholdPreference.model_validate_json(row[2]) for row in rows if row[2] is not None],
+        )
 
     def _receipt(
         self,

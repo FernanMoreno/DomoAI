@@ -53,13 +53,22 @@ async def build_configured_server(
     ev_charging_bindings: tuple[EVChargingBinding, ...] = (),
     require_configured_adapter: bool = False,
     control_plane_mode: bool = False,
+    client_token_verifier: StaticBearerTokenVerifier | None = None,
 ) -> tuple[RuntimeComposition, FastMCP]:
     resolved_settings = settings or Settings.from_environment()
     # Validate deployment credentials before build_runtime opens SQLite,
     # claims ownership or connects a provider. The server builder validates
     # again when it creates the auth middleware; this early check prevents a
     # malformed launcher configuration from leaking a partially-built runtime.
-    if resolved_settings.mcp_client_token_file is not None:
+    if client_token_verifier is not None:
+        # Same early failure for an inconsistent injection; the gateway already
+        # loaded this verifier from the configured file, so it is not re-read.
+        if (
+            type(client_token_verifier) is not StaticBearerTokenVerifier
+            or resolved_settings.mcp_client_token_file is None
+        ):
+            raise ValueError("an injected client token verifier requires a configured token file")
+    elif resolved_settings.mcp_client_token_file is not None:
         StaticBearerTokenVerifier.from_file(resolved_settings.mcp_client_token_file)
     runtime = await build_runtime(
         resolved_settings,
@@ -189,4 +198,5 @@ async def build_configured_server(
         UnifiedMcpContext(domotics=context, optimizer=optimizer_context),
         settings=runtime.settings,
         runtime=runtime,
+        client_token_verifier=client_token_verifier,
     )

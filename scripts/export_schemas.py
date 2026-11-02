@@ -55,6 +55,7 @@ from domoai.domain.connector_recipes import ConnectorRecipe
 from domoai.domain.coordination import FencingToken, LeaseScope, PhysicalIntent
 from domoai.domain.coverage import CoverageEvidenceSnapshot
 from domoai.domain.digital_twin import DigitalTwinEvidence
+from domoai.domain.household_consent import ConsentDecision, ConsentView
 from domoai.domain.household_onboarding import (
     HouseholdOnboardingInventory,
     HouseholdOnboardingRead,
@@ -356,6 +357,8 @@ V2_MODELS: dict[str, type[BaseModel]] = {
 }
 
 MODELS: dict[str, type[BaseModel]] = {
+    "household-consent-view": ConsentView,
+    "household-consent-decision": ConsentDecision,
     "household-preference": HouseholdPreference,
     "household-preference-mutation": PreferenceMutation,
     "household-preference-slot-mutation": PreferenceSlotMutation,
@@ -512,8 +515,7 @@ def main() -> None:
     version_two_output.mkdir(parents=True, exist_ok=True)
     for name, model in V2_MODELS.items():
         (version_two_output / f"{name}.schema.json").write_text(
-            json.dumps(model.model_json_schema(by_alias=True), indent=2, ensure_ascii=False)
-            + "\n",
+            json.dumps(model.model_json_schema(by_alias=True), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
     total = len(MODELS) + len(DATACLASS_MODELS)

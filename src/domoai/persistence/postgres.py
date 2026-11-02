@@ -18,7 +18,7 @@ from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import Clock
 
 _SCHEMA_PATH = Path(__file__).with_name("postgres_schema.sql")
-_POSTGRES_SCHEMA_VERSION = "postgres-schema-005"
+_POSTGRES_SCHEMA_VERSION = "postgres-schema-006"
 _SCHEMA_LOCK_KEY = "domoai:postgres-schema-bootstrap"
 
 

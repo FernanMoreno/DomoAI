@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import uvicorn
 from mcp.server.auth.provider import AccessToken
 from mcp.server.fastmcp import FastMCP
 from starlette.types import Receive, Scope, Send
@@ -18,6 +20,9 @@ from starlette.types import Receive, Scope, Send
 from domoai.application.authority import AuthorityPolicy
 from domoai.application.runtime_factory import RuntimeComposition
 from domoai.config.settings import Settings
+from domoai.domain.errors import DomainError
+from domoai.management.auth import is_resident_consent_request
+from domoai.mcp.auth import StaticBearerTokenVerifier
 from domoai.mcp.unified_server import (
     UnifiedMcpContext,
     _transport_security,
@@ -46,7 +51,15 @@ class GatewayApplication:
 
     runtime: RuntimeComposition
     server: FastMCP
+    # Set only by build_gateway: the one loaded MCP verifier shared with the
+    # management callback, and the permission to compose the resident host.
+    client_token_verifier: Any = None
+    compose_resident: bool = False
     _app: Any = field(init=False, repr=False)
+    _resident_consent: Any = field(default=None, init=False, repr=False)
+    _resident_verifier: Any = field(default=None, init=False, repr=False)
+    _closing: bool = field(default=False, init=False, repr=False)
+    _lifecycle_lock: Any = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         app = self.server.streamable_http_app()
@@ -60,8 +73,9 @@ class GatewayApplication:
             from domoai.mcp.resources import coverage_evidence_snapshot
 
             auth_verifier = None
+            verifier = self.client_token_verifier
             if self.runtime.settings.mcp_client_token_file is not None:
-                verifier = StaticBearerTokenVerifier.from_file(
+                verifier = verifier or StaticBearerTokenVerifier.from_file(
                     self.runtime.settings.mcp_client_token_file
                 )
 
@@ -87,6 +101,8 @@ class GatewayApplication:
                     public_url=self.runtime.settings.mcp_public_url.rstrip("/")
                     + self.runtime.settings.mcp_path,
                 )
+            resident_consent = self._build_resident_consent(policy, verifier)
+            self._resident_consent = resident_consent
             management_app = create_management_app(
                 connection_manager,
                 ets_importer=getattr(self.runtime, "ets_importer", None),
@@ -106,8 +122,10 @@ class GatewayApplication:
                 auth_verifier=auth_verifier,
                 authority_policy=policy,
                 household_onboarding=onboarding,
+                resident_consent=resident_consent,
             )
             app.mount("", management_app)
+            app.add_middleware(_ResidentDispatchMiddleware, management_app=management_app)
         if not self.runtime.settings.mcp_server_sent_events:
             transport_security = _transport_security(self.runtime.settings)
             app.add_middleware(
@@ -124,6 +142,7 @@ class GatewayApplication:
                 try:
                     yield
                 finally:
+                    self._close_resident()
                     # FastMCP's session manager cancels its task group and
                     # clears its transport table during lifespan exit. Close
                     # active transports first so SSE responses release their
@@ -133,6 +152,81 @@ class GatewayApplication:
         app.router.lifespan_context = managed_lifespan
         self._app = app
 
+    def _build_resident_consent(self, policy: AuthorityPolicy, shared_verifier: Any) -> Any:
+        """Compose the resident host from proven construction evidence, else stay closed."""
+
+        settings = self.runtime.settings
+        if (
+            not self.compose_resident
+            or settings.resident_token_file is None
+            or settings.resident_origin is None
+        ):
+            return None
+        from domoai.management.consent import (
+            AbsentCredentialPeer,
+            InspectableCredentialPeer,
+            ResidentAdmission,
+            ResidentConsentAdapter,
+            ResidentPeerInventory,
+        )
+        from domoai.mcp.auth import StaticBearerTokenVerifier
+
+        try:
+            resident = StaticBearerTokenVerifier.from_file(settings.resident_token_file)
+            self._resident_verifier = resident
+            peers: tuple[Any, ...]
+            if shared_verifier is None:
+                peers = (AbsentCredentialPeer("mcp"), AbsentCredentialPeer("management"))
+            else:
+                peers = (
+                    InspectableCredentialPeer("mcp", shared_verifier),
+                    InspectableCredentialPeer("management", shared_verifier),
+                )
+            admission = ResidentAdmission(
+                settings=settings,
+                resident_verifier=resident,
+                peers=ResidentPeerInventory(
+                    frozenset({"mcp", "management", "management-static"}),
+                    (*peers, AbsentCredentialPeer("management-static")),
+                ),
+                authority_policy=policy,
+            )
+            adapter = ResidentConsentAdapter(
+                admission=admission, clock=self.runtime.clock, **self._resident_review_options()
+            )
+            adapter.ensure_available()
+        except (ValueError, OSError, DomainError):
+            self._resident_verifier = None
+            return None
+        return adapter
+
+    def _resident_review_options(self) -> dict[str, Any]:
+        """Review source and grant store, only when both can be proven; else reviews stay 503."""
+
+        from domoai.mcp.consent_review_source import RuntimeReviewSource
+        from domoai.runtime.approval_store import ApprovalStore
+
+        runtime, settings = self.runtime, self.runtime.settings
+        store = getattr(runtime, "approval_store", None)
+        plans = getattr(runtime, "plan_repository", None)
+        preferences = getattr(runtime, "household_preferences", None)
+        if type(store) is not ApprovalStore or not store.durable:
+            return {}
+        registry = getattr(runtime, "registry", None)
+        if plans is None or preferences is None or registry is None:
+            return {}
+        source = RuntimeReviewSource(
+            plans=plans,
+            rules=getattr(runtime, "automation_rule_repository", None),
+            registry=registry,
+            preferences=preferences,
+            approval_store=store,
+            timezone=settings.solar_timezone,
+            tenant_id=settings.mcp_tenant_id,
+            household_id=settings.mcp_household_id,
+        )
+        return {"review_source": source, "approval_store": store}
+
     @property
     def app(self) -> Any:
         return self._app
@@ -140,9 +234,40 @@ class GatewayApplication:
     async def start(self) -> None:
         await self.runtime.start()
 
+    def _close_resident(self) -> None:
+        if self._resident_consent is not None:
+            self._resident_consent.close()
+
+    def reload_credentials(self) -> None:
+        """Apply offline token rotate/revoke to the owned verifiers.
+
+        Resident confirmation is closed before any credential file is read and
+        stays closed for this gateway instance, whatever the outcome; only a
+        new gateway built from valid files reopens it.
+        """
+
+        with self._lifecycle_lock:
+            if self._closing:
+                raise ValueError("gateway is closing; build a new gateway")
+            self._close_resident()
+            owned: list[Any] = []
+            for verifier in (self.client_token_verifier, self._resident_verifier):
+                if verifier is not None and all(verifier is not seen for seen in owned):
+                    owned.append(verifier)
+            for verifier in owned:
+                try:
+                    verifier.reload()
+                except ValueError:
+                    raise ValueError("credential reload failed") from None
+
     async def close(self) -> None:
-        await self.close_http_sessions()
-        await self.runtime.close()
+        with self._lifecycle_lock:
+            self._closing = True
+            self._close_resident()
+        try:
+            await self.close_http_sessions()
+        finally:
+            await self.runtime.close()
 
     async def close_http_sessions(self) -> None:
         """Terminate active stateful MCP sessions before stopping the runtime."""
@@ -200,6 +325,27 @@ async def _terminate_active_http_sessions(server: FastMCP) -> None:
         terminate = getattr(transport, "terminate", None)
         if callable(terminate):
             await terminate()
+
+
+class _ResidentDispatchMiddleware:
+    """Route the resident surfaces to management, outside the SDK middleware.
+
+    The surfaces are the three POSTs and the decision-receipt read, decided by
+    the one classifier management itself uses for its rate limit.
+
+    Classifies only the ``scope["path"]`` already decoded by the ASGI server;
+    scope, headers, client, raw_path, query and body pass through untouched.
+    """
+
+    def __init__(self, app: Any, *, management_app: Any) -> None:
+        self.app = app
+        self.management_app = management_app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and is_resident_consent_request(scope["method"], scope["path"]):
+            await self.management_app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 class _RejectServerSentEventsMiddleware:
@@ -323,14 +469,32 @@ async def build_gateway(
         control_plane_mode = True
         require_configured_adapter = False
 
+    resolved = settings or Settings.from_environment()
+    # Load the MCP credential file once, before any runtime effect; MCP,
+    # metrics and management then share this exact instance.
+    client_verifier = (
+        StaticBearerTokenVerifier.from_file(resolved.mcp_client_token_file)
+        if resolved.mcp_client_token_file is not None
+        else None
+    )
     runtime, server = await build_configured_server(
-        settings,
+        resolved,
         operator_principal_provider=operator_principal_provider,
         operator_approval_assertion_provider=operator_approval_assertion_provider,
         require_configured_adapter=require_configured_adapter,
         control_plane_mode=control_plane_mode,
+        client_token_verifier=client_verifier,
     )
-    return GatewayApplication(runtime=runtime, server=server)
+    try:
+        return GatewayApplication(
+            runtime=runtime,
+            server=server,
+            client_token_verifier=client_verifier,
+            compose_resident=True,
+        )
+    except BaseException:
+        await runtime.close()
+        raise
 
 
 async def run_gateway() -> None:
@@ -340,7 +504,17 @@ async def run_gateway() -> None:
     gateway = await build_gateway()
     try:
         await gateway.start()
-        await gateway.server.run_streamable_http_async()
+        # Serve the composed app (management, dispatcher, SSE guard), not a
+        # fresh SDK app that would bypass them.
+        settings = gateway.server.settings
+        await uvicorn.Server(
+            uvicorn.Config(
+                gateway.app,
+                host=settings.host,
+                port=settings.port,
+                log_level=settings.log_level.lower(),
+            )
+        ).serve()
     finally:
         await _close_gateway_safely(gateway)
 

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from domoai.domain.connections import ConnectionProfile
 from domoai.domain.coordination import LeaseScope
-from domoai.persistence.connection_repository import ConnectionRepository
+from domoai.persistence.connection_repository import ConnectionRepository, SecretTransfer
 from domoai.persistence.sqlite import SQLiteDatabase
 from domoai.runtime.clock import FixedClock
 
@@ -21,6 +22,77 @@ async def _database(tmp_path: Path) -> SQLiteDatabase:
     database = SQLiteDatabase(tmp_path / "connections.sqlite3")
     await database.initialize()
     return database
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("minimum_reader", [3, 4])
+async def test_secret_transfer_commits_with_sufficient_floor_without_rewriting_it(
+    tmp_path: Path, minimum_reader: int
+) -> None:
+    database = await _database(tmp_path)
+    try:
+        database.connection.execute(
+            "UPDATE runtime_contract_floor SET minimum_reader = ?", (minimum_reader,)
+        )
+        database.connection.commit()
+        floor = database.connection.execute("SELECT * FROM runtime_contract_floor").fetchone()
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="tenant", household_id="home", deployment_id="edge"),
+        )
+        transfer = SecretTransfer(
+            uuid4(), "secret:0123456789abcdef", uuid4(), "mqtt", "broker-main", "a" * 64
+        )
+
+        await repository.prepare_secret_transfer(transfer)
+
+        with closing(sqlite3.connect(database.path)) as observer:
+            assert observer.execute("SELECT * FROM runtime_contract_floor").fetchone() == floor
+            assert observer.execute(
+                "SELECT tenant_id, household_id, deployment_id, secret_ref, state "
+                "FROM connection_secret_transfers WHERE transfer_id = ?",
+                (str(transfer.transfer_id),),
+            ).fetchone() == ("tenant", "home", "edge", "secret:0123456789abcdef", "pending")
+        assert await repository.get_secret_transfer(transfer.transfer_id) == transfer
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("minimum_reader", [1, 2, None])
+async def test_secret_transfer_rejects_insufficient_or_missing_floor_without_writes(
+    tmp_path: Path, minimum_reader: int | None
+) -> None:
+    database = await _database(tmp_path)
+    try:
+        if minimum_reader is None:
+            database.connection.execute("DELETE FROM runtime_contract_floor")
+        else:
+            database.connection.execute(
+                "UPDATE runtime_contract_floor SET minimum_reader = ?", (minimum_reader,)
+            )
+        database.connection.commit()
+        floor = database.connection.execute("SELECT * FROM runtime_contract_floor").fetchall()
+        repository = ConnectionRepository(
+            database,
+            scope=LeaseScope(tenant_id="tenant", household_id="home", deployment_id="edge"),
+        )
+        transfer = SecretTransfer(
+            uuid4(), "secret:0123456789abcdef", uuid4(), "mqtt", "broker-main", "a" * 64
+        )
+
+        with pytest.raises(ValueError, match="secret transfer reader floor is unavailable"):
+            await repository.prepare_secret_transfer(transfer)
+
+        assert not database.connection.in_transaction
+        with closing(sqlite3.connect(database.path)) as observer:
+            assert observer.execute("SELECT * FROM runtime_contract_floor").fetchall() == floor
+            assert observer.execute(
+                "SELECT COUNT(*) FROM connection_secret_transfers"
+            ).fetchone() == (0,)
+        assert await repository.get_secret_transfer(transfer.transfer_id) is None
+    finally:
+        await database.close()
 
 
 def _profile(

@@ -97,12 +97,12 @@ class ConnectionRepository:
         connection = self.database.connection
         try:
             connection.execute("BEGIN IMMEDIATE")
-            # Metadata may only be written by a floor3 reader. PostgreSQL's
-            # bootstrap already validates the same marker before this call.
+            # Secret-transfer metadata requires at least the floor3 schema.
+            # Bootstrap separately rejects floors unsupported by this reader.
             floor = connection.execute(
                 "SELECT minimum_reader FROM runtime_contract_floor WHERE singleton = 1"
             ).fetchone()
-            if floor is None or floor[0] != 3:
+            if floor is None or floor[0] < 3:
                 raise ValueError("secret transfer reader floor is unavailable")
             now = self.clock.now().isoformat()
             connection.execute(

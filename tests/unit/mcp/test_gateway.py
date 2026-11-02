@@ -405,3 +405,156 @@ async def _build_context() -> UnifiedMcpContext:
         optimization_service=OptimizationService(registry, plan_service, CpSatOptimizer(registry)),
     )
     return UnifiedMcpContext(domotics=domotics, optimizer=optimizer)
+
+
+@pytest.mark.asyncio
+async def test_t012_b0_run_gateway_serves_the_gateway_application_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uvicorn
+
+    import domoai.mcp.gateway as module
+
+    served: list[object] = []
+    sentinel_app = object()
+
+    class _Server:
+        settings = type("S", (), {"host": "127.0.0.1", "port": 8123, "log_level": "INFO"})()
+
+        async def run_streamable_http_async(self) -> None:
+            served.append("sdk-built-app")
+
+    class _Gateway:
+        app = sentinel_app
+        server = _Server()
+        runtime = type("R", (), {"settings": Settings(mcp_host="127.0.0.1", mcp_port=8123)})()
+
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _UvicornServer:
+        def __init__(self, config: object) -> None:
+            served.append(getattr(config, "app", None))
+
+        async def serve(self) -> None:
+            return None
+
+    async def fake_build_gateway() -> _Gateway:
+        return _Gateway()
+
+    monkeypatch.setattr(module, "build_gateway", fake_build_gateway)
+    monkeypatch.setattr(uvicorn, "Server", _UvicornServer)
+
+    await module.run_gateway()
+
+    assert served == [sentinel_app]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        ("POST", "/api/v1/resident/session", "management"),
+        ("POST", "/api/v1/resident/reviews", "management"),
+        ("POST", "/api/v1/resident/decisions", "management"),
+        ("GET", "/api/v1/resident/session", "sdk"),
+        ("HEAD", "/api/v1/resident/session", "sdk"),
+        ("OPTIONS", "/api/v1/resident/session", "sdk"),
+        ("POST", "/api/v1/resident/session/", "sdk"),
+        ("POST", "/api/v1/resident/sessions", "sdk"),
+        ("POST", "/api/v1/resident", "sdk"),
+        ("POST", "/mcp", "sdk"),
+    ],
+)
+async def test_t012_b0_dispatcher_classifies_only_decoded_scope_path(
+    method: str, path: str, expected: str
+) -> None:
+    from domoai.mcp.gateway import _ResidentDispatchMiddleware
+
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def terminal(name: str):
+        async def app(scope, receive, send):
+            seen.append((name, scope))
+
+        return app
+
+    dispatcher = _ResidentDispatchMiddleware(terminal("sdk"), management_app=terminal("management"))
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "raw_path": b"/ignored%2Fraw",
+        "query_string": b"q=1",
+        "headers": [(b"x", b"y")],
+        "client": ("203.0.113.9", 1),
+    }
+    await dispatcher(scope, None, None)
+
+    assert [name for name, _ in seen] == [expected]
+    assert seen[0][1] is scope
+    lifespan = {"type": "lifespan"}
+    await dispatcher(lifespan, None, None)
+    assert [name for name, _ in seen] == [expected, "sdk"]
+
+
+def test_t012_c6_review_options_without_a_registry_stay_closed_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from domoai.mcp.gateway import GatewayApplication
+    from domoai.runtime.approval_store import ApprovalStore
+
+    monkeypatch.setattr(ApprovalStore, "durable", property(lambda self: True))
+    runtime = SimpleNamespace(
+        settings=Settings(),
+        approval_store=ApprovalStore(),
+        plan_repository=object(),
+        household_preferences=object(),
+    )
+    gateway = GatewayApplication.__new__(GatewayApplication)
+    gateway.runtime = runtime  # type: ignore[assignment]
+    assert gateway._resident_review_options() == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        ("GET", "/api/v1/resident/decisions/req-1", "management"),
+        ("HEAD", "/api/v1/resident/decisions/req-1", "management"),
+        ("GET", "/api/v1/resident/decisions/", "sdk"),
+        ("GET", "/api/v1/resident/decisions", "sdk"),
+        ("GET", "/api/v1/resident/decisions/a/b", "sdk"),
+        ("GET", "/api/v1/resident/decisions/x/", "sdk"),
+        ("GET", "/api/v1/resident/decisions//", "sdk"),
+        ("GET", "/api/v1/resident/decisions/a/b/c", "sdk"),
+        ("POST", "/api/v1/resident/decisions/req-1", "sdk"),
+        ("PUT", "/api/v1/resident/decisions/req-1", "sdk"),
+        ("OPTIONS", "/api/v1/resident/decisions/req-1", "sdk"),
+        ("GET", "/api/v1/resident/reviews/req-1", "sdk"),
+    ],
+)
+async def test_t012_c6_dispatcher_routes_the_receipt_read_and_nothing_else(
+    method: str, path: str, expected: str
+) -> None:
+    from domoai.management.auth import is_resident_consent_request
+    from domoai.mcp.gateway import _ResidentDispatchMiddleware
+
+    seen: list[str] = []
+
+    def terminal(name: str):
+        async def app(scope, receive, send):
+            seen.append(name)
+
+        return app
+
+    dispatcher = _ResidentDispatchMiddleware(terminal("sdk"), management_app=terminal("management"))
+    await dispatcher({"type": "http", "method": method, "path": path}, None, None)
+    assert seen == [expected]
+    # One rule: the dispatcher never disagrees with the management classifier.
+    assert (expected == "management") is is_resident_consent_request(method, path)

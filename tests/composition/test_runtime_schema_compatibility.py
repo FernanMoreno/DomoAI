@@ -561,10 +561,11 @@ async def test_retained_sqlite_descriptor_requires_old_process_termination(tmp_p
     mode = path.stat().st_mode & 0o777
     try:
         assert int(old_process_line(process)) == process.pid
-        assert old_process_line(process, read=True) == "3"
+        # Pre-floor binaries can still read the P04 floor without enforcing it.
+        assert old_process_line(process, read=True) == "4"
         path.chmod(0)
         # Permission changes cannot revoke an already-open SQLite descriptor.
-        assert old_process_line(process, read=True) == "3"
+        assert old_process_line(process, read=True) == "4"
         process.terminate()
         process.wait(timeout=10)
         assert process.poll() is not None
@@ -574,7 +575,7 @@ async def test_retained_sqlite_descriptor_requires_old_process_termination(tmp_p
             supported.connection.execute(
                 "SELECT minimum_reader FROM runtime_contract_floor"
             ).fetchone()[0]
-            == 3
+            == 4
         )
     finally:
         if process.poll() is None:
@@ -612,11 +613,12 @@ async def test_retained_postgres_session_requires_backend_termination_after_nolo
         process = retained_old_reader("postgres", old_dsn)
         try:
             backend_pid = int(old_process_line(process))
-            assert old_process_line(process, read=True) == "3"
+            # Pre-floor binaries can still read the P04 floor without enforcing it.
+            assert old_process_line(process, read=True) == "4"
             with psycopg.connect(dsn) as raw:
                 raw.execute("ALTER ROLE retained_old NOLOGIN")
             # NOLOGIN protects only future sessions; revoke the retained session too.
-            assert old_process_line(process, read=True) == "3"
+            assert old_process_line(process, read=True) == "4"
             with psycopg.connect(dsn) as raw:
                 assert raw.execute("SELECT pg_terminate_backend(%s)", (backend_pid,)).fetchone()[0]
             assert old_process_line(process, read=True) == ""
@@ -628,7 +630,7 @@ async def test_retained_postgres_session_requires_backend_termination_after_nolo
                 supported.connection.execute(
                     "SELECT minimum_reader FROM runtime_contract_floor"
                 ).fetchone()[0]
-                == 3
+                == 4
             )
         finally:
             if process.poll() is None:

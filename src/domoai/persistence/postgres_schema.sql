@@ -324,7 +324,7 @@ CREATE TABLE IF NOT EXISTS connection_secret_transfers (
 );
 CREATE INDEX IF NOT EXISTS idx_connection_secret_transfers_scope
     ON connection_secret_transfers (tenant_id, household_id, deployment_id, profile_id);
-UPDATE runtime_contract_floor SET minimum_reader = 3 WHERE minimum_reader < 3;
+UPDATE runtime_contract_floor SET minimum_reader = 4 WHERE minimum_reader < 4;
 
 CREATE TABLE IF NOT EXISTS household_preference_heads (
     tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
@@ -352,3 +352,65 @@ CREATE TABLE IF NOT EXISTS household_preference_requests (
     preference_id TEXT NOT NULL, response TEXT NOT NULL,
     PRIMARY KEY (tenant_id, household_id, generation, principal_id, idempotency_key)
 );
+
+-- Additive R/control storage. Roll back the binary only; retain this evidence.
+CREATE TABLE IF NOT EXISTS consent_control_heads (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    generation TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision >= 0),
+    PRIMARY KEY (tenant_id, household_id)
+);
+CREATE TABLE IF NOT EXISTS consent_issuance_receipts (
+    approval_id TEXT PRIMARY KEY REFERENCES approval_grants(approval_id),
+    assertion_nonce TEXT UNIQUE,
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    generation TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision >= 0),
+    receipt_id TEXT NOT NULL UNIQUE, issued_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS consent_receipts (
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL, request_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL, response TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, household_id, principal_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS consent_deliveries (
+    permit_id TEXT PRIMARY KEY,
+    approval_id TEXT NOT NULL UNIQUE REFERENCES approval_grants(approval_id),
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    request_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL, response TEXT NOT NULL,
+    UNIQUE (tenant_id, household_id, request_id),
+    UNIQUE (household_id, idempotency_key),
+    FOREIGN KEY (household_id, idempotency_key)
+        REFERENCES physical_intents(household_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS consent_revocations (
+    approval_id TEXT PRIMARY KEY REFERENCES approval_grants(approval_id),
+    tenant_id TEXT NOT NULL, household_id TEXT NOT NULL,
+    revocation_id TEXT NOT NULL UNIQUE, generation TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    principal_id TEXT NOT NULL, request_id TEXT NOT NULL,
+    revoked_at TEXT NOT NULL, response TEXT NOT NULL
+);
+INSERT INTO consent_control_heads (tenant_id, household_id, generation, revision)
+SELECT tenant_id, household_id, md5(random()::text || clock_timestamp()::text)::uuid::text, 0 FROM (
+    SELECT json_extract(payload, '$.authority.tenant_id') AS tenant_id,
+           json_extract(payload, '$.authority.household_id') AS household_id
+    FROM approval_grants
+    UNION SELECT tenant_id, household_id FROM household_preference_heads
+    UNION SELECT tenant_id, household_id FROM connection_ownership
+) AS scopes WHERE length(tenant_id) BETWEEN 1 AND 200
+    AND length(household_id) BETWEEN 1 AND 200
+    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE filename='postgres-schema-006')
+ON CONFLICT(tenant_id, household_id) DO NOTHING;
+INSERT INTO consent_issuance_receipts
+    (approval_id, assertion_nonce, tenant_id, household_id, generation, revision,
+     receipt_id, issued_at)
+SELECT grants.approval_id, json_extract(grants.payload, '$.assertion_nonce'),
+       heads.tenant_id, heads.household_id, heads.generation, heads.revision,
+       'legacy:' || grants.approval_id, grants.issued_at
+FROM approval_grants AS grants JOIN consent_control_heads AS heads
+ ON heads.tenant_id = json_extract(grants.payload, '$.authority.tenant_id')
+ AND heads.household_id = json_extract(grants.payload, '$.authority.household_id')
+WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE filename='postgres-schema-006')
+ON CONFLICT(approval_id) DO NOTHING;

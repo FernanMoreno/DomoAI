@@ -152,7 +152,7 @@ async def test_supported_floor_is_seeded_once_and_survives_restart(tmp_path) -> 
     await database.initialize()
     try:
         row = database.connection.execute("SELECT * FROM runtime_contract_floor").fetchone()
-        assert row[1] == 3
+        assert row[1] == 4
         database.connection.execute(
             "UPDATE runtime_contract_floor SET checkpoint_id='approved-checkpoint'"
         )
@@ -429,7 +429,7 @@ async def test_writer_elevates_supported_floor_without_relabelling_checkpoint(tm
             database.connection.execute(
                 "SELECT minimum_reader FROM runtime_contract_floor"
             ).fetchone()[0]
-            == 3
+            == 4
         )
         assert (
             database.connection.execute(
@@ -488,7 +488,7 @@ async def test_concurrent_sqlite_floor_elevation_preserves_checkpoint(
         reserved = False
 
         def execute(self, sql, *args, **kwargs):
-            if sql.startswith("UPDATE runtime_contract_floor SET minimum_reader = 3"):
+            if sql.startswith("UPDATE runtime_contract_floor SET minimum_reader = 4"):
                 if not self.reserved:
                     # Both unreserved readers have observed floor1. Never rendezvous
                     # while a writer owns the exclusive reservation being tested.
@@ -525,7 +525,7 @@ async def test_concurrent_sqlite_floor_elevation_preserves_checkpoint(
     results = await asyncio.gather(
         *[asyncio.to_thread(initialize_writer) for _ in range(2)], return_exceptions=True
     )
-    assert results == [(1, 3, *original)] * 2
+    assert results == [(1, 4, *original)] * 2
     assert len(connections) == 2
     assert all(connection.order == ["reserved", "floor_read"] for connection in connections)
 
@@ -694,7 +694,7 @@ async def test_floor_elevation_closes_after_commit_and_rollback_both_fail(tmp_pa
 
         def execute(self, sql, *args, **kwargs):
             result = super().execute(sql, *args, **kwargs)
-            if sql.startswith("UPDATE runtime_contract_floor SET minimum_reader = 3"):
+            if sql.startswith("UPDATE runtime_contract_floor SET minimum_reader = 4"):
                 self.updated = True
             return result
 
@@ -740,7 +740,7 @@ async def test_floor_elevation_closes_after_commit_and_rollback_both_fail(tmp_pa
     await database.initialize()
     assert database.connection.execute("SELECT * FROM runtime_contract_floor").fetchone() == (
         original[0],
-        3,
+        4,
         *original[2:],
     )
     await database.close()

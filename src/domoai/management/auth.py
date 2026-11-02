@@ -148,11 +148,27 @@ def is_public_management_shell(method: str, path: str) -> bool:
     return method in {"GET", "HEAD"} and path == "/"
 
 
+def is_resident_consent_request(method: str, path: str) -> bool:
+    """Classify only the resident surfaces: three POSTs and the decision-receipt read."""
+
+    prefix = "/api/v1/resident/decisions/"
+    if method in {"GET", "HEAD"}:
+        return (
+            path.startswith(prefix) and len(path) > len(prefix) and "/" not in path[len(prefix) :]
+        )
+    return method == "POST" and path in {
+        "/api/v1/resident/session",
+        "/api/v1/resident/reviews",
+        "/api/v1/resident/decisions",
+    }
+
+
 __all__ = [
     "ManagementAuth",
     "ManagementPrincipal",
     "authority_operation_for_scope",
     "is_loopback_host",
     "is_public_management_shell",
+    "is_resident_consent_request",
     "required_management_scope",
 ]

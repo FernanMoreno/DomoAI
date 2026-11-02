@@ -7,15 +7,23 @@ created; callers reference it by an opaque, single-use ``approval_id``.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Literal, Protocol
+from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from domoai.domain.coordination import FencingToken, PhysicalIntent
 from domoai.domain.errors import DomainError, ErrorCode
-from domoai.domain.models import Approval, AuthorityContext, Plan, PlanStatus
+from domoai.domain.household_consent import ConsentControlVersion
+from domoai.domain.household_preferences import PreferenceVersion
+from domoai.domain.models import Approval, AuthorityContext, Plan, PlanStatus, PrincipalRole
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.operational_metrics import RuntimeOperationalMetrics
 
@@ -70,7 +78,57 @@ OperatorApprovalAssertionProvider = Callable[[str, str, str | None], ApprovalAss
 class ApprovalGrantPersistence(Protocol):
     """Synchronous persistence hooks used at the authority boundary."""
 
-    def save_sync(self, grant: ApprovalGrant) -> None: ...
+    def save_sync(
+        self, grant: ApprovalGrant, *, decision: ConsentDecisionRecord | None = None
+    ) -> None: ...
+
+    def get_decision_receipt_sync(
+        self, *, tenant_id: str, household_id: str, principal_id: str, request_id: str
+    ) -> tuple[str, dict[str, Any]] | None: ...
+
+    @property
+    def connection(self) -> Any: ...
+
+    def prepare_delivery_sync(self, connection: Any, **request: Any) -> DeliveryReceipt: ...
+
+    def assert_consent_active_sync(self, approval_id: str) -> None: ...
+
+    def get_consent_control_sync(
+        self, *, tenant_id: str, household_id: str
+    ) -> ConsentControlVersion: ...
+
+    def bootstrap_consent_sync(self, *, tenant_id: str, household_id: str) -> None: ...
+
+    def get_consent_receipt_sync(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        request_id: str,
+        principal_id: str | None = None,
+    ) -> ConsentRevocationReceipt | None: ...
+
+    def revoke_consent_sync(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        approval_id: str,
+        expected_version: ConsentControlVersion,
+        principal_id: str,
+        request_id: str,
+        now: datetime,
+        request_fingerprint: str | None = None,
+    ) -> ConsentRevocationReceipt: ...
+
+    def list_active_approvals_sync(
+        self,
+        tenant_id: str,
+        household_id: str,
+        plan_id: str,
+        now: datetime,
+        issued_not_after: datetime | None = None,
+    ) -> list[tuple[str, str]]: ...
 
     def get_sync(self, approval_id: str) -> ApprovalGrant | None: ...
 
@@ -123,6 +181,151 @@ class ApprovalGrant:
     approved_at: datetime | None = None
     expires_at: datetime | None = None
     authority: AuthorityContext = field(default_factory=AuthorityContext)
+    command_digests: dict[str, str] = field(default_factory=dict)
+    plan_delivery_binding: dict[str, str | None] | None = None
+
+
+@dataclass(frozen=True)
+class ConsentRevocationReceipt:
+    """Durable R evidence; pending never asserts receiver entry or cutoff."""
+
+    approval_id: str
+    tenant_id: str
+    household_id: str
+    principal_id: str
+    request_id: str
+    revocation_id: str
+    expected_version: ConsentControlVersion
+    control_version: ConsentControlVersion
+    revoked_at: datetime
+    status: str = "revocation_pending"
+    confirmed_at: None = None
+    permit_ids: list[str] = field(default_factory=list)
+    routes: list[str] = field(default_factory=list)
+
+
+def delivery_digest(value: Any) -> str:
+    """Internal v1 binding: SHA-256 over sorted, compact UTF-8 JSON, finite values only."""
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def delivery_plan_binding(plan: Plan) -> dict[str, str | None]:
+    """Retain the original optional Plan constraints, including explicit absence."""
+    return {
+        "expires_at": plan.expires_at.isoformat() if plan.expires_at is not None else None,
+        "deployment_id": plan.deployment_id,
+        "definition_digest": plan.definition_digest,
+    }
+
+
+class DeliveryProtocolLimits(BaseModel):
+    """Explicit storage inputs; these do not qualify a receiver or a production clock."""
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, allow_inf_nan=False, revalidate_instances="always"
+    )
+    version: str = Field(min_length=1, max_length=200)
+    d_max_seconds: float = Field(gt=0)
+    clock_uncertainty_seconds: float = Field(ge=0)
+    clock_observed_at: datetime
+
+
+class DeliveryPreparation(BaseModel):
+    """Internal request validated before any prepare writes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+    approval_id: str = Field(min_length=1, max_length=200)
+    plan: Plan
+    command_id: str = Field(min_length=1, max_length=200)
+    request_id: str = Field(min_length=1, max_length=200)
+    expected_control_version: ConsentControlVersion
+    expected_preference_version: PreferenceVersion
+    intent: PhysicalIntent
+    lease: FencingToken
+    receiver_id: str = Field(min_length=1, max_length=200)
+    route_id: str = Field(min_length=1, max_length=200)
+    receiver_generation: UUID
+    definition_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    not_before: datetime
+    protocol_limits: DeliveryProtocolLimits
+    reservation_id: str | None = Field(default=None, min_length=1, max_length=200)
+    now: datetime
+
+    @field_validator("now", "not_before")
+    @classmethod
+    def aware_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("delivery times must have an explicit offset")
+        return value
+
+
+class DeliveryPermit(BaseModel):
+    """Durable storage evidence, not a receiver credential or physical admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    permit_id: str
+    approval_id: str
+    tenant_id: str
+    household_id: str
+    deployment_id: str
+    control_version: ConsentControlVersion
+    preference_version: PreferenceVersion
+    generation: UUID
+    plan_id: str
+    command_id: str
+    idempotency_key: str
+    execution_attempt_id: str
+    owner_id: str
+    fencing_epoch: int
+    lease_id: str
+    receiver_id: str
+    route_id: str
+    receiver_generation: UUID
+    definition_digest: str
+    command_digest: str
+    request_id: str
+    request_digest: str
+    protocol_version: str
+    issued_at: datetime
+    not_before: datetime
+    not_after: datetime
+    integrity: str
+
+
+class DeliveryReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    request_id: str
+    status: Literal["prepared"] = "prepared"
+    permit: DeliveryPermit
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ConsentDecisionRecord:
+    """Idempotency receipt written in the same transaction as the grant it describes."""
+
+    principal_id: str
+    request_id: str
+    fingerprint: str
+    review_digest: str
+    reviewed_control_version: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ConsentIssuanceReceipt:
+    approval_id: str
+    assertion_nonce: str | None
+    tenant_id: str
+    household_id: str
+    control_version: ConsentControlVersion
+    receipt_id: str
+    issued_at: datetime
 
 
 class ApprovalStore:
@@ -151,6 +354,117 @@ class ApprovalStore:
         self._clock = clock or SystemClock()
         self._persistence = persistence
         self._operational_metrics = operational_metrics
+
+    def prepare_delivery(self, approval_id: str, plan: Plan, **request: Any) -> DeliveryReceipt:
+        """Own the storage transaction; return only after all preparation evidence commits."""
+        if self._persistence is None:
+            raise DomainError(ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Durable prepare unavailable")
+        connection = self._persistence.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            receipt = self._persistence.prepare_delivery_sync(
+                connection=connection,
+                approval_id=approval_id,
+                plan=plan,
+                now=self._clock.now(),
+                **request,
+            )
+            connection.commit()
+            return receipt
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def list_active_approvals(
+        self, tenant_id: str, household_id: str, plan_id: str
+    ) -> list[str]:
+        """Unrevoked approvals of one plan in one household; empty without persistence."""
+        if self._persistence is None:
+            return []
+        return [
+            approval_id
+            for approval_id, _status in self._persistence.list_active_approvals_sync(
+                tenant_id, household_id, plan_id, self._clock.now()
+            )
+        ]
+
+    def resolve_active_approval(
+        self,
+        tenant_id: str,
+        household_id: str,
+        plan_id: str,
+        *,
+        now: datetime | None = None,
+        issued_not_after: datetime | None = None,
+    ) -> str | None:
+        """The one approval a resident revocation may target, else None (never guess).
+
+        Exactly one pending approval wins; with none pending, exactly one consumed one.
+        ``now`` and ``issued_not_after`` pin the caller's reviewed instant: a grant
+        issued after it was never in front of the resident.
+        """
+        if self._persistence is None:
+            return None
+        active = self._persistence.list_active_approvals_sync(
+            tenant_id,
+            household_id,
+            plan_id,
+            self._clock.now() if now is None else now,
+            issued_not_after,
+        )
+        for status in ("pending", "consumed"):
+            same = [approval_id for approval_id, current in active if current == status]
+            if same:
+                return same[0] if len(same) == 1 else None
+        return None
+
+    def get_consent_receipt(
+        self, tenant_id: str, household_id: str, principal_id: str, request_id: str
+    ) -> ConsentRevocationReceipt | None:
+        """The principal's own revocation receipt for a request id; None without persistence."""
+        if self._persistence is None:
+            return None
+        return self._persistence.get_consent_receipt_sync(
+            tenant_id=tenant_id,
+            household_id=household_id,
+            principal_id=principal_id,
+            request_id=request_id,
+        )
+
+    def revoke_consent(
+        self,
+        approval_id: str,
+        *,
+        authority: AuthorityContext,
+        request_id: str,
+        request_fingerprint: str | None = None,
+    ) -> ConsentRevocationReceipt:
+        if not set(authority.roles).intersection({PrincipalRole.OPERATOR, PrincipalRole.OWNER}):
+            raise DomainError(
+                ErrorCode.INSUFFICIENT_SCOPE, "Consent revocation requires an operator"
+            )
+        if self._persistence is None:
+            raise DomainError(
+                ErrorCode.SOURCE_UNAVAILABLE, "Durable consent control is unavailable"
+            )
+        scope = {"tenant_id": authority.tenant_id, "household_id": authority.household_id}
+        previous = self._persistence.get_consent_receipt_sync(
+            **scope, principal_id=authority.principal_id, request_id=request_id
+        )
+        version = (
+            previous.expected_version
+            if previous
+            else self._persistence.get_consent_control_sync(**scope)
+        )
+        return self._persistence.revoke_consent_sync(
+            **scope,
+            approval_id=approval_id,
+            expected_version=version,
+            principal_id=authority.principal_id,
+            request_id=request_id,
+            now=self._clock.now(),
+            request_fingerprint=request_fingerprint,
+        )
 
     def issue(
         self,
@@ -207,6 +521,7 @@ class ApprovalStore:
         assertion: ApprovalAssertion | None = None,
         bundle_digest: str | None = None,
         recurrence_digest: str | None = None,
+        decision: ConsentDecisionRecord | None = None,
     ) -> ApprovalGrant:
         """Issue a grant only after a trusted host supplies a human assertion."""
 
@@ -225,6 +540,39 @@ class ApprovalStore:
             assertion=assertion,
             bundle_digest=bundle_digest,
             recurrence_digest=recurrence_digest,
+            decision=decision,
+        )
+
+    @property
+    def durable(self) -> bool:
+        return self._persistence is not None
+
+    def get_consent_control(self, tenant_id: str, household_id: str) -> ConsentControlVersion:
+        """Current consent head; a household with no history gets its head provisioned."""
+        persistence = self._persistence
+        if persistence is None:
+            raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Consent head is unavailable")
+        scope = {"tenant_id": tenant_id, "household_id": household_id}
+        try:
+            return persistence.get_consent_control_sync(**scope)
+        except DomainError as error:
+            if error.code is not ErrorCode.SOURCE_UNAVAILABLE:
+                raise
+        # Raises SOURCE_UNAVAILABLE again for a household that has grants but lost its head.
+        persistence.bootstrap_consent_sync(**scope)
+        return persistence.get_consent_control_sync(**scope)
+
+    def get_decision_receipt(
+        self, tenant_id: str, household_id: str, principal_id: str, request_id: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Durable idempotency receipt of a resident approval; None without persistence."""
+        if self._persistence is None:
+            return None
+        return self._persistence.get_decision_receipt_sync(
+            tenant_id=tenant_id,
+            household_id=household_id,
+            principal_id=principal_id,
+            request_id=request_id,
         )
 
     def issue_attended_local(
@@ -264,6 +612,7 @@ class ApprovalStore:
         assertion: ApprovalAssertion,
         bundle_digest: str | None = None,
         recurrence_digest: str | None = None,
+        decision: ConsentDecisionRecord | None = None,
     ) -> ApprovalGrant:
         """Issue a digest-bound, expiring, one-nonce approval grant."""
 
@@ -321,6 +670,7 @@ class ApprovalStore:
             assertion_nonce=assertion.nonce,
             approved_at=assertion.approved_at,
             expires_at=assertion.expires_at,
+            decision=decision,
         )
         self._assertion_nonces.add(assertion.nonce)
         return grant
@@ -349,6 +699,7 @@ class ApprovalStore:
         assertion_nonce: str | None = None,
         approved_at: datetime | None = None,
         expires_at: datetime | None = None,
+        decision: ConsentDecisionRecord | None = None,
     ) -> ApprovalGrant:
         self._assert_issueable(plan, recurrence_digest=recurrence_digest)
         assert plan.validation is not None
@@ -382,9 +733,17 @@ class ApprovalStore:
             approved_at=approved_at,
             expires_at=effective_expiry,
             authority=plan.authority,
+            command_digests={
+                command.id: delivery_digest(command.model_dump(mode="json"))
+                for command in plan.commands
+            },
+            plan_delivery_binding=delivery_plan_binding(plan),
         )
         if self._persistence is not None:
-            self._persistence.save_sync(grant)
+            if decision is None:
+                self._persistence.save_sync(grant)
+            else:
+                self._persistence.save_sync(grant, decision=decision)
         self._grants[grant.approval_id] = grant
         return grant
 
@@ -434,6 +793,8 @@ class ApprovalStore:
 
         if not reservation_id.strip():
             raise ValueError("approval reservation ID must be non-empty")
+        if self._persistence is not None:
+            self._persistence.assert_consent_active_sync(approval_id)
         existing = self._reservation_status(approval_id)
         if existing is not None:
             if existing == (reservation_id, "reserved"):
@@ -446,6 +807,10 @@ class ApprovalStore:
                     bundle_digest=bundle_digest,
                     recurrence_digest=recurrence_digest,
                 )
+                if self._persistence is not None and not self._persistence.reserve_if_pending_sync(
+                    approval_id, reservation_id=reservation_id, now=self._clock.now()
+                ):
+                    raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is already reserved")
                 return grant
             if existing[1] != "released":
                 raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is already reserved")
@@ -608,31 +973,25 @@ class ApprovalStore:
         return grant
 
     def _load_grant(self, approval_id: str) -> ApprovalGrant | None:
-        grant = self._grants.get(approval_id)
-        if grant is None and self._persistence is not None:
+        if self._persistence is not None:
+            self._persistence.assert_consent_active_sync(approval_id)
             grant = self._persistence.get_sync(approval_id)
             if grant is not None:
                 self._grants[approval_id] = grant
-        return grant
+            return grant
+        return self._grants.get(approval_id)
 
     def _is_consumed(self, approval_id: str) -> bool:
-        if approval_id in self._consumed:
-            return True
-        return self._persistence is not None and self._persistence.is_consumed_sync(
-            approval_id
-        )
+        if self._persistence is not None:
+            return self._persistence.is_consumed_sync(approval_id)
+        return approval_id in self._consumed
 
     def _reservation_status(self, approval_id: str) -> tuple[str, str] | None:
-        local = self._reservations.get(approval_id)
-        if local is not None:
-            return local
         if self._persistence is not None:
             return self._persistence.reservation_status_sync(approval_id)
-        return None
+        return self._reservations.get(approval_id)
 
-    def _reservation_ids(
-        self, reservation_id: str, approval_ids: list[str] | None
-    ) -> list[str]:
+    def _reservation_ids(self, reservation_id: str, approval_ids: list[str] | None) -> list[str]:
         ids = list(dict.fromkeys(approval_ids or []))
         ids.extend(
             approval_id
@@ -703,14 +1062,17 @@ class ApprovalStore:
 
     @staticmethod
     def _validate_projection(approval: Approval, grant: ApprovalGrant) -> None:
-        expected_scope = "+".join(
-            scope
-            for scope, present in (
-                ("bundle", grant.bundle_digest is not None),
-                ("recurrence", grant.recurrence_digest is not None),
+        expected_scope = (
+            "+".join(
+                scope
+                for scope, present in (
+                    ("bundle", grant.bundle_digest is not None),
+                    ("recurrence", grant.recurrence_digest is not None),
+                )
+                if present
             )
-            if present
-        ) or "plan"
+            or "plan"
+        )
         expected = {
             "status": "approved",
             "approved_by": grant.approved_by,
@@ -728,10 +1090,7 @@ class ApprovalStore:
             "approval_id": grant.approval_id,
             "authority": grant.authority,
         }
-        actual = {
-            field_name: getattr(approval, field_name)
-            for field_name in expected
-        }
+        actual = {field_name: getattr(approval, field_name) for field_name in expected}
         if actual != expected:
             raise DomainError(
                 ErrorCode.APPROVAL_REQUIRED,

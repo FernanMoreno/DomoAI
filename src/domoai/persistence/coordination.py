@@ -48,61 +48,71 @@ class PhysicalIntentRepository:
 
     async def claim_for_dispatch(self, intent: PhysicalIntent) -> PhysicalIntentClaim:
         connection = self.database.connection
+        # Preserve the public wrapper's pre-BEGIN validation boundary.
         dispatching = PhysicalIntent.model_validate(
-            intent.model_dump(mode="python")
-            | {"status": PhysicalIntentStatus.DISPATCHING}
+            intent.model_dump(mode="python") | {"status": PhysicalIntentStatus.DISPATCHING}
         )
-        payload = json.dumps(dispatching.model_dump(mode="json"), sort_keys=True)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch,
-                          created_at, updated_at FROM physical_intents
-                   WHERE household_id = ? AND idempotency_key = ?""",
-                (intent.household_id, intent.idempotency_key),
-            ).fetchone()
-            if row is None:
-                connection.execute(
-                    """INSERT INTO physical_intents
-                       (household_id, idempotency_key, payload, status, fencing_epoch,
-                        owner_id, execution_attempt_id, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        dispatching.household_id,
-                        dispatching.idempotency_key,
-                        payload,
-                        dispatching.status.value,
-                        dispatching.fencing_epoch,
-                        dispatching.owner_id,
-                        dispatching.execution_attempt_id,
-                        dispatching.created_at.isoformat(),
-                        dispatching.updated_at.isoformat(),
-                    ),
-                )
-                connection.commit()
-                return PhysicalIntentClaim(
-                    decision=PhysicalIntentClaimDecision.ACQUIRED,
-                    intent=dispatching,
-                )
-
-            stored = self._read_consistent(
-                row, household_id=intent.household_id, idempotency_key=intent.idempotency_key
-            )
+            result = self.claim_for_dispatch_sync(connection, dispatching)
             connection.commit()
-            if not self._same_logical_identity(stored, intent):
-                decision = PhysicalIntentClaimDecision.CONFLICT
-            elif stored.status in {
-                PhysicalIntentStatus.ACKNOWLEDGED,
-                PhysicalIntentStatus.CONFIRMED,
-                PhysicalIntentStatus.REJECTED,
-            }:
-                decision = PhysicalIntentClaimDecision.REPLAY
-            else:
-                decision = PhysicalIntentClaimDecision.IN_FLIGHT
-            return PhysicalIntentClaim(decision=decision, intent=stored)
+            return result
         except BaseException:
             connection.rollback()
             raise
+
+    @classmethod
+    def claim_for_dispatch_sync(
+        cls, connection: Any, intent: PhysicalIntent
+    ) -> PhysicalIntentClaim:
+        """SQL-only claim; the caller owns connection, serialization and transaction closure."""
+        dispatching = PhysicalIntent.model_validate(
+            intent.model_dump(mode="python") | {"status": PhysicalIntentStatus.DISPATCHING}
+        )
+        payload = json.dumps(dispatching.model_dump(mode="json"), sort_keys=True)
+        row = connection.execute(
+            """SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch,
+                          created_at, updated_at FROM physical_intents
+                   WHERE household_id = ? AND idempotency_key = ?""",
+            (intent.household_id, intent.idempotency_key),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """INSERT INTO physical_intents
+                       (household_id, idempotency_key, payload, status, fencing_epoch,
+                        owner_id, execution_attempt_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    dispatching.household_id,
+                    dispatching.idempotency_key,
+                    payload,
+                    dispatching.status.value,
+                    dispatching.fencing_epoch,
+                    dispatching.owner_id,
+                    dispatching.execution_attempt_id,
+                    dispatching.created_at.isoformat(),
+                    dispatching.updated_at.isoformat(),
+                ),
+            )
+            return PhysicalIntentClaim(
+                decision=PhysicalIntentClaimDecision.ACQUIRED,
+                intent=dispatching,
+            )
+
+        stored = cls._read_consistent(
+            row, household_id=intent.household_id, idempotency_key=intent.idempotency_key
+        )
+        if not cls._same_logical_identity(stored, intent):
+            decision = PhysicalIntentClaimDecision.CONFLICT
+        elif stored.status in {
+            PhysicalIntentStatus.ACKNOWLEDGED,
+            PhysicalIntentStatus.CONFIRMED,
+            PhysicalIntentStatus.REJECTED,
+        }:
+            decision = PhysicalIntentClaimDecision.REPLAY
+        else:
+            decision = PhysicalIntentClaimDecision.IN_FLIGHT
+        return PhysicalIntentClaim(decision=decision, intent=stored)
 
     @staticmethod
     def _read_consistent(row: Any, *, household_id: str, idempotency_key: str) -> PhysicalIntent:

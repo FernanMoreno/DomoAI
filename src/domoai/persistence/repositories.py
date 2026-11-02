@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from domoai.domain.automation import (
     AutomationRuleStatus,
 )
 from domoai.domain.errors import DomainError, ErrorCode, InvalidTransitionError
+from domoai.domain.household_consent import ConsentControlVersion
 from domoai.domain.models import (
     AuditEvent,
     AuthorityContext,
@@ -45,7 +47,14 @@ from domoai.persistence.contract_compatibility import (
     read_active_rule,
 )
 from domoai.persistence.sqlite import SQLiteDatabase
-from domoai.runtime.approval_store import ApprovalGrant
+from domoai.runtime.approval_store import (
+    ApprovalGrant,
+    ConsentDecisionRecord,
+    ConsentIssuanceReceipt,
+    ConsentRevocationReceipt,
+    DeliveryPermit,
+    DeliveryReceipt,
+)
 from domoai.runtime.clock import Clock, SystemClock
 from domoai.runtime.events import CRITICAL_AUDIT_EVENT_TYPES, redact_payload
 from domoai.runtime.state_store import StateStoreMetadata
@@ -101,13 +110,9 @@ class RuntimeOwnershipRepository:
                    FROM runtime_ownership WHERE deployment_id = ?""",
                 (deployment_id,),
             ).fetchone()
-            if existing is not None and (
-                existing[1] != "released" or bool(existing[2])
-            ):
+            if existing is not None and (existing[1] != "released" or bool(existing[2])):
                 reason = "uncertain" if bool(existing[2]) else "active"
-                raise RuntimeOwnershipConflict(
-                    f"runtime ownership for {deployment_id} is {reason}"
-                )
+                raise RuntimeOwnershipConflict(f"runtime ownership for {deployment_id} is {reason}")
             connection.execute(
                 """INSERT INTO runtime_ownership
                    (deployment_id, owner_id, config_digest, acquired_at, released_at,
@@ -180,7 +185,11 @@ class RuntimeOwnershipRepository:
 
 
 class ApprovalGrantRepository:
-    """Durable grant storage with atomic one-shot consumption."""
+    """Durable consent control and atomic one-shot consumption.
+
+    Mutators lock scope heads, all grants, then all reservations. PostgreSQL
+    READ COMMITTED rereads each set under row locks; SQLite reserves its writer.
+    """
 
     _DATETIME_FIELDS = {
         "issued_at",
@@ -192,42 +201,664 @@ class ApprovalGrantRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
 
+    @property
+    def connection(self) -> Any:
+        """Expose the transaction boundary to the outer storage service."""
+        return self.database.connection
+
+    @staticmethod
+    def _read_delivery(row: Any) -> DeliveryReceipt:
+        from domoai.runtime.approval_store import DeliveryReceipt, delivery_digest
+
+        receipt = DeliveryReceipt.model_validate_json(row[7])
+        permit = receipt.permit
+        if (
+            tuple(row[:7])
+            != (
+                permit.permit_id,
+                permit.approval_id,
+                permit.tenant_id,
+                permit.household_id,
+                permit.request_id,
+                permit.idempotency_key,
+                permit.request_digest,
+            )
+            or receipt.request_id != permit.request_id
+            or delivery_digest(permit.model_dump(mode="json", exclude={"integrity"}))
+            != permit.integrity
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery evidence is inconsistent")
+        return receipt
+
+    def get_delivery_receipt_sync(
+        self, *, request_id: str, household_id: str, tenant_id: str | None = None
+    ) -> DeliveryReceipt | None:
+        query = "SELECT * FROM consent_deliveries WHERE household_id=? AND request_id=?"
+        params = [household_id, request_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=?"
+            params.append(tenant_id)
+        rows = self.database.connection.execute(query, params).fetchall()
+        if len(rows) > 1:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery receipt requires tenant scope")
+        return self._read_delivery(rows[0]) if rows else None
+
+    def list_delivery_permits_sync(
+        self, *, tenant_id: str, household_id: str
+    ) -> list[DeliveryPermit]:
+        rows = self.database.connection.execute(
+            "SELECT * FROM consent_deliveries WHERE tenant_id=? AND household_id=? "
+            "ORDER BY permit_id",
+            self._scope(tenant_id, household_id),
+        ).fetchall()
+        return [self._read_delivery(row).permit for row in rows]
+
+    def verify_delivery_permit_sync(self, permit: DeliveryPermit, *, command: Command) -> bool:
+        from domoai.runtime.approval_store import delivery_digest
+
+        row = self.database.connection.execute(
+            "SELECT * FROM consent_deliveries WHERE permit_id=?",
+            (permit.permit_id,),
+        ).fetchone()
+        if (
+            row is None
+            or self._read_delivery(row).permit != permit
+            or delivery_digest(command.model_dump(mode="json")) != permit.command_digest
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery permit binding changed")
+        return True
+
+    def prepare_delivery_sync(
+        self, connection: Any, *, preference_snapshot: Any = None, **request: Any
+    ) -> DeliveryReceipt:
+        """Prepare on exactly the caller connection; never own transaction lifecycle here."""
+        from domoai.domain.coordination import (
+            FencingToken,
+            PhysicalIntent,
+            PhysicalIntentClaimDecision,
+            PhysicalIntentStatus,
+        )
+        from domoai.domain.household_preferences import PreferenceVersion
+        from domoai.persistence.coordination import PhysicalIntentRepository
+        from domoai.runtime.approval_store import (
+            DeliveryPermit,
+            DeliveryPreparation,
+            DeliveryReceipt,
+            delivery_digest,
+            delivery_plan_binding,
+        )
+
+        try:
+            data = DeliveryPreparation.model_validate(request)
+            # model_copy bypasses nested model validators; revalidate the actual input bytes.
+            plan = Plan.model_validate(data.plan.model_dump(mode="python"))
+            intent = PhysicalIntent.model_validate(data.intent.model_dump(mode="python"))
+            lease = FencingToken.model_validate(data.lease.model_dump(mode="python"))
+            observed = data.protocol_limits.clock_observed_at
+            if not callable(preference_snapshot) or observed.utcoffset() is None:
+                raise ValueError("Missing transactional snapshot or clock bound")
+            uncertainty = timedelta(seconds=data.protocol_limits.clock_uncertainty_seconds)
+            max_end = (
+                min(
+                    data.now + timedelta(seconds=data.protocol_limits.d_max_seconds),
+                    lease.expires_at,
+                )
+                - uncertainty
+            )
+        except (ValidationError, ValueError, TypeError, OverflowError) as error:
+            raise DomainError(
+                ErrorCode.DELIVERY_FENCE_UNAVAILABLE,
+                "Delivery dependencies are invalid or unavailable",
+            ) from error
+
+        scope = self._scope(plan.authority.tenant_id, plan.authority.household_id)
+        commands = [command for command in plan.commands if command.id == data.command_id]
+        if len(commands) != 1:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery command is ambiguous")
+        command = commands[0]
+        command_digest = delivery_digest(command.model_dump(mode="json"))
+        if (
+            (intent.tenant_id, intent.household_id) != scope
+            or (lease.scope.tenant_id, lease.scope.household_id) != scope
+            or (intent.deployment_id, intent.owner_id, intent.fencing_epoch, intent.lease_id)
+            != (lease.scope.deployment_id, lease.owner_id, lease.epoch, lease.lease_id)
+            or (intent.plan_id, intent.command_id, intent.idempotency_key)
+            != (plan.id, command.id, command.idempotency_key)
+            or not intent.execution_attempt_id
+            or not intent.owner_id
+            or not intent.lease_id
+            or intent.status is not PhysicalIntentStatus.PREPARED
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery intent scope changed")
+
+        # T003 order: consent head, preference head, snapshot, grant, reservation, intent.
+        head = connection.execute(
+            "SELECT generation, revision FROM consent_control_heads "
+            "WHERE tenant_id=? AND household_id=?" + self._for_update,
+            scope,
+        ).fetchone()
+        preference_head = connection.execute(
+            "SELECT generation, revision FROM household_preference_heads "
+            "WHERE tenant_id=? AND household_id=?" + self._for_update,
+            scope,
+        ).fetchone()
+        if head is None or preference_head is None:
+            raise DomainError(ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Delivery head unavailable")
+        current = ConsentControlVersion(generation=head[0], revision=head[1])
+        preference_version, slots = preference_snapshot(connection)
+        if preference_version != PreferenceVersion(
+            generation=preference_head[0], revision=preference_head[1]
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Snapshot does not match locked scope")
+        row = connection.execute(
+            "SELECT payload, status, valid_until, consumed_at FROM approval_grants "
+            "WHERE approval_id=?" + self._for_update,
+            (data.approval_id,),
+        ).fetchone()
+        reservation = connection.execute(
+            "SELECT reservation_id, status FROM approval_reservations WHERE approval_id=?"
+            + self._for_update,
+            (data.approval_id,),
+        ).fetchone()
+        if row is None:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Unknown delivery approval")
+        grant = json.loads(row[0])
+        issuance = connection.execute(
+            "SELECT tenant_id, household_id, generation FROM consent_issuance_receipts "
+            "WHERE approval_id=?",
+            (data.approval_id,),
+        ).fetchone()
+        revoked = connection.execute(
+            "SELECT 1 FROM consent_revocations WHERE approval_id=?",
+            (data.approval_id,),
+        ).fetchone()
+        if revoked is not None or row[1] == "revoked":
+            raise DomainError(ErrorCode.CONSENT_REVOKED, "Consent has been revoked")
+        if issuance is None or tuple(issuance) != (*scope, str(current.generation)):
+            raise DomainError(ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Issuance scope unavailable")
+        if (
+            (
+                grant.get("authority", {}).get("tenant_id"),
+                grant.get("authority", {}).get("household_id"),
+            )
+            != scope
+            or grant.get("plan_id") != plan.id
+            or plan.validation is None
+            or grant.get("validation_digest") != plan.validation.digest
+            or grant.get("command_digests", {}).get(command.id) != command_digest
+            or grant.get("validation_valid_until")
+            != (plan.validation.valid_until.isoformat() if plan.validation.valid_until else None)
+            or grant.get("window_digest")
+            != (plan.execution_window.digest if plan.execution_window else None)
+            or grant.get("schedule_revision", 0) != plan.schedule_revision
+            or grant.get("bundle_digest") is not None
+            or grant.get("recurrence_digest") is not None
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery approval binding changed")
+        fingerprint = delivery_digest(data.model_dump(mode="json", exclude={"now"}))
+        previous = connection.execute(
+            "SELECT * FROM consent_deliveries "
+            "WHERE tenant_id=? AND household_id=? AND request_id=?",
+            (*scope, data.request_id),
+        ).fetchone()
+        if previous is not None:
+            receipt = self._read_delivery(previous)
+            if receipt.permit.request_digest != fingerprint:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery request identity changed")
+            stored_row = connection.execute(
+                "SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch, "
+                "created_at, updated_at FROM physical_intents "
+                "WHERE household_id=? AND idempotency_key=?" + self._for_update,
+                (intent.household_id, intent.idempotency_key),
+            ).fetchone()
+            try:
+                if stored_row is None:
+                    raise ValueError("Delivery intent is missing")
+                stored = PhysicalIntentRepository._read_consistent(
+                    stored_row,
+                    household_id=intent.household_id,
+                    idempotency_key=intent.idempotency_key,
+                )
+                if (
+                    stored.model_dump(exclude={"status", "updated_at"})
+                    != intent.model_dump(exclude={"status", "updated_at"})
+                    or row[1] != "consumed"
+                    or row[3] is None
+                    or (
+                        data.reservation_id is not None
+                        and (
+                            reservation is None
+                            or tuple(reservation) != (data.reservation_id, "committed")
+                        )
+                    )
+                ):
+                    raise ValueError("Delivery authority evidence changed")
+            except ValueError as error:
+                raise DomainError(
+                    ErrorCode.CONSENT_CONFLICT, "Delivery intent evidence changed"
+                ) from error
+            return receipt
+        # Historical retry above only returns existing evidence. A new preparation
+        # must match the Plan constraints that were actually approved, including None.
+        if (
+            grant.get("plan_delivery_binding") != delivery_plan_binding(plan)
+            or (plan.deployment_id is not None and plan.deployment_id != intent.deployment_id)
+            or (
+                plan.definition_digest is not None
+                and plan.definition_digest != data.definition_digest
+            )
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Approved Plan delivery binding changed")
+        if (
+            current != data.expected_control_version
+            or preference_version != data.expected_preference_version
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery control version changed")
+        if (
+            observed > data.now
+            or lease.issued_at > data.now
+            or lease.expires_at <= data.now
+            or data.not_before < data.now - uncertainty
+            or data.not_before >= max_end
+        ):
+            raise DomainError(
+                ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Delivery clock or window unavailable"
+            )
+        if (
+            row[1] != "pending"
+            or row[3] is not None
+            or (row[2] is not None and datetime.fromisoformat(row[2]) <= data.now)
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery approval is not pending")
+        if data.reservation_id is None:
+            if reservation is not None and reservation[1] != "released":
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery approval is reserved")
+        elif reservation is None or tuple(reservation) != (data.reservation_id, "reserved"):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery reservation changed")
+        boundaries = [max_end]
+        if plan.expires_at is not None:
+            boundaries.append(plan.expires_at - uncertainty)
+        for value in (row[2], grant.get("validation_valid_until")):
+            if value is not None:
+                boundaries.append(datetime.fromisoformat(value) - uncertainty)
+        if plan.execution_window is not None:
+            boundaries.append(plan.execution_window.not_after - uncertainty)
+            if data.not_before < plan.execution_window.not_before:
+                raise DomainError(
+                    ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Delivery precedes the execution window"
+                )
+        for slot in slots:
+            preference = slot.preference
+            if slot.deleted or slot.erased or preference is None:
+                continue
+            # Without device/alias resolution this storage boundary cannot prove area/alias
+            # restrictions irrelevant. Fail closed when active; bound future transitions.
+            if slot.target.kind == "device" and slot.target.id not in {None, command.device_id}:
+                continue
+            if preference.valid_until is not None and preference.valid_until <= data.now:
+                continue
+            if preference.valid_from <= data.now:
+                raise DomainError(
+                    ErrorCode.DELIVERY_FENCE_UNAVAILABLE,
+                    "Active preference requires admission qualification",
+                )
+            boundaries.append(preference.valid_from - uncertainty)
+        not_after = min(boundaries)
+        if not_after <= max(data.now, data.not_before):
+            raise DomainError(ErrorCode.DELIVERY_FENCE_UNAVAILABLE, "Delivery window is empty")
+        cursor = connection.execute(
+            "UPDATE approval_grants SET status='consumed', consumed_at=? "
+            "WHERE approval_id=? AND status='pending' AND consumed_at IS NULL",
+            (data.now.isoformat(), data.approval_id),
+        )
+        if cursor.rowcount != 1:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery approval changed")
+        if data.reservation_id is not None:
+            cursor = connection.execute(
+                "UPDATE approval_reservations SET status='committed', updated_at=? "
+                "WHERE approval_id=? AND reservation_id=? AND status='reserved'",
+                (data.now.isoformat(), data.approval_id, data.reservation_id),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery reservation changed")
+        claim = PhysicalIntentRepository.claim_for_dispatch_sync(connection, intent)
+        if claim.decision is not PhysicalIntentClaimDecision.ACQUIRED:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery intent already exists")
+        stored_row = connection.execute(
+            "SELECT payload, status, owner_id, execution_attempt_id, fencing_epoch, "
+            "created_at, updated_at FROM physical_intents "
+            "WHERE household_id=? AND idempotency_key=?" + self._for_update,
+            (intent.household_id, intent.idempotency_key),
+        ).fetchone()
+        try:
+            if stored_row is None:
+                raise ValueError("Prepared intent is missing")
+            stored = PhysicalIntentRepository._read_consistent(
+                stored_row,
+                household_id=intent.household_id,
+                idempotency_key=intent.idempotency_key,
+            )
+            if stored != claim.intent:
+                raise ValueError("Prepared intent differs from its dispatching claim")
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.CONSENT_CONFLICT, "Prepared intent evidence changed"
+            ) from error
+        permit = DeliveryPermit(
+            permit_id=str(uuid4()),
+            approval_id=data.approval_id,
+            tenant_id=scope[0],
+            household_id=scope[1],
+            deployment_id=intent.deployment_id,
+            control_version=current,
+            preference_version=preference_version,
+            generation=current.generation,
+            plan_id=plan.id,
+            command_id=command.id,
+            idempotency_key=command.idempotency_key,
+            execution_attempt_id=intent.execution_attempt_id,
+            owner_id=intent.owner_id,
+            fencing_epoch=intent.fencing_epoch,
+            lease_id=intent.lease_id,
+            receiver_id=data.receiver_id,
+            route_id=data.route_id,
+            receiver_generation=data.receiver_generation,
+            definition_digest=data.definition_digest,
+            command_digest=command_digest,
+            request_id=data.request_id,
+            request_digest=fingerprint,
+            protocol_version=data.protocol_limits.version,
+            issued_at=data.now,
+            not_before=data.not_before,
+            not_after=not_after,
+            integrity="",
+        )
+        permit = permit.model_copy(
+            update={
+                "integrity": delivery_digest(permit.model_dump(mode="json", exclude={"integrity"}))
+            }
+        )
+        receipt = DeliveryReceipt(request_id=data.request_id, permit=permit)
+        cursor = connection.execute(
+            "INSERT INTO consent_deliveries (permit_id, approval_id, tenant_id, household_id, "
+            "request_id, idempotency_key, fingerprint, response) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                permit.permit_id,
+                data.approval_id,
+                *scope,
+                data.request_id,
+                command.idempotency_key,
+                fingerprint,
+                receipt.model_dump_json(),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Delivery receipt was not persisted")
+        return receipt
+
+    @property
+    def _for_update(self) -> str:
+        from domoai.persistence.postgres import PostgresDatabase
+
+        return " FOR UPDATE" if isinstance(self.database, PostgresDatabase) else ""
+
+    @staticmethod
+    def _scope(tenant_id: str, household_id: str) -> tuple[str, str]:
+        if any(
+            not isinstance(value, str) or not value.strip() or len(value) > 200
+            for value in (tenant_id, household_id)
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Invalid consent scope")
+        return tenant_id, household_id
+
+    def _bootstrap_scope(self, tenant_id: str, household_id: str) -> None:
+        connection = self.database.connection
+        scope = self._scope(tenant_id, household_id)
+        existing = connection.execute(
+            "SELECT 1 FROM consent_control_heads WHERE tenant_id=? AND household_id=?", scope
+        ).fetchone()
+        if existing is None:
+            history = connection.execute(
+                """SELECT 1 FROM approval_grants
+                   WHERE json_extract(payload, '$.authority.tenant_id')=?
+                     AND json_extract(payload, '$.authority.household_id')=? LIMIT 1""",
+                scope,
+            ).fetchone()
+            if history is not None:
+                raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Consent head is unavailable")
+        connection.execute(
+            """INSERT INTO consent_control_heads
+               (tenant_id, household_id, generation, revision) VALUES (?, ?, ?, 0)
+               ON CONFLICT(tenant_id, household_id) DO NOTHING""",
+            (*scope, str(uuid4())),
+        )
+
+    def bootstrap_consent_sync(self, *, tenant_id: str, household_id: str) -> None:
+        """Provision an explicitly selected new scope without issuing any grant."""
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._bootstrap_scope(tenant_id, household_id)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def get_consent_control_sync(
+        self, *, tenant_id: str, household_id: str
+    ) -> ConsentControlVersion:
+        row = self.database.connection.execute(
+            "SELECT generation, revision FROM consent_control_heads "
+            "WHERE tenant_id=? AND household_id=?",
+            self._scope(tenant_id, household_id),
+        ).fetchone()
+        if row is None:
+            raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Consent head is unavailable")
+        return ConsentControlVersion(generation=row[0], revision=row[1])
+
+    def _lock_scope(self, scope: tuple[str, str]) -> ConsentControlVersion:
+        row = self.database.connection.execute(
+            "SELECT generation, revision FROM consent_control_heads "
+            "WHERE tenant_id=? AND household_id=?" + self._for_update,
+            scope,
+        ).fetchone()
+        if row is None:
+            raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Consent head is unavailable")
+        return ConsentControlVersion(generation=row[0], revision=row[1])
+
+    def _lock_grants(self, approval_ids: list[str]) -> dict[str, tuple[Any, ...]]:
+        """Discover immutable scopes, then reread every grant/reservation under locks."""
+        ids = sorted(set(approval_ids))
+        placeholders = ",".join("?" for _ in ids)
+        connection = self.database.connection
+        discovered = connection.execute(
+            "SELECT approval_id, payload FROM approval_grants "
+            f"WHERE approval_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        if len(discovered) != len(ids):
+            return {}
+        scopes = {
+            self._scope(
+                json.loads(row[1]).get("authority", {}).get("tenant_id"),
+                json.loads(row[1]).get("authority", {}).get("household_id"),
+            )
+            for row in discovered
+        }
+        if len(scopes) != 1:
+            return {}
+        scope = next(iter(scopes))
+        self._lock_scope(scope)
+        rows = connection.execute(
+            f"SELECT approval_id, payload, status, valid_until, consumed_at "
+            f"FROM approval_grants WHERE approval_id IN ({placeholders}) "
+            "ORDER BY approval_id" + self._for_update,
+            ids,
+        ).fetchall()
+        for row in rows:
+            authority = json.loads(row[1]).get("authority", {})
+            if (authority.get("tenant_id"), authority.get("household_id")) != scope:
+                return {}
+        connection.execute(
+            f"SELECT approval_id FROM approval_reservations "
+            f"WHERE approval_id IN ({placeholders}) ORDER BY approval_id" + self._for_update,
+            ids,
+        ).fetchall()
+        return {row[0]: tuple(row) for row in rows}
+
+    def assert_consent_active_sync(self, approval_id: str) -> None:
+        connection = self.database.connection
+        row = connection.execute(
+            """SELECT grants.status, heads.generation, receipts.generation,
+                      revocations.approval_id
+               FROM approval_grants AS grants
+               LEFT JOIN consent_issuance_receipts AS receipts
+                 ON receipts.approval_id=grants.approval_id
+                 AND receipts.tenant_id=json_extract(grants.payload, '$.authority.tenant_id')
+                 AND receipts.household_id=json_extract(grants.payload, '$.authority.household_id')
+               LEFT JOIN consent_control_heads AS heads
+                 ON heads.tenant_id=receipts.tenant_id AND heads.household_id=receipts.household_id
+               LEFT JOIN consent_revocations AS revocations
+                 ON revocations.approval_id=grants.approval_id
+               WHERE grants.approval_id=?""",
+            (approval_id,),
+        ).fetchone()
+        if row is None:
+            raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Unknown approval")
+        if row[0] == "revoked" or row[3] is not None:
+            raise DomainError(ErrorCode.CONSENT_REVOKED, "Consent has been revoked")
+        if row[0] not in {"pending", "consumed"}:
+            raise DomainError(ErrorCode.APPROVAL_REQUIRED, "Approval is not active")
+        if row[1] is None or row[1] != row[2]:
+            raise DomainError(ErrorCode.SOURCE_UNAVAILABLE, "Consent generation is unavailable")
+
+    def _active(self, approval_id: str) -> bool:
+        try:
+            self.assert_consent_active_sync(approval_id)
+        except DomainError:
+            return False
+        return True
+
     async def save(self, grant: ApprovalGrant) -> None:
         self.save_sync(grant)
 
-    def save_sync(self, grant: ApprovalGrant) -> None:
+    def save_sync(
+        self, grant: ApprovalGrant, *, decision: ConsentDecisionRecord | None = None
+    ) -> None:
+        if decision is not None and (
+            decision.principal_id != grant.approved_by
+            or any(
+                not value.strip() or len(value) > 200
+                for value in (decision.principal_id, decision.request_id)
+            )
+        ):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Invalid consent request identity")
         payload = asdict(grant)
         payload["authority"] = grant.authority.model_dump(mode="json")
         serialized = json.dumps(
             payload,
             sort_keys=True,
-            default=lambda value: value.isoformat()
-            if isinstance(value, datetime)
-            else value,
+            default=lambda value: value.isoformat() if isinstance(value, datetime) else value,
         )
-        self.database.connection.execute(
-            """INSERT INTO approval_grants
-               (approval_id, payload, issued_at, valid_until, status)
-               VALUES (?, ?, ?, ?, 'pending')""",
-            (
-                grant.approval_id,
-                serialized,
-                grant.issued_at.isoformat(),
-                grant.expires_at.isoformat() if grant.expires_at is not None else None,
-            ),
-        )
-        self.database.connection.commit()
+        connection = self.database.connection
+        scope = self._scope(grant.authority.tenant_id, grant.authority.household_id)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._bootstrap_scope(*scope)
+            version = self._lock_scope(scope)
+            cursor = connection.execute(
+                """INSERT INTO approval_grants
+                   (approval_id, payload, issued_at, valid_until, status)
+                   VALUES (?, ?, ?, ?, 'pending') ON CONFLICT DO NOTHING""",
+                (
+                    grant.approval_id,
+                    serialized,
+                    grant.issued_at.isoformat(),
+                    grant.expires_at.isoformat() if grant.expires_at is not None else None,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if grant.assertion_nonce is not None and self.nonce_exists_sync(
+                    grant.assertion_nonce
+                ):
+                    raise DomainError(
+                        ErrorCode.APPROVAL_ASSERTION_REPLAYED,
+                        "Approval assertion nonce has already been used",
+                    )
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Approval identity already exists")
+            connection.execute(
+                """INSERT INTO consent_issuance_receipts
+                   (approval_id, assertion_nonce, tenant_id, household_id, generation,
+                    revision, receipt_id, issued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    grant.approval_id,
+                    grant.assertion_nonce,
+                    *scope,
+                    str(version.generation),
+                    version.revision,
+                    str(uuid4()),
+                    grant.issued_at.isoformat(),
+                ),
+            )
+            if decision is not None:
+                if grant.expires_at is None:
+                    raise DomainError(ErrorCode.CONSENT_CONFLICT, "Approval has no expiry")
+                response = json.dumps(
+                    {
+                        "kind": "approval",
+                        "approval_id": grant.approval_id,
+                        "expires_at": grant.expires_at.astimezone(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "review_digest": decision.review_digest,
+                        "reviewed_control_version": decision.reviewed_control_version,
+                    },
+                    sort_keys=True,
+                )
+                stored = connection.execute(
+                    """INSERT INTO consent_receipts
+                       (tenant_id, household_id, principal_id, request_id, fingerprint, response)
+                       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+                    (
+                        *scope,
+                        decision.principal_id,
+                        decision.request_id,
+                        decision.fingerprint,
+                        response,
+                    ),
+                )
+                if stored.rowcount != 1:
+                    raise DomainError(
+                        ErrorCode.CONSENT_CONFLICT, "Consent request identity conflict"
+                    )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def get_decision_receipt_sync(
+        self, *, tenant_id: str, household_id: str, principal_id: str, request_id: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Approval receipt for one principal's request id; revocation rows are never returned."""
+        row = self.database.connection.execute(
+            """SELECT fingerprint, response FROM consent_receipts
+               WHERE tenant_id=? AND household_id=? AND principal_id=? AND request_id=?""",
+            (tenant_id, household_id, principal_id, request_id),
+        ).fetchone()
+        if row is None:
+            return None
+        response = json.loads(row[1])
+        if response.get("kind") != "approval":
+            return None
+        return str(row[0]), response
 
     async def get(self, approval_id: str) -> ApprovalGrant | None:
         return self.get_sync(approval_id)
 
     def get_sync(self, approval_id: str) -> ApprovalGrant | None:
-        cursor = self.database.connection.execute(
-            "SELECT payload FROM approval_grants WHERE approval_id = ?",
-            (approval_id,),
-        )
-        row = cursor.fetchone()
-        cursor.close()
+        row = self.database.connection.execute(
+            "SELECT payload FROM approval_grants WHERE approval_id=?", (approval_id,)
+        ).fetchone()
         if row is None:
             return None
         payload = json.loads(row[0])
@@ -237,224 +868,422 @@ class ApprovalGrantRepository:
                 payload[field_name] = datetime.fromisoformat(payload[field_name])
         return ApprovalGrant(**payload)
 
+    def get_issuance_receipt_sync(self, *, assertion_nonce: str) -> ConsentIssuanceReceipt | None:
+        row = self.database.connection.execute(
+            """SELECT approval_id, assertion_nonce, tenant_id, household_id, generation,
+                      revision, receipt_id, issued_at FROM consent_issuance_receipts
+               WHERE assertion_nonce=?""",
+            (assertion_nonce,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ConsentIssuanceReceipt(
+            approval_id=row[0],
+            assertion_nonce=row[1],
+            tenant_id=row[2],
+            household_id=row[3],
+            control_version=ConsentControlVersion(generation=row[4], revision=row[5]),
+            receipt_id=row[6],
+            issued_at=datetime.fromisoformat(row[7]),
+        )
+
+    @staticmethod
+    def _read_revocation(response: str) -> ConsentRevocationReceipt:
+        value = json.loads(response)
+        for key in ("expected_version", "control_version"):
+            value[key] = ConsentControlVersion.model_validate(value[key])
+        value["revoked_at"] = datetime.fromisoformat(value["revoked_at"])
+        return ConsentRevocationReceipt(**value)
+
+    def get_consent_receipt_sync(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        request_id: str,
+        principal_id: str | None = None,
+    ) -> ConsentRevocationReceipt | None:
+        sql = (
+            "SELECT response FROM consent_receipts "
+            "WHERE tenant_id=? AND household_id=? AND request_id=?"
+        )
+        parameters = [tenant_id, household_id, request_id]
+        if principal_id is not None:
+            sql += " AND principal_id=?"
+            parameters.append(principal_id)
+        rows = self.database.connection.execute(sql, parameters).fetchall()
+        kinds = [json.loads(row[0]).get("kind") for row in rows]
+        if principal_id is not None and "approval" in kinds:
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent request identity conflict")
+        # Approval receipts are not revocations: they never count toward the ambiguity check.
+        rows = [row for row, kind in zip(rows, kinds, strict=True) if kind != "approval"]
+        if len(rows) > 1:
+            raise DomainError(
+                ErrorCode.CONSENT_CONFLICT, "Consent receipt requires principal scope"
+            )
+        return self._read_revocation(rows[0][0]) if rows else None
+
+    def list_active_approvals_sync(
+        self,
+        tenant_id: str,
+        household_id: str,
+        plan_id: str,
+        now: datetime,
+        issued_not_after: datetime | None = None,
+    ) -> list[tuple[str, str]]:
+        """``(approval_id, status)`` of the household's unrevoked grants for one plan.
+
+        Pending grants only count while ``valid_until`` is strictly in the future;
+        consumed ones stay active until revoked. Each candidate is confirmed by
+        ``_active`` so "active" has a single definition. ``issued_not_after`` drops
+        grants issued after a given instant (what a reviewer could have seen).
+        """
+        scope = self._scope(tenant_id, household_id)
+        bound = "" if issued_not_after is None else " AND julianday(grants.issued_at)<=julianday(?)"
+        extra = () if issued_not_after is None else (issued_not_after.isoformat(),)
+        rows = self.database.connection.execute(
+            """SELECT grants.approval_id, grants.status
+               FROM approval_grants AS grants
+               LEFT JOIN consent_revocations AS revocations
+                 ON revocations.approval_id=grants.approval_id
+               WHERE revocations.approval_id IS NULL
+                 AND grants.status IN ('pending', 'consumed')
+                 AND json_extract(grants.payload, '$.authority.tenant_id')=?
+                 AND json_extract(grants.payload, '$.authority.household_id')=?
+                 AND json_extract(grants.payload, '$.plan_id')=?
+                 AND (grants.status='consumed' OR grants.valid_until IS NULL
+                      OR julianday(grants.valid_until)>julianday(?))"""
+            + bound
+            + " ORDER BY grants.approval_id",
+            (*scope, plan_id, now.isoformat(), *extra),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows if self._active(row[0])]
+
+    def list_active_approval_ids_sync(
+        self,
+        tenant_id: str,
+        household_id: str,
+        plan_id: str,
+        now: datetime,
+        issued_not_after: datetime | None = None,
+    ) -> list[str]:
+        return [
+            approval_id
+            for approval_id, _status in self.list_active_approvals_sync(
+                tenant_id, household_id, plan_id, now, issued_not_after
+            )
+        ]
+
+    def get_consent_revocation_sync(self, approval_id: str) -> ConsentRevocationReceipt | None:
+        row = self.database.connection.execute(
+            "SELECT response FROM consent_revocations WHERE approval_id=?", (approval_id,)
+        ).fetchone()
+        return self._read_revocation(row[0]) if row else None
+
+    def revoke_consent_sync(
+        self,
+        *,
+        tenant_id: str,
+        household_id: str,
+        approval_id: str,
+        expected_version: ConsentControlVersion,
+        principal_id: str,
+        request_id: str,
+        now: datetime,
+        request_fingerprint: str | None = None,
+    ) -> ConsentRevocationReceipt:
+        if now.utcoffset() is None:
+            raise ValueError("consent revocation time must be timezone-aware")
+        scope = self._scope(tenant_id, household_id)
+        if any(not value.strip() or len(value) > 200 for value in (principal_id, request_id)):
+            raise DomainError(ErrorCode.CONSENT_CONFLICT, "Invalid consent request identity")
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            grant = self.get_sync(approval_id)
+            if grant is None or (grant.authority.tenant_id, grant.authority.household_id) != scope:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent target is unavailable")
+            rows = self._lock_grants([approval_id])
+            if not rows:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent target is unavailable")
+            current = self.get_consent_control_sync(tenant_id=tenant_id, household_id=household_id)
+            identity: list[Any] = [
+                approval_id,
+                rows[approval_id][1],
+                expected_version.model_dump(mode="json"),
+            ]
+            if request_fingerprint is not None:
+                # Resident revocations also bind the exact decision body; the legacy
+                # (operator) formula is unchanged when no fingerprint is given.
+                identity.append(request_fingerprint)
+            fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+            previous = connection.execute(
+                """SELECT fingerprint, response FROM consent_receipts
+                   WHERE tenant_id=? AND household_id=? AND principal_id=? AND request_id=?""",
+                (*scope, principal_id, request_id),
+            ).fetchone()
+            if previous is not None:
+                if previous[0] != fingerprint or json.loads(previous[1]).get("kind") == "approval":
+                    raise DomainError(
+                        ErrorCode.CONSENT_CONFLICT, "Consent request identity conflict"
+                    )
+                connection.commit()
+                return self._read_revocation(previous[1])
+            if (
+                current != expected_version
+                or self.get_consent_revocation_sync(approval_id) is not None
+            ):
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent control changed")
+            next_version = ConsentControlVersion(
+                generation=current.generation, revision=current.revision + 1
+            )
+            deliveries = connection.execute(
+                "SELECT * FROM consent_deliveries WHERE approval_id=? ORDER BY permit_id",
+                (approval_id,),
+            ).fetchall()
+            permits = [self._read_delivery(row).permit for row in deliveries]
+            receipt = ConsentRevocationReceipt(
+                approval_id=approval_id,
+                tenant_id=tenant_id,
+                household_id=household_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                revocation_id=str(uuid4()),
+                expected_version=current,
+                control_version=next_version,
+                revoked_at=now,
+                permit_ids=[permit.permit_id for permit in permits],
+                routes=sorted({permit.route_id for permit in permits}),
+            )
+            response = asdict(receipt)
+            response["expected_version"] = current.model_dump(mode="json")
+            response["control_version"] = next_version.model_dump(mode="json")
+            serialized = json.dumps(response, sort_keys=True, default=str)
+            cursor = connection.execute(
+                """UPDATE consent_control_heads SET revision=?
+                   WHERE tenant_id=? AND household_id=? AND generation=? AND revision=?""",
+                (next_version.revision, *scope, str(current.generation), current.revision),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent control changed")
+            connection.execute(
+                """INSERT INTO consent_revocations
+                   (approval_id, tenant_id, household_id, revocation_id, generation, revision,
+                    principal_id, request_id, revoked_at, response)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    approval_id,
+                    *scope,
+                    receipt.revocation_id,
+                    str(current.generation),
+                    next_version.revision,
+                    principal_id,
+                    request_id,
+                    now.isoformat(),
+                    serialized,
+                ),
+            )
+            stored = connection.execute(
+                """INSERT INTO consent_receipts
+                   (tenant_id, household_id, principal_id, request_id, fingerprint, response)
+                   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+                (*scope, principal_id, request_id, fingerprint, serialized),
+            )
+            if stored.rowcount != 1:
+                raise DomainError(ErrorCode.CONSENT_CONFLICT, "Consent request identity conflict")
+            connection.commit()
+            return receipt
+        except BaseException:
+            connection.rollback()
+            raise
+
     async def consume_if_pending(self, approval_id: str, *, now: datetime) -> bool:
         return self.consume_if_pending_sync(approval_id, now=now)
 
     def consume_if_pending_sync(self, approval_id: str, *, now: datetime) -> bool:
-        if now.tzinfo is None or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise ValueError("approval consumption time must be timezone-aware")
-        cursor = self.database.connection.execute(
-            """UPDATE approval_grants
-               SET status = 'consumed', consumed_at = ?
-               WHERE approval_id = ?
-                 AND status = 'pending'
-                 AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))""",
-            (now.isoformat(), approval_id, now.isoformat()),
-        )
-        self.database.connection.commit()
-        return cursor.rowcount > 0
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = self._lock_grants([approval_id])
+            if not rows or not self._active(approval_id):
+                connection.rollback()
+                return False
+            reservation = self.reservation_status_sync(approval_id)
+            if reservation is not None and reservation[1] != "released":
+                connection.rollback()
+                return False
+            cursor = connection.execute(
+                """UPDATE approval_grants SET status='consumed', consumed_at=?
+                   WHERE approval_id=? AND status='pending'
+                   AND (valid_until IS NULL OR julianday(valid_until)>julianday(?))""",
+                (now.isoformat(), approval_id, now.isoformat()),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+        except BaseException:
+            connection.rollback()
+            raise
 
     def is_pending_sync(self, approval_id: str) -> bool:
         row = self.database.connection.execute(
-            "SELECT status FROM approval_grants WHERE approval_id = ?",
-            (approval_id,),
+            "SELECT status FROM approval_grants WHERE approval_id=?", (approval_id,)
         ).fetchone()
-        return row is not None and row[0] == "pending"
+        return row is not None and row[0] == "pending" and self._active(approval_id)
+
+    def is_consumed_sync(self, approval_id: str) -> bool:
+        row = self.database.connection.execute(
+            "SELECT status FROM approval_grants WHERE approval_id=?", (approval_id,)
+        ).fetchone()
+        return row is not None and row[0] == "consumed"
 
     def reservation_status_sync(self, approval_id: str) -> tuple[str, str] | None:
         row = self.database.connection.execute(
-            """SELECT reservation_id, status
-               FROM approval_reservations WHERE approval_id = ?""",
+            "SELECT reservation_id, status FROM approval_reservations WHERE approval_id=?",
             (approval_id,),
         ).fetchone()
         return None if row is None else (str(row[0]), str(row[1]))
 
     def list_reservation_approval_ids_sync(self, reservation_id: str) -> list[str]:
-        cursor = self.database.connection.execute(
-            """SELECT approval_id FROM approval_reservations
-               WHERE reservation_id = ? ORDER BY approval_id""",
+        rows = self.database.connection.execute(
+            "SELECT approval_id FROM approval_reservations "
+            "WHERE reservation_id=? ORDER BY approval_id",
             (reservation_id,),
-        )
-        rows = cursor.fetchall()
-        cursor.close()
+        ).fetchall()
         return [str(row[0]) for row in rows]
 
     def reserve_if_pending_sync(
         self, approval_id: str, *, reservation_id: str, now: datetime
     ) -> bool:
-        if now.tzinfo is None or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise ValueError("approval reservation time must be timezone-aware")
         connection = self.database.connection
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                """SELECT reservation_id, status FROM approval_reservations
-                   WHERE approval_id = ?""",
-                (approval_id,),
-            ).fetchone()
-            if existing is not None:
-                same_reservation = existing[0] == reservation_id
-                if existing[1] == "reserved":
-                    connection.rollback()
-                    return bool(same_reservation)
-                if existing[1] != "released":
-                    connection.rollback()
-                    return False
+            rows = self._lock_grants([approval_id])
+            if not rows or not self._active(approval_id):
+                connection.rollback()
+                return False
+            row = rows[approval_id]
+            if row[2] != "pending" or (
+                row[3] is not None and datetime.fromisoformat(row[3]) <= now
+            ):
+                connection.rollback()
+                return False
+            existing = self.reservation_status_sync(approval_id)
+            if existing is not None and existing[1] != "released":
+                connection.rollback()
+                return existing == (reservation_id, "reserved")
+            if existing is None:
+                cursor = connection.execute(
+                    """INSERT INTO approval_reservations
+                       (approval_id, reservation_id, status, created_at, updated_at)
+                       VALUES (?, ?, 'reserved', ?, ?)""",
+                    (approval_id, reservation_id, now.isoformat(), now.isoformat()),
+                )
+            else:
                 cursor = connection.execute(
                     """UPDATE approval_reservations
-                       SET reservation_id = ?, status = 'reserved', updated_at = ?
-                       WHERE approval_id = ? AND status = 'released'
-                         AND EXISTS (
-                           SELECT 1 FROM approval_grants
-                           WHERE approval_id = ? AND status = 'pending'
-                             AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))
-                         )""",
-                    (reservation_id, now.isoformat(), approval_id, approval_id, now.isoformat()),
+                       SET reservation_id=?, status='reserved', updated_at=?
+                       WHERE approval_id=? AND status='released'""",
+                    (reservation_id, now.isoformat(), approval_id),
                 )
-                connection.commit()
-                return cursor.rowcount == 1
-            cursor = connection.execute(
-                """INSERT INTO approval_reservations
-                   (approval_id, reservation_id, status, created_at, updated_at)
-                   SELECT approval_id, ?, 'reserved', ?, ?
-                   FROM approval_grants
-                   WHERE approval_id = ?
-                     AND status = 'pending'
-                     AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))""",
-                (
-                    reservation_id,
-                    now.isoformat(),
-                    now.isoformat(),
-                    approval_id,
-                    now.isoformat(),
-                ),
-            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
             connection.commit()
-            return cursor.rowcount == 1
-        except Exception:
+            return True
+        except BaseException:
             connection.rollback()
             raise
 
     def commit_reservation_sync(
         self, approval_id: str, *, reservation_id: str, now: datetime
     ) -> bool:
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("approval commit time must be timezone-aware")
-        connection = self.database.connection
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            reservation = connection.execute(
-                """SELECT status FROM approval_reservations
-                   WHERE approval_id = ? AND reservation_id = ?""",
-                (approval_id, reservation_id),
-            ).fetchone()
-            if reservation is None:
-                connection.rollback()
-                return False
-            if reservation[0] == "committed":
-                connection.rollback()
-                return True
-            if reservation[0] != "reserved":
-                connection.rollback()
-                return False
-            grant_cursor = connection.execute(
-                """UPDATE approval_grants
-                   SET status = 'consumed', consumed_at = ?
-                   WHERE approval_id = ? AND status = 'pending'
-                     AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))""",
-                (now.isoformat(), approval_id, now.isoformat()),
-            )
-            if grant_cursor.rowcount != 1:
-                connection.rollback()
-                return False
-            connection.execute(
-                """UPDATE approval_reservations
-                   SET status = 'committed', updated_at = ?
-                   WHERE approval_id = ? AND reservation_id = ? AND status = 'reserved'""",
-                (now.isoformat(), approval_id, reservation_id),
-            )
-            connection.commit()
-            return True
-        except Exception:
-            connection.rollback()
-            raise
+        return self.commit_reservation_batch_sync(
+            [approval_id], reservation_id=reservation_id, now=now
+        )
 
     def commit_reservation_batch_sync(
         self, approval_ids: list[str], *, reservation_id: str, now: datetime
     ) -> bool:
-        if now.tzinfo is None or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise ValueError("approval commit time must be timezone-aware")
-        if not approval_ids:
+        ids = sorted(set(approval_ids))
+        if not ids:
             return True
         connection = self.database.connection
-        placeholders = ",".join("?" for _ in approval_ids)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                f"""SELECT approval_id, status FROM approval_reservations
-                    WHERE reservation_id = ? AND approval_id IN ({placeholders})""",
-                (reservation_id, *approval_ids),
-            ).fetchall()
-            by_id = {str(row[0]): str(row[1]) for row in rows}
-            if set(by_id) != set(approval_ids) or any(
-                status not in {"reserved", "committed"} for status in by_id.values()
-            ):
+            rows = self._lock_grants(ids)
+            if not rows or any(not self._active(approval_id) for approval_id in ids):
                 connection.rollback()
                 return False
-            pending_ids = [
-                approval_id for approval_id in approval_ids if by_id[approval_id] == "reserved"
-            ]
-            if pending_ids:
-                pending_placeholders = ",".join("?" for _ in pending_ids)
-                cursor = connection.execute(
-                    f"""UPDATE approval_grants
-                        SET status = 'consumed', consumed_at = ?
-                        WHERE status = 'pending'
-                          AND approval_id IN ({pending_placeholders})
-                          AND (valid_until IS NULL OR julianday(valid_until) > julianday(?))""",
-                    (now.isoformat(), *pending_ids, now.isoformat()),
-                )
-                if cursor.rowcount != len(pending_ids):
+            pending = []
+            for approval_id in ids:
+                reservation = self.reservation_status_sync(approval_id)
+                if reservation is None or reservation[0] != reservation_id:
                     connection.rollback()
                     return False
-                connection.execute(
-                    f"""UPDATE approval_reservations
-                        SET status = 'committed', updated_at = ?
-                        WHERE reservation_id = ? AND status = 'reserved'
-                          AND approval_id IN ({pending_placeholders})""",
-                    (now.isoformat(), reservation_id, *pending_ids),
+                row = rows[approval_id]
+                if reservation[1] == "committed" and row[2] == "consumed":
+                    continue
+                if (
+                    reservation[1] != "reserved"
+                    or row[2] != "pending"
+                    or (row[3] is not None and datetime.fromisoformat(row[3]) <= now)
+                ):
+                    connection.rollback()
+                    return False
+                pending.append(approval_id)
+            for approval_id in pending:
+                grant_cursor = connection.execute(
+                    """UPDATE approval_grants SET status='consumed', consumed_at=?
+                       WHERE approval_id=? AND status='pending'
+                       AND (valid_until IS NULL OR julianday(valid_until)>julianday(?))""",
+                    (now.isoformat(), approval_id, now.isoformat()),
                 )
+                reservation_cursor = connection.execute(
+                    """UPDATE approval_reservations SET status='committed', updated_at=?
+                       WHERE approval_id=? AND reservation_id=? AND status='reserved'""",
+                    (now.isoformat(), approval_id, reservation_id),
+                )
+                if grant_cursor.rowcount != 1 or reservation_cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
             connection.commit()
             return True
-        except Exception:
+        except BaseException:
             connection.rollback()
             raise
 
     def release_reservation_sync(
         self, approval_id: str, *, reservation_id: str, now: datetime
     ) -> bool:
-        if now.tzinfo is None or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise ValueError("approval release time must be timezone-aware")
-        cursor = self.database.connection.execute(
-            """UPDATE approval_reservations
-               SET status = 'released', updated_at = ?
-               WHERE approval_id = ? AND reservation_id = ? AND status = 'reserved'""",
-            (now.isoformat(), approval_id, reservation_id),
-        )
-        self.database.connection.commit()
-        return cursor.rowcount == 1
-
-    def is_consumed_sync(self, approval_id: str) -> bool:
-        row = self.database.connection.execute(
-            "SELECT status FROM approval_grants WHERE approval_id = ?",
-            (approval_id,),
-        ).fetchone()
-        return row is not None and row[0] == "consumed"
+        connection = self.database.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if not self._lock_grants([approval_id]):
+                connection.rollback()
+                return False
+            cursor = connection.execute(
+                """UPDATE approval_reservations SET status='released', updated_at=?
+                   WHERE approval_id=? AND reservation_id=? AND status='reserved'""",
+                (now.isoformat(), approval_id, reservation_id),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+        except BaseException:
+            connection.rollback()
+            raise
 
     def nonce_exists_sync(self, nonce: str) -> bool:
         row = self.database.connection.execute(
-            """SELECT 1 FROM approval_grants
-               WHERE json_extract(payload, '$.assertion_nonce') = ? LIMIT 1""",
+            "SELECT 1 FROM approval_grants "
+            "WHERE json_extract(payload, '$.assertion_nonce')=? LIMIT 1",
             (nonce,),
         ).fetchone()
         return row is not None
@@ -1245,8 +2074,7 @@ class BundleCommitRepository:
         for row in rows:
             bundle = BundleCommit.model_validate(json.loads(row[0]))
             if any(
-                member.plan_id == plan_id
-                and member.status is BundleMemberCommitStatus.SCHEDULED
+                member.plan_id == plan_id and member.status is BundleMemberCommitStatus.SCHEDULED
                 for member in bundle.members
             ):
                 return True
@@ -1405,12 +2233,8 @@ class StateHistoryRepository:
         snapshots: Sequence[StateSnapshot],
     ) -> None:
         for snapshot in snapshots:
-            payload = json.dumps(
-                snapshot.model_dump(mode="json"), sort_keys=True, allow_nan=False
-            )
-            history_id = hashlib.sha256(
-                f"{self.household_id}\0{payload}".encode()
-            ).hexdigest()
+            payload = json.dumps(snapshot.model_dump(mode="json"), sort_keys=True, allow_nan=False)
+            history_id = hashlib.sha256(f"{self.household_id}\0{payload}".encode()).hexdigest()
             connection.execute(
                 """INSERT OR IGNORE INTO state_history
                    (history_id, household_id, device_id, capability, payload,
@@ -1472,7 +2296,7 @@ class StateHistoryRepository:
         params.append(min(limit, self._MAX_LIST_LIMIT))
         cursor = self.database.connection.execute(
             f"""SELECT history_id, payload FROM state_history
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY julianday(observed_at) DESC,
                          julianday(received_at) DESC, history_id DESC
                 LIMIT ?""",
@@ -1615,13 +2439,7 @@ class RuntimeStateMetadataRepository:
         if isinstance(raw_resync, dict):
             for raw_key, reason in raw_resync.items():
                 source_id, separator, stream_id = str(raw_key).partition("::")
-                if (
-                    separator
-                    and source_id
-                    and stream_id
-                    and isinstance(reason, str)
-                    and reason
-                ):
+                if separator and source_id and stream_id and isinstance(reason, str) and reason:
                     resync_required[(source_id, stream_id)] = reason
         return StateStoreMetadata(
             inventory_revision=max(0, inventory_revision),
@@ -2305,9 +3123,10 @@ class AutomationRuleRepository:
         if record.last_event_id == event_id:
             return False
         cooldown = record.rule.cooldown_seconds if cooldown_seconds is None else cooldown_seconds
-        if record.last_fired_at is not None and (
-            now - record.last_fired_at
-        ).total_seconds() < cooldown:
+        if (
+            record.last_fired_at is not None
+            and (now - record.last_fired_at).total_seconds() < cooldown
+        ):
             return False
         cursor = self.database.connection.execute(
             """UPDATE automation_rules

@@ -12,19 +12,43 @@ from domoai.persistence.postgres import PostgresDatabase
 from domoai.persistence.sqlite import SQLiteDatabase
 
 _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-    ("household_preference_heads",
-     ("tenant_id", "household_id", "generation", "revision"),
-     ("tenant_id", "household_id")),
-    ("household_preferences",
-     ("tenant_id", "household_id", "preference_id", "key", "target_kind", "target_id", "payload"),
-     ("tenant_id", "household_id", "preference_id")),
-    ("household_preference_history",
-     ("tenant_id", "household_id", "revision", "preference_id", "payload"),
-     ("tenant_id", "household_id", "revision")),
-    ("household_preference_requests",
-     ("tenant_id", "household_id", "generation", "principal_id", "idempotency_key",
-      "fingerprint", "preference_id", "response"),
-     ("tenant_id", "household_id", "generation", "principal_id", "idempotency_key")),
+    (
+        "household_preference_heads",
+        ("tenant_id", "household_id", "generation", "revision"),
+        ("tenant_id", "household_id"),
+    ),
+    (
+        "household_preferences",
+        (
+            "tenant_id",
+            "household_id",
+            "preference_id",
+            "key",
+            "target_kind",
+            "target_id",
+            "payload",
+        ),
+        ("tenant_id", "household_id", "preference_id"),
+    ),
+    (
+        "household_preference_history",
+        ("tenant_id", "household_id", "revision", "preference_id", "payload"),
+        ("tenant_id", "household_id", "revision"),
+    ),
+    (
+        "household_preference_requests",
+        (
+            "tenant_id",
+            "household_id",
+            "generation",
+            "principal_id",
+            "idempotency_key",
+            "fingerprint",
+            "preference_id",
+            "response",
+        ),
+        ("tenant_id", "household_id", "generation", "principal_id", "idempotency_key"),
+    ),
     (
         "connections",
         (
@@ -131,6 +155,46 @@ _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
         ("approval_id",),
     ),
     (
+        "consent_control_heads",
+        ("tenant_id", "household_id", "generation", "revision"),
+        ("tenant_id", "household_id"),
+    ),
+    (
+        "consent_issuance_receipts",
+        (
+            "approval_id",
+            "assertion_nonce",
+            "tenant_id",
+            "household_id",
+            "generation",
+            "revision",
+            "receipt_id",
+            "issued_at",
+        ),
+        ("approval_id",),
+    ),
+    (
+        "consent_receipts",
+        ("tenant_id", "household_id", "principal_id", "request_id", "fingerprint", "response"),
+        ("tenant_id", "household_id", "principal_id", "request_id"),
+    ),
+    (
+        "consent_revocations",
+        (
+            "approval_id",
+            "tenant_id",
+            "household_id",
+            "revocation_id",
+            "generation",
+            "revision",
+            "principal_id",
+            "request_id",
+            "revoked_at",
+            "response",
+        ),
+        ("approval_id",),
+    ),
+    (
         "audit_outbox",
         (
             "sequence",
@@ -198,6 +262,20 @@ _TABLES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "updated_at",
         ),
         ("household_id", "idempotency_key"),
+    ),
+    (
+        "consent_deliveries",
+        (
+            "permit_id",
+            "approval_id",
+            "tenant_id",
+            "household_id",
+            "request_id",
+            "idempotency_key",
+            "fingerprint",
+            "response",
+        ),
+        ("permit_id",),
     ),
     (
         "operational_metric_history",

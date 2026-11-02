@@ -7,11 +7,13 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
+import anyio
 from mcp.server.auth.provider import AccessToken
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -43,7 +45,7 @@ from domoai.domain.connections import (
     ConnectionProfile,
     ProviderCatalogEntry,
 )
-from domoai.domain.errors import DomainError
+from domoai.domain.errors import DomainError, ErrorCode
 from domoai.domain.models import StrictModel
 from domoai.domain.p1_completion import CommissioningMethod
 from domoai.domain.p2_connections import EtsImportPreview, OAuthCredentialRecord
@@ -53,7 +55,20 @@ from domoai.management.auth import (
     ManagementPrincipal,
     authority_operation_for_scope,
     is_public_management_shell,
+    is_resident_consent_request,
     required_management_scope,
+)
+from domoai.management.consent import (
+    ResidentAdmissionError,
+    ResidentConsentAdapter,
+    ResidentDecision,
+    ResidentReviewError,
+    ResidentRevocation,
+    ResidentSession,
+    ResidentSessionError,
+    format_utc,
+    parse_decision,
+    parse_review_reference,
 )
 from domoai.management.rate_limit import RateLimiter
 from domoai.management.ui import first_install_page
@@ -92,6 +107,7 @@ def create_management_app(
     auth_verifier: Callable[[str], Awaitable[AccessToken | None]] | None = None,
     authority_policy: AuthorityPolicy | None = None,
     household_onboarding: HouseholdOnboardingService | None = None,
+    resident_consent: ResidentConsentAdapter | None = None,
 ) -> Starlette:
     """Create a local-first management app around one ConnectionManager."""
 
@@ -101,6 +117,8 @@ def create_management_app(
         raise ValueError("max_request_body_size must be a positive integer")
     if auth_verifier is not None and authority_policy is None:
         raise ValueError("verified management authentication requires a server authority policy")
+    if resident_consent is not None and type(resident_consent) is not ResidentConsentAdapter:
+        raise ValueError("resident_consent must be a ResidentConsentAdapter")
 
     ets_importer = ets_importer or EtsImporter()
     auth = ManagementAuth(
@@ -123,6 +141,12 @@ def create_management_app(
             response: Response = (
                 await call_next(request)
                 if limiter.allow("public:" + client_host)
+                else JSONResponse({"error": "rate_limited"}, status_code=429)
+            )
+        elif is_resident_consent_request(request.method, request.url.path):
+            response = (
+                await call_next(request)
+                if limiter.allow("resident-unavailable:" + client_host)
                 else JSONResponse({"error": "rate_limited"}, status_code=429)
             )
         else:
@@ -787,8 +811,283 @@ def create_management_app(
         except Exception as error:  # noqa: BLE001
             return _error_response(error)
 
+    async def resident_unavailable(_request: Request) -> Response:
+        return JSONResponse(
+            {
+                "error": ErrorCode.HUMAN_CONFIRMATION_UNAVAILABLE.value,
+                "message": "No está disponible la confirmación del residente",
+            },
+            status_code=503,
+        )
+
+    async def resident_session(request: Request) -> Response:
+        if resident_consent is None:
+            return await resident_unavailable(request)
+        try:
+            resident_consent.ensure_available()
+            origins, hosts = request.headers.getlist("origin"), request.headers.getlist("host")
+            if len(origins) != 1 or len(hosts) != 1:
+                raise ResidentAdmissionError(ErrorCode.INSUFFICIENT_SCOPE)
+            origin, request_host = origins[0], hosts[0]
+            resident_consent.check_origin(origin=origin, host=request_host)
+            authorizations = request.headers.getlist("authorization")
+            if len(authorizations) > 1:
+                raise ResidentAdmissionError(ErrorCode.OPERATOR_AUTHENTICATION_FAILED)
+            authorization = authorizations[0] if authorizations else None
+            body_status = 0
+            lengths = request.headers.getlist("content-length")
+            if (
+                request.url.query
+                or request.headers.getlist("transfer-encoding")
+                or len(lengths) > 1
+            ):
+                body_status = 400
+            elif lengths and lengths[0] != "0":
+                value = lengths[0]
+                if value.isascii() and value.isdecimal():
+                    value = value.lstrip("0") or "0"
+                    # Bound conversion too: absurdly long lengths are over budget.
+                    body_status = (
+                        413 if len(value) > 20 or int(value) > max_request_body_size else 400
+                    )
+                else:
+                    body_status = 400
+            if not body_status:
+                try:
+                    with anyio.fail_after(1.0):
+                        async for chunk in request.stream():
+                            if chunk:
+                                body_status = 413 if len(chunk) > max_request_body_size else 400
+                                break
+                except TimeoutError:
+                    body_status = 408
+            # Close/reload during the body wait wins over a body error, too.
+            resident_consent.ensure_available()
+            if body_status:
+                code, message = {
+                    400: (
+                        "validation_error",
+                        "La solicitud de sesión del residente debe tener el cuerpo vacío",
+                    ),
+                    413: ("payload_too_large", "request body exceeds configured limit"),
+                    408: (
+                        "validation_error",
+                        "La solicitud de sesión del residente no se completó a tiempo",
+                    ),
+                }[body_status]
+                return JSONResponse({"error": code, "message": message}, status_code=body_status)
+            session = await resident_consent.create_session(
+                authorization,
+                origin=origin,
+                host=request_host,
+            )
+            return JSONResponse(
+                {
+                    "session_id": session.session_id,
+                    "expires_at": session.expires_at.isoformat().replace("+00:00", "Z"),
+                },
+                status_code=201,
+            )
+        except (ResidentAdmissionError, ResidentSessionError) as error:
+            return resident_error_response(error)
+
+    def resident_error_response(error: ResidentAdmissionError | ResidentSessionError) -> Response:
+        if error.status_code == 429:
+            return JSONResponse({"error": "rate_limited"}, status_code=429)
+        return JSONResponse(
+            {"error": error.code.value, "message": error.message},
+            status_code=error.status_code,
+            headers={"WWW-Authenticate": "Bearer"} if error.status_code == 401 else None,
+        )
+
+    async def read_review_body(request: Request) -> bytes:
+        """Query, content type, framing, size and time limits, in that order."""
+        if request.url.query:
+            raise ResidentReviewError(
+                400, "validation_error", "La solicitud de revisión no es válida"
+            )
+        if request.headers.getlist("content-type") != ["application/json"]:
+            raise ResidentReviewError(
+                415, "validation_error", "El tipo de contenido debe ser application/json"
+            )
+        lengths = request.headers.getlist("content-length")
+        if request.headers.getlist("transfer-encoding") or len(lengths) > 1:
+            raise ResidentReviewError(
+                400, "validation_error", "La solicitud de revisión no es válida"
+            )
+        if lengths:
+            value = lengths[0]
+            if not (value.isascii() and value.isdecimal()):
+                raise ResidentReviewError(
+                    400, "validation_error", "La solicitud de revisión no es válida"
+                )
+            value = value.lstrip("0") or "0"
+            if len(value) > 20 or int(value) > max_request_body_size:
+                raise ResidentReviewError(
+                    413, "payload_too_large", "request body exceeds configured limit"
+                )
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            with anyio.fail_after(1.0):
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > max_request_body_size:
+                        raise ResidentReviewError(
+                            413, "payload_too_large", "request body exceeds configured limit"
+                        )
+                    chunks.append(chunk)
+        except TimeoutError:
+            raise ResidentReviewError(
+                408, "validation_error", "La solicitud de revisión no se completó a tiempo"
+            ) from None
+        return b"".join(chunks)
+
+    async def authenticate_resident_request(
+        adapter: ResidentConsentAdapter, request: Request
+    ) -> ResidentSession:
+        """Availability, exact origin/host, bearer and live session, in that order."""
+        adapter.ensure_available()
+        origins, hosts = request.headers.getlist("origin"), request.headers.getlist("host")
+        if len(origins) != 1 or len(hosts) != 1:
+            raise ResidentAdmissionError(ErrorCode.INSUFFICIENT_SCOPE)
+        origin, request_host = origins[0], hosts[0]
+        adapter.check_origin(origin=origin, host=request_host)
+        authorizations = request.headers.getlist("authorization")
+        if len(authorizations) > 1:
+            raise ResidentAdmissionError(ErrorCode.OPERATOR_AUTHENTICATION_FAILED)
+        session_ids = request.headers.getlist("x-resident-session")
+        return await adapter.authenticate_session(
+            session_ids[0] if len(session_ids) == 1 else None,
+            authorizations[0] if authorizations else None,
+            origin=origin,
+            host=request_host,
+        )
+
+    async def resident_decisions(request: Request) -> Response:
+        if resident_consent is None:
+            return await resident_unavailable(request)
+        try:
+            session = await authenticate_resident_request(resident_consent, request)
+            raw = await read_review_body(request)
+            # Close/reload during the body wait wins over any body outcome.
+            resident_consent.ensure_available()
+            result = await resident_consent.decide(session, parse_decision(raw))
+            return decision_response(result)
+        except (ResidentAdmissionError, ResidentSessionError) as error:
+            return resident_error_response(error)
+        except ResidentReviewError as error:
+            return JSONResponse(error.body, status_code=error.status_code)
+        except Exception as error:  # noqa: BLE001 - never expose store or source internals
+            logger.error("Resident decision failed: %s", type(error).__name__)
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    def decision_body(result: ResidentDecision | ResidentRevocation) -> dict[str, Any]:
+        if isinstance(result, ResidentRevocation):
+            return {
+                "status": result.status,
+                "approval_id": result.approval_id,
+                "revocation_id": result.revocation_id,
+                "revoked_at": format_utc(result.revoked_at),
+                "control_version": result.control_version,
+            }
+        body: dict[str, Any] = {"status": result.status, "review_digest": result.review_digest}
+        if result.approval_id is not None and result.expires_at is not None:
+            body.update(
+                approval_id=result.approval_id,
+                expires_at=format_utc(result.expires_at),
+                reviewed_control_version=result.reviewed_control_version,
+            )
+        return body
+
+    def decision_response(result: ResidentDecision | ResidentRevocation) -> Response:
+        # One canonical rendering for the first answer, every retry and the GET.
+        content = json.dumps(decision_body(result), sort_keys=True, separators=(",", ":"))
+        return Response(content.encode(), media_type="application/json")
+
+    async def resident_decision_receipt(request: Request) -> Response:
+        if resident_consent is None:
+            return await resident_unavailable(request)
+        try:
+            session = await authenticate_resident_request(resident_consent, request)
+            # Authorization is admission: it precedes the framing checks.
+            resident_consent.authorize_decision(session)
+            lengths = request.headers.getlist("content-length")
+            if (
+                request.url.query
+                or request.headers.getlist("transfer-encoding")
+                or len(lengths) > 1
+                or (lengths and lengths[0] != "0")
+            ):
+                raise ResidentReviewError(
+                    400, "validation_error", "La solicitud de revisión no es válida"
+                )
+            request_id = request.path_params["request_id"]
+            result = (
+                resident_consent.receipt_for(session, request_id)
+                if 1 <= len(request_id) <= 200
+                else None
+            )
+            if result is None:
+                return JSONResponse(
+                    {"error": "not_found", "message": "No se encontró el objetivo"},
+                    status_code=404,
+                )
+            return decision_response(result)
+        except (ResidentAdmissionError, ResidentSessionError) as error:
+            return resident_error_response(error)
+        except ResidentReviewError as error:
+            return JSONResponse(error.body, status_code=error.status_code)
+        except Exception as error:  # noqa: BLE001 - never expose store internals
+            logger.error("Resident receipt lookup failed: %s", type(error).__name__)
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    async def resident_reviews(request: Request) -> Response:
+        if resident_consent is None:
+            return await resident_unavailable(request)
+        try:
+            session = await authenticate_resident_request(resident_consent, request)
+            raw = await read_review_body(request)
+            # Close/reload during the body wait wins over any body outcome.
+            resident_consent.ensure_available()
+            review = await resident_consent.review(session, parse_review_reference(raw))
+            return JSONResponse(
+                {
+                    "view": review.view,
+                    "review_digest": review.review_digest,
+                    "challenge_id": review.challenge.challenge_id,
+                    "challenge_expires_at": review.challenge.expires_at.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                },
+                status_code=200,
+            )
+        except (ResidentAdmissionError, ResidentSessionError) as error:
+            return resident_error_response(error)
+        except ResidentReviewError as error:
+            return JSONResponse(error.body, status_code=error.status_code)
+        except Exception as error:  # noqa: BLE001 - never expose projection or source internals
+            logger.error("Resident review failed: %s", type(error).__name__)
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    @asynccontextmanager
+    async def resident_lifespan(_app: Starlette) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            if resident_consent is not None:
+                resident_consent.close()
+
     routes = [
         Route("/", ui, methods=["GET"]),
+        Route("/api/v1/resident/session", resident_session, methods=["POST"]),
+        Route("/api/v1/resident/reviews", resident_reviews, methods=["POST"]),
+        Route("/api/v1/resident/decisions", resident_decisions, methods=["POST"]),
+        Route(
+            "/api/v1/resident/decisions/{request_id}",
+            resident_decision_receipt,
+            methods=["GET"],
+        ),
         Route("/api/v1/onboarding/status", onboarding_projection, methods=["GET"]),
         Route("/api/v1/onboarding/inventory", onboarding_projection, methods=["GET"]),
         Route("/api/v1/onboarding/state/{device_id}", onboarding_projection, methods=["GET"]),
@@ -865,7 +1164,13 @@ def create_management_app(
             methods=["DELETE"],
         ),
     ]
-    app = Starlette(routes=routes, exception_handlers={Exception: unhandled_error})
+    if resident_consent is not None:
+        resident_consent.bind_host()
+    app = Starlette(
+        routes=routes,
+        exception_handlers={Exception: unhandled_error},
+        lifespan=resident_lifespan if resident_consent is not None else None,
+    )
     app.add_middleware(BaseHTTPMiddleware, dispatch=protected)
     return app
 

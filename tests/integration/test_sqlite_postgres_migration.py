@@ -243,8 +243,9 @@ async def test_floor_transfer_refuses_downgrade_and_rolls_back_checkpoint_on_fai
             source.connection.commit()
             with pytest.raises(MigrationConflict, match="downgraded"):
                 await migrate_sqlite_to_postgres(source, destination)
+            # Restore the P04 floor so the next failure exercises copy rollback.
             source.connection.execute(
-                "UPDATE runtime_contract_floor SET minimum_reader=3,"
+                "UPDATE runtime_contract_floor SET minimum_reader=4,"
                 "checkpoint_id='source-checkpoint'"
             )
             source.connection.execute("INSERT INTO devices VALUES('fail','{}','now')")
@@ -321,4 +322,228 @@ async def test_postgres_floor_elevation_is_atomic_and_serialized() -> None:
             return asyncio.run(run())
 
         results = await asyncio.gather(*[asyncio.to_thread(initialize_writer) for _ in range(2)])
-        assert results == [(1, 3, *original[2:])] * 2
+        # Both writers publish the P04 floor while preserving the original checkpoint.
+        assert results == [(1, 4, *original[2:])] * 2
+
+
+# Independent acceptance inventory: never derive expected tables from _TABLES.
+_T009_EXPECTED_COUNTS = {
+    "runtime_contract_floor": 1,
+    "approval_grants": 6,
+    "approval_reservations": 2,
+    "consent_control_heads": 2,
+    "consent_issuance_receipts": 6,
+    "consent_receipts": 2,
+    "consent_revocations": 2,
+    "physical_intents": 3,
+    "consent_deliveries": 1,
+    "household_preference_heads": 2,
+    "household_preferences": 3,
+    "household_preference_history": 3,
+    "household_preference_requests": 3,
+}
+
+
+def _t009_rows(database):
+    return {
+        table: [
+            tuple(row)
+            for row in database.connection.execute(
+                f"SELECT * FROM {table} ORDER BY 1, 2"
+            ).fetchall()
+        ]
+        for table in _T009_EXPECTED_COUNTS
+    }
+
+
+@pytest.fixture
+async def t009_migration(tmp_path):
+    """Quiescent source and disposable PostgreSQL; no skip/fallback or runtime delivery."""
+    from domoai.domain.coordination import PhysicalIntentStatus
+    from domoai.persistence.coordination import PhysicalIntentRepository
+    from tests.fixtures.household_onboarding import connection_databases
+    from tests.integration.test_durable_approval_store import _t007_issue, _t007_prepare_request
+    from tests.integration.test_household_consent import consent_fixture
+
+    async with consent_fixture(tmp_path / "source", "sqlite") as fixture:
+        store = fixture.stores[0]
+        grants = {
+            state: _t007_issue(fixture, suffix=f"t009-{state}")
+            for state in ("pending", "reserved", "consumed", "revoked", "prepared")
+        }
+        _t007_issue(fixture, home_index=1, suffix="t009-other-home")
+        plan, grant = grants["reserved"]
+        store.reserve(grant.approval_id, plan, reservation_id="t009-held")
+        plan, grant = grants["consumed"]
+        store.consume(grant.approval_id, plan)
+        plan, grant = grants["prepared"]
+        store.reserve(grant.approval_id, plan, reservation_id="t009-committed")
+        request = await _t007_prepare_request(fixture, plan, grant)
+        request["reservation_id"] = "t009-committed"
+        delivery = store.prepare_delivery(**request)
+        revocations = [
+            store.revoke_consent(
+                grants[state][1].approval_id,
+                authority=fixture.homes[0].resident,
+                request_id=f"t009-revoke-{state}",
+            )
+            for state in ("revoked", "prepared")
+        ]
+        assert revocations[0].permit_ids == []
+        assert revocations[1].permit_ids == [delivery.permit.permit_id]
+        assert all(receipt.status == "revocation_pending" for receipt in revocations)
+        source = fixture.databases[0]
+        ledger = PhysicalIntentRepository(source, clock=fixture.clock)
+        for status in (PhysicalIntentStatus.CONFIRMED, PhysicalIntentStatus.UNKNOWN):
+            claim = await ledger.claim_for_dispatch(
+                request["intent"].model_copy(
+                    update={
+                        "idempotency_key": f"t009-ledger-{status.value}",
+                        "command_id": f"t009-ledger-{status.value}",
+                    }
+                )
+            )
+            await ledger.settle(intent=claim.intent, status=status)
+        source.connection.execute(
+            "UPDATE runtime_contract_floor SET checkpoint_id='t009-source-checkpoint'"
+        )
+        source.connection.commit()
+        expected = _t009_rows(source)
+        assert {table: len(rows) for table, rows in expected.items()} == _T009_EXPECTED_COUNTS
+        assert sorted(row[1] for row in expected["consent_control_heads"]) == [
+            "p04-home-a",
+            "p04-home-b",
+        ]
+        assert sorted(row[3] for row in expected["physical_intents"]) == [
+            "confirmed",
+            "dispatching",
+            "unknown",
+        ]
+        assert sorted(row[2] for row in expected["approval_reservations"]) == [
+            "committed",
+            "reserved",
+        ]
+        assert sum(row[5] is not None for row in expected["approval_grants"]) == 2
+        source_changes = source.connection.total_changes
+        async with connection_databases(tmp_path / "destination", "postgres") as databases:
+            destination, observer = databases
+            yield source, destination, observer, expected, delivery, revocations
+        assert _t009_rows(source) == expected
+        assert source.connection.total_changes == source_changes
+
+
+def _t009_assert_copy(report, observer, expected):
+    assert {table: report.table_counts[table] for table in expected} == _T009_EXPECTED_COUNTS
+    assert _t009_rows(observer) == expected
+    assert all(report.payload_digests[table] for table in expected)
+    observer.connection.rollback()
+
+
+async def test_t009_copy_reopen_reupgrade_preserves_consent(t009_migration, monkeypatch):
+    """Break: copy/reopen omits or rewrites P04 evidence, or old reader writes past floor4."""
+    import psycopg
+
+    from domoai.persistence import contract_compatibility
+    from domoai.persistence.repositories import ApprovalGrantRepository
+
+    source, destination, observer, expected, delivery, revocations = t009_migration
+    report = await migrate_sqlite_to_postgres(source, destination)
+    _t009_assert_copy(report, observer, expected)
+    await destination.close()
+    with monkeypatch.context() as prior_reader:
+        prior_reader.setattr(contract_compatibility, "SUPPORTED_RUNTIME_READER", 3)
+        for previous in (SQLiteDatabase(source.path), PostgresDatabase(destination.dsn)):
+            with pytest.raises(contract_compatibility.UnsupportedRuntimeContract):
+                await previous.initialize()
+            await previous.close()
+    await destination.initialize()
+    await destination.close()
+    await destination.open_existing()
+    assert _t009_rows(destination) == expected
+    repository = ApprovalGrantRepository(destination)
+    assert (
+        repository.get_delivery_receipt_sync(request_id="prepare-a", household_id="p04-home-a")
+        == delivery
+    )
+    for receipt in revocations:
+        assert repository.get_consent_revocation_sync(receipt.approval_id) == receipt
+    destination.connection.rollback()
+    # Constraints survive the copy and reupgrade; neither probe can alter evidence.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        destination.connection.execute(
+            "INSERT INTO consent_deliveries SELECT * FROM consent_deliveries"
+        )
+    destination.connection.rollback()
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        destination.connection.execute(
+            "INSERT INTO consent_deliveries "
+            "SELECT 't009-orphan', 'missing-grant', tenant_id, household_id, "
+            "'orphan-request', 'missing-intent', fingerprint, response FROM consent_deliveries"
+        )
+    destination.connection.rollback()
+    _t009_assert_copy(report, observer, expected)
+
+
+@pytest.mark.parametrize("fault", ["sql", "mismatch"])
+async def test_t009_late_copy_failure_rolls_back_and_retries(t009_migration, fault):
+    """Break: late delivery failure leaves consumed grants/intents/checkpoint partly copied."""
+    import psycopg
+
+    from domoai.persistence.postgres_migration import MigrationVerificationError
+
+    source, destination, observer, expected, _, _ = t009_migration
+    baseline = _t009_rows(observer)
+    observer.connection.rollback()
+    effect = (
+        "RAISE EXCEPTION 't009 late delivery failure';"
+        if fault == "sql"
+        else "NEW.response := NEW.response || ' '; RETURN NEW;"
+    )
+    destination.connection.execute(
+        "CREATE FUNCTION t009_delivery_fault() RETURNS trigger LANGUAGE plpgsql AS $$ "
+        "BEGIN "
+        "IF (SELECT COUNT(*) FROM approval_grants) <> 6 "
+        "OR (SELECT COUNT(*) FROM physical_intents) <> 3 "
+        "OR (SELECT COUNT(*) FROM consent_revocations) <> 2 THEN "
+        "RAISE EXCEPTION 't009 fixture did not reach late copy'; END IF; " + effect + " END $$"
+    )
+    destination.connection.execute(
+        "CREATE TRIGGER t009_delivery_fault BEFORE INSERT ON consent_deliveries "
+        "FOR EACH ROW EXECUTE FUNCTION t009_delivery_fault()"
+    )
+    destination.connection.commit()
+    error = psycopg.errors.RaiseException if fault == "sql" else MigrationVerificationError
+    message = "t009 late delivery failure" if fault == "sql" else "consent_deliveries"
+    with pytest.raises(error, match=message):
+        await migrate_sqlite_to_postgres(source, destination)
+    assert _t009_rows(observer) == baseline
+    observer.connection.rollback()
+    assert _t009_rows(source) == expected
+    destination.connection.execute("DROP TRIGGER t009_delivery_fault ON consent_deliveries")
+    destination.connection.execute("DROP FUNCTION t009_delivery_fault()")
+    destination.connection.commit()
+    report = await migrate_sqlite_to_postgres(source, destination)
+    _t009_assert_copy(report, observer, expected)
+
+
+async def test_t009_copy_conflict_preserves_confirmed_destination(t009_migration):
+    """Break: migration overwrites a confirmed receipt/checkpoint or commits preceding rows."""
+    from domoai.persistence.postgres_migration import MigrationConflict
+
+    source, destination, observer, expected, _, _ = t009_migration
+    destination.connection.execute(
+        "INSERT INTO consent_receipts VALUES (%s,%s,%s,%s,%s,%s)",
+        expected["consent_receipts"][0],
+    )
+    destination.connection.execute(
+        "UPDATE runtime_contract_floor SET checkpoint_id='t009-confirmed-destination'"
+    )
+    destination.connection.commit()
+    baseline = _t009_rows(observer)
+    observer.connection.rollback()
+    for _ in range(2):
+        with pytest.raises(MigrationConflict, match="consent_receipts"):
+            await migrate_sqlite_to_postgres(source, destination)
+        assert _t009_rows(observer) == baseline
+        observer.connection.rollback()
+        assert _t009_rows(source) == expected

@@ -40,9 +40,24 @@ def _wait_for_port(host: str, port: int, timeout: float = 20.0) -> None:
     raise AssertionError(f"MQTT port did not open: {host}:{port}")
 
 
+@pytest.fixture
+def mqtt_volumes(tmp_path: Path) -> Path:
+    """Keep disposable broker data and credentials separate from the local lab."""
+    override = tmp_path / "volumes.yaml"
+    namespace = f"domoai-mqtt-test-{os.getpid()}-{tmp_path.name.lower()}"
+    override.write_text(
+        "volumes:\n"
+        f"  mqtt-data:\n    name: {namespace}-data\n    external: false\n"
+        f"  mqtt-auth:\n    name: {namespace}-auth\n",
+        encoding="utf-8",
+    )
+    return override
+
+
 @pytest.mark.composition
-def test_local_broker_rejects_anonymous_and_accepts_configured_credentials(tmp_path: Path) -> None:
-    del tmp_path
+def test_local_broker_rejects_anonymous_and_accepts_configured_credentials(
+    mqtt_volumes: Path,
+) -> None:
     username = "domoai-test"
     password = f"ops006-test-{os.getpid()}"
     invalid_password = f"{password}-invalid"
@@ -52,7 +67,16 @@ def test_local_broker_rejects_anonymous_and_accepts_configured_credentials(tmp_p
         "DOMOAI_MQTT_PASSWORD": password,
         "DOMOAI_MQTT_HOST_PORT": "28883",
     }
-    compose = ["docker", "compose", "-p", project, "-f", "dev/lab/compose.yaml"]
+    compose = [
+        "docker",
+        "compose",
+        "-p",
+        project,
+        "-f",
+        "dev/lab/compose.yaml",
+        "-f",
+        str(mqtt_volumes),
+    ]
     try:
         up = subprocess.run(
             [*compose, "up", "-d", "mqtt"],
@@ -207,6 +231,7 @@ def test_shared_overlay_fails_closed_without_each_tls_input(tmp_path: Path) -> N
 @pytest.mark.composition
 def test_shared_overlay_accepts_authenticated_tls_and_has_no_remote_plaintext(
     tmp_path: Path,
+    mqtt_volumes: Path,
 ) -> None:
     username = "domoai-test"
     password = f"ops006-test-{os.getpid()}"
@@ -256,6 +281,8 @@ def test_shared_overlay_accepts_authenticated_tls_and_has_no_remote_plaintext(
         "dev/lab/compose.yaml",
         "-f",
         "dev/lab/compose.shared-mqtt-tls.yaml",
+        "-f",
+        str(mqtt_volumes),
     ]
     try:
         up = subprocess.run(

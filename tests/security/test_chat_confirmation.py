@@ -89,8 +89,7 @@ async def client(server: Any, human: Human | None = None, *, token: bool = True)
 
 
 async def setup(*, chat: bool = True) -> tuple[DomoticsMcpContext, Any, dict[str, Any]]:
-    context = await build_confirmation_required_context()
-    context.approval_store = ApprovalStore()
+    context = await build_confirmation_required_context(approval_store=ApprovalStore())
     context.chat_confirmation = chat  # type: ignore[attr-defined]
     server = create_domotics_server(context)
     validated = await _validated_plan_requiring_confirmation(server, context)
@@ -353,8 +352,9 @@ async def test_a_confirmed_revocation_blocks_the_grant(tmp_path: Path) -> None:
     from domoai.domain.errors import DomainError, ErrorCode
 
     async with durable(tmp_path) as repository:
-        context = await build_confirmation_required_context()
-        context.approval_store = ApprovalStore(persistence=repository)
+        context = await build_confirmation_required_context(
+            approval_store=ApprovalStore(persistence=repository)
+        )
         context.chat_confirmation = True  # type: ignore[attr-defined]
         server = create_domotics_server(context)
         validated = await _validated_plan_requiring_confirmation(server, context)
@@ -378,8 +378,9 @@ async def test_a_confirmed_revocation_blocks_the_grant(tmp_path: Path) -> None:
 
 async def test_a_declined_revocation_changes_nothing(tmp_path: Path) -> None:
     async with durable(tmp_path) as repository:
-        context = await build_confirmation_required_context()
-        context.approval_store = ApprovalStore(persistence=repository)
+        context = await build_confirmation_required_context(
+            approval_store=ApprovalStore(persistence=repository)
+        )
         context.chat_confirmation = True  # type: ignore[attr-defined]
         server = create_domotics_server(context)
         validated = await _validated_plan_requiring_confirmation(server, context)

@@ -62,6 +62,8 @@ class Settings(StrictModel):
     metric_history_max_samples: int = Field(default=1000, gt=0)
     privacy_retention_days: int = Field(default=90, ge=1, le=3650)
     mcp_json_response: bool = True
+    mcp_chat_confirmation: bool = False
+    mcp_chat_confirmation_timeout_seconds: float = Field(default=120, ge=10, le=600)
     mcp_server_sent_events: bool = False
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, gt=0)
     database_path: Path = Path("data/domoai.sqlite3")
@@ -283,6 +285,10 @@ class Settings(StrictModel):
             )
 
     def _validate_mcp_configuration(self) -> None:
+        if self.mcp_chat_confirmation:
+            if "mcp_json_response" in self.model_fields_set and self.mcp_json_response:
+                raise ValueError("chat confirmation requires mcp_json_response=False")
+            self.mcp_json_response = False
         if not _MCP_PATH_PATTERN.fullmatch(self.mcp_path) or any(
             segment in {".", ".."} for segment in self.mcp_path.split("/")
         ):
@@ -414,7 +420,13 @@ class Settings(StrictModel):
                 os.getenv("DOMOAI_METRIC_HISTORY_MAX_SAMPLES", "1000")
             ),
             privacy_retention_days=int(os.getenv("DOMOAI_PRIVACY_RETENTION_DAYS", "90")),
-            mcp_json_response=boolean("DOMOAI_MCP_JSON_RESPONSE", True),
+            mcp_json_response=boolean(
+                "DOMOAI_MCP_JSON_RESPONSE", not boolean("DOMOAI_MCP_CHAT_CONFIRMATION")
+            ),
+            mcp_chat_confirmation=boolean("DOMOAI_MCP_CHAT_CONFIRMATION"),
+            mcp_chat_confirmation_timeout_seconds=float(
+                os.getenv("DOMOAI_MCP_CHAT_CONFIRMATION_TIMEOUT_SECONDS", "120")
+            ),
             mcp_server_sent_events=boolean("DOMOAI_MCP_SERVER_SENT_EVENTS", False),
             mcp_max_request_body_size=int(
                 os.getenv("DOMOAI_MCP_MAX_REQUEST_BODY_SIZE", str(4 * 1024 * 1024))

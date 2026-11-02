@@ -19,6 +19,7 @@ from domoai.domain.p1_completion import (
     ProfileResolutionStatus,
 )
 from domoai.runtime.connection_provider_loader import ConnectionProviderLoadDiagnostic
+from tests.fixtures.modbus import mapping_payload
 
 ROOT = Path(__file__).parents[2]
 
@@ -98,11 +99,14 @@ def _mqtt_preview() -> MqttDiscoveryPreview:
         (
             "modbus-profile",
             lambda: ModbusProfile.model_validate(
-                json.loads(
-                    (ROOT / "data/modbus-profiles/fixture-dimmer.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
+                {
+                    "profile_id": "fixture-dimmer",
+                    "profile_version": "1.0.0",
+                    "vendor_name": "Fixture Modbus",
+                    "product_code": "Dimmer 1",
+                    "mapping": mapping_payload(count=1),
+                    "provenance": "repo:tests/fixtures/modbus.py",
+                }
             ),
         ),
         ("mqtt-discovery-preview", _mqtt_preview),

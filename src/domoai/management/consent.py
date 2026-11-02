@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import anyio
 
 from domoai.application.authority import AuthorityPolicy
+from domoai.application.client_tokens import CredentialSnapshot, StaticBearerTokenVerifier
 from domoai.application.household_consent import build_consent_view
 from domoai.config.settings import Settings
 from domoai.domain.automation import AutomationRule
@@ -33,7 +34,6 @@ from domoai.domain.household_consent import (
 from domoai.domain.household_preferences import PreferenceProfile
 from domoai.domain.models import AuthorityContext, Device, Plan, PrincipalRole
 from domoai.management.auth import is_loopback_host
-from domoai.mcp.auth import CredentialSnapshot, StaticBearerTokenVerifier
 from domoai.runtime.approval_store import (
     ApprovalAssertion,
     ApprovalStore,

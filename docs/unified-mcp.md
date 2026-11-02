@@ -29,6 +29,37 @@ qualification.
 Generic MQTT uses the same semantic catalog and plan lifecycle as every other
 adapter; it does not add an MQTT-specific MCP operation.
 
+## Optional confirmation through the client chat
+
+Set `DOMOAI_MCP_CHAT_CONFIRMATION=true` to let `request_approval` ask the
+authenticated client for an explicit form response. The client must support
+form elicitation and show the Spanish effects, schedule, expiry and verification
+code to the person. A matching code and explicit approval issue a single-use,
+digest-bound grant. The server identifies the approving **client**, not a
+verified human; actual dialogue presentation must be qualified with each client.
+
+Chat mode selects `mcp_json_response=False` when not explicitly configured.
+Setting `DOMOAI_MCP_JSON_RESPONSE=true` with chat mode is rejected. Elicitation
+travels on the POST response SSE stream; the optional GET stream remains
+independent. This transport change also changes the qualification configuration
+digest, so qualify the resulting configuration again. Configured deployments
+require durable approval storage and cannot combine chat mode with operator
+principal/assertion providers.
+
+`DOMOAI_MCP_CHAT_CONFIRMATION_TIMEOUT_SECONDS` defaults to 120 (range 10–600).
+Missing capability/authentication, timeout, malformed replies and changed intent
+issue nothing. One dialogue runs per household; refusal/cancellation starts a
+60-second cooldown. Summaries reject unknown devices, unsafe/oversized fields
+and plans with more than ten effects. Bundles and standing recurrence approvals
+are unavailable through this mode. Immediate and scheduled plans are supported.
+The finite four-digit code space fails closed after 9,000 dialogues per server
+context; restarting the server creates a new confirmation context.
+
+Only chat mode exposes `revoke_approval`. It requires the same scope as approval,
+asks for confirmation and writes a durable `revocation_pending` receipt. That
+receipt does not assert that an already dispatched physical effect was stopped.
+Without the flag, the existing tool catalog and approval behavior are unchanged.
+
 ## Contract
 
 - MCP endpoint: `POST` and `GET` at the configured `DOMOAI_MCP_PATH` (default

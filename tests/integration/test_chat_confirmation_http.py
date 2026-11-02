@@ -16,14 +16,14 @@ import uvicorn
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import ElicitResult
-from tests.integration.test_mcp_gateway_http import (
-    _shutdown_gateway_server,
-    _wait_for_server,
-)
 
 from domoai.config.settings import Settings
 from domoai.domain.models import Plan
 from domoai.mcp.gateway import build_gateway
+from tests.integration.test_mcp_gateway_http import (
+    _shutdown_gateway_server,
+    _wait_for_server,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -50,6 +50,9 @@ async def test_the_gateway_delivers_the_confirmation_to_the_client_and_issues_th
                         "client_id": "chat-client",
                         "token_hash": hashlib.sha256(TOKEN.encode()).hexdigest(),
                         "scopes": ["read", "mutate"],
+                        "tenant_id": "tenant-a",
+                        "household_ids": ["home-a"],
+                        "roles": ["operator"],
                     }
                 ]
             }

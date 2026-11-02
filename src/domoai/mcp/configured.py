@@ -56,6 +56,10 @@ async def build_configured_server(
     client_token_verifier: StaticBearerTokenVerifier | None = None,
 ) -> tuple[RuntimeComposition, FastMCP]:
     resolved_settings = settings or Settings.from_environment()
+    if resolved_settings.mcp_chat_confirmation and (
+        operator_principal_provider is not None or operator_approval_assertion_provider is not None
+    ):
+        raise ValueError("chat confirmation cannot be combined with operator providers")
     # Validate deployment credentials before build_runtime opens SQLite,
     # claims ownership or connects a provider. The server builder validates
     # again when it creates the auth middleware; this early check prevents a
@@ -79,6 +83,9 @@ async def build_configured_server(
         require_configured_adapter=require_configured_adapter,
         control_plane_mode=control_plane_mode,
     )
+    if resolved_settings.mcp_chat_confirmation and not runtime.approval_store.durable:
+        await runtime.close()
+        raise ValueError("chat confirmation requires durable approval storage")
     optimization_service = OptimizationService(
         runtime.registry,
         runtime.plan_service,
@@ -141,6 +148,9 @@ async def build_configured_server(
         bundle_commit_service=runtime.bundle_commit_service,
         operator_principal_provider=runtime.operator_principal_provider,
         operator_approval_assertion_provider=runtime.operator_approval_assertion_provider,
+        chat_confirmation=runtime.settings.mcp_chat_confirmation,
+        chat_confirmation_timeout_seconds=runtime.settings.mcp_chat_confirmation_timeout_seconds,
+        chat_confirmation_timezone=runtime.settings.solar_timezone,
         blocking_worker=energy_worker,
         provider_timeout_seconds=runtime.settings.provider_worker_timeout_seconds,
         clock=runtime.clock,

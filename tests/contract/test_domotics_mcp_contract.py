@@ -838,7 +838,10 @@ async def test_two_mcp_clients_receive_equivalent_contract_results() -> None:
     assert first_result == second_result
 
 
-async def build_confirmation_required_context() -> DomoticsMcpContext:
+async def build_confirmation_required_context(
+    *,
+    approval_store: ApprovalStore | None = None,
+) -> DomoticsMcpContext:
     adapter = SimulatedHomeAdapter()
     registry = DeviceRegistry()
     state_store = StateStore()
@@ -853,7 +856,9 @@ async def build_confirmation_required_context() -> DomoticsMcpContext:
         )
     ]
     plan_service = PlanService(registry, state_store, PolicyEngine(policies), audit)
-    approval_store = ApprovalStore(operator_token=OPERATOR_TOKEN, allow_legacy_token=True)
+    approval_store = approval_store or ApprovalStore(
+        operator_token=OPERATOR_TOKEN, allow_legacy_token=True
+    )
     facade = DomoticsFacade(
         plan_service,
         PlanExecutor(

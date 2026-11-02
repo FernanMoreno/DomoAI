@@ -351,8 +351,8 @@ class _ResidentDispatchMiddleware:
 class _RejectServerSentEventsMiddleware:
     """Keep the MCP GET endpoint compliant without opening an unbounded SSE stream.
 
-    DomoAI currently sends a response to every client request and does not send
-    unsolicited server-to-client messages. The MCP Streamable HTTP contract
+    DomoAI replies to client requests; opt-in chat confirmation also sends
+    elicitation on the POST response stream. The MCP Streamable HTTP contract
     permits that mode to answer GET with 405. The pinned MCP/sse-starlette
     combination otherwise creates a receive stream for every client GET and
     does not close it on the normal disconnect path. SSE remains an explicit

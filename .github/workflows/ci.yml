@@ -96,6 +96,8 @@ jobs:
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync
       - run: uv run pytest tests/integration --junitxml=junit-integration.xml
+      - name: Chat confirmation security regressions
+        run: uv run pytest tests/security/test_chat_confirmation.py tests/security/test_chat_confirmation_hardening.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -133,6 +135,11 @@ jobs:
       - run: uv sync
       # This broad suite retains explicit skips for lab-only infrastructure.
       # The mandatory representative Docker smoke is enforced below.
+      - name: Install browser test dependencies
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
       - run: uv run pytest tests/composition --junitxml=junit-composition.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()

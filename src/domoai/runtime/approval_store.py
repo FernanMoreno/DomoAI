@@ -355,6 +355,18 @@ class ApprovalStore:
         self._persistence = persistence
         self._operational_metrics = operational_metrics
 
+    def now(self) -> datetime:
+        """Use the authority store's clock for confirmation and grant expiry."""
+        return self._clock.now()
+
+    def get_grant(self, approval_id: str) -> ApprovalGrant | None:
+        """Read an unrevoked grant; callers still enforce its authority scope."""
+        return self._load_grant(approval_id)
+
+    def is_consumed(self, approval_id: str) -> bool:
+        """Report whether the grant was consumed, without granting authority."""
+        return self._is_consumed(approval_id)
+
     def prepare_delivery(self, approval_id: str, plan: Plan, **request: Any) -> DeliveryReceipt:
         """Own the storage transaction; return only after all preparation evidence commits."""
         if self._persistence is None:

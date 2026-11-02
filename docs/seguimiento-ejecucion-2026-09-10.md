@@ -319,3 +319,15 @@ No prueba inventario completo de peers activos, separación vigente, reload D2, 
 T011-C1 implementa admisión local con ficheros y verificadores reales, snapshots de peers y origen/host canónicos, sin callback/flag sintético: **82 GREEN** C1, B 111, A 67, legacy 42 y seguridad **279 GREEN / 1 precursor C**. El primer review halló P2 bilateral de hashes inactivos; R1 añade el espejo peer disabled/revoked/expired con residente válido y procedencia distinta. Filtros mutados de residente y peer generan tres fallos causales cada uno y restauran 82 GREEN. R1 Astra PASS WITH RISKS P0/P1/P2=0; estáticos/diff pasan. Informes `.superpowers/sdd/tasks/p04-t011-c1-{writer,review}.md` (writer `03d387d379f651d35bcd0438fc9f632f9a18b2f460509d1490087ebed4847643`; review `c96aa89034d348f3ebf329cd66cf0f6caf37f993bf5a848b738c34d133f24abc`).
 
 No activa HTTP, sesión, review, challenge, assertion, grant o delivery y no acredita inventario productivo completo/reload; T011/T012 siguen pendientes. El ledger se mantiene **292/553; P04 9/28**.
+
+## P04 — T011 C2–C7 y C8 (confirmación por chat), 2026-11-02
+
+Este apartado se reconstruye del historial git, no de los informes SDD (`.superpowers/sdd/tasks/` no está en el repositorio). No cambia el ledger **292/553; P04 9/28**: T011–T014 y P04 siguen sin aceptación formal.
+
+**C2–C7** (`ddf2657`): consentimiento del hogar con sesión residente, revisión con challenge de un solo uso, decisiones aprobar/rechazar/revocar, recibos durables idempotentes, cabeza de control durable, listado de aprobaciones activas y huella de revocación, composición y despacho en el gateway (`management/consent.py`, `mcp/gateway.py`, `mcp/consent_review_source.py`), migración `026_household_consent.sql`, esquemas JSON `household-consent-{view,decision}` y tests unitarios, de integración, contrato y seguridad. Verificado el 2026-11-02: 2225 tests pasan con `-k "not postgres"`; los 49 casos PostgreSQL no se ejecutaron (sin Docker en el entorno).
+
+**C8** (`e544d6c`, `d8d368c`, PR #26 en `main`): confirmación humana por el chat del cliente MCP mediante elicitation (`mcp/chat_confirmation.py`, `mcp/domotics_server.py`), extracción de `application/client_tokens.py` desde `mcp/auth.py`, ajustes CI de composición Docker y documentación en `docs/unified-mcp.md`. El grant emitido lleva `approved_by` `chat:<client>`, `authentication_context` `mcp_elicitation`, un solo uso y `expires_at`; el nuevo test `test_the_issued_grant_is_attributed_single_use_and_bounded` (`d8dc230`) lo comprueba. Los 36 tests de seguridad de C8 pasan.
+
+**Revisión RED de C8 (veredicto FAIL previo):** los dos P0 (store reemplazado, tenant del cliente HTTP) ya no se reproducen en el código actual; los P1 de formularios laxos y de `revoke_approval` están cubiertos en `test_chat_confirmation_hardening.py`. Sin comprobar: `_meta` falsificado, test de "código fresco" posiblemente vacuo y el nombre del setting frente al freeze.
+
+**Pendiente:** revisión independiente del source posterior a C7, verificación manual con un cliente MCP real, PostgreSQL/Testcontainers para C2–C8 y aceptación de T011–T014.
